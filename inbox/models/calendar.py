@@ -27,12 +27,14 @@ class Calendar(MailSyncBase, HasPublicID):
     __table_args__ = (UniqueConstraint('namespace_id', 'provider_name',
                                        'name', 'uid', name='uuid'),)
 
-    def __init__(self, uid=None, public_id=None, **kwargs):
-        if not uid and not public_id:
-            self.public_id = self.uid = generate_public_id()
-        elif not uid:
-            self.uid = generate_public_id()
-        else:
-            self.uid = uid
+    def __init__(self, uid=None, **kwargs):
+        uid = uid or generate_public_id()
         for key, value in kwargs.items():
             setattr(self, key, value)
+
+        MailSyncBase.__init__(self)
+
+    def update(self, session, calendar):
+        self.name = calendar['name']
+        self.read_only = calendar['read_only']
+        self.description = calendar['description']

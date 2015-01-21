@@ -1,36 +1,35 @@
 """Provide Google Calendar events."""
 import httplib2
-import json
-import dateutil.parser as date_parser
-from datetime import datetime
 
 from apiclient.discovery import build
-from apiclient.errors import HttpError
 from oauth2client.client import OAuth2Credentials
-from oauth2client.client import AccessTokenRefreshError
 
 from inbox.basicauth import (ConnectionError, ValidationError, OAuthError)
-from inbox.models import Event, Calendar
+from inbox.models.event import Event
 from inbox.models.session import session_scope
 from inbox.models.backends.gmail import GmailAccount
 from inbox.models.backends.oauth import token_manager
 from inbox.auth.gmail import (OAUTH_CLIENT_ID,
                               OAUTH_CLIENT_SECRET,
                               OAUTH_ACCESS_TOKEN_URL)
-from inbox.events.util import MalformedEventError, parse_datetime
-from inbox.events.base import BaseEventProvider
-
-SOURCE_APP_NAME = 'InboxApp Calendar Sync Engine'
+from inbox.events.util import MalformedEventError, parse_datetime, parse_date
+from inbox.log import get_logger
+logger = get_logger()
 
 
 # Silence the stupid Google API client logger
 import logging
 apiclient_logger = logging.getLogger('googleapiclient.discovery')
 apiclient_logger.setLevel(40)
+SOURCE_APP_NAME = 'InboxApp Calendar Sync Engine'
+
+STATUS_MAP = {'accepted': 'yes', 'needsAction': 'noreply',
+              'declined': 'no', 'tentative': 'maybe'}
 
 
-class GoogleEventsProvider(BaseEventProvider):
-    """A utility class to fetch and parse Google calendar data for the
+class GoogleEventsProvider(object):
+    """
+    A utility class to fetch and parse Google calendar data for the
     specified account using the Google Calendar API.
 
     Parameters
@@ -47,9 +46,12 @@ class GoogleEventsProvider(BaseEventProvider):
     """
     PROVIDER_NAME = 'google'
 
-    # A mapping from Google's status to our own
-    status_map = {'accepted': 'yes', 'needsAction': 'noreply',
-                  'declined': 'no', 'tentative': 'maybe'}
+    def __init__(self, account_id, namespace_id):
+        self.account_id = account_id
+        self.namespace_id = namespace_id
+
+        self.log = logger.new(account_id=account_id, component='event sync',
+                              provider=self.PROVIDER_NAME)
 
     def _get_google_service(self):
         """Return the Google API client."""
@@ -57,8 +59,7 @@ class GoogleEventsProvider(BaseEventProvider):
             try:
                 account = db_session.query(GmailAccount).get(self.account_id)
                 client_id = account.client_id or OAUTH_CLIENT_ID
-                client_secret = (account.client_secret or
-                                 OAUTH_CLIENT_SECRET)
+                client_secret = (account.client_secret or OAUTH_CLIENT_SECRET)
 
                 self.email = account.email_address
 
@@ -89,6 +90,7 @@ class GoogleEventsProvider(BaseEventProvider):
                 db_session.add(account)
                 db_session.commit()
                 raise ValidationError
+
             except ConnectionError:
                 self.log.error('Connection error')
                 account.sync_state = 'connerror'
@@ -96,167 +98,135 @@ class GoogleEventsProvider(BaseEventProvider):
                 db_session.commit()
                 raise ConnectionError
 
-    def parse_event(self, event, cal_info):
-        """Constructs an Event object from a Google calendar entry.
+    def get_calendars(self, page_token=None, max_results=250):
+        calendars = []
+
+        service = self._get_google_service()
+
+        while True:
+            calendar_list = service.calendarList().list(
+                showDeleted=True,
+                pageToken=page_token,
+                maxResults=max_results).execute()
+
+            calendars += calendar_list['items']
+            page_token = calendar_list.get('nextPageToken')
+
+            if page_token is None:
+                return [self._parse_calendar_response(c) for c in calendars]
+
+    def _parse_calendar(_responseself, calendar):
+        uid = calendar['id']
+        name = calendar['summary']
+        read_only = calendar['accessRole'] == 'reader'
+        description = calendar.get('description', None)
+        deleted = calendar.get('deleted', False)
+
+        return dict(uid=uid, name=name, read_only=read_only,
+                    description=description, deleted=deleted)
+
+    def get_events(self, calendar_uid, sync_from_time=None):
+        """
+        Fetch the events for an individual calendar.
 
         Parameters
         ----------
-        event: gdata.calendar.entry.CalendarEntry
-            The Google calendar entry to parse.
+            calendar_uid: the google identifier for the calendar.
+                Usually username@gmail.com for the primary calendar, otherwise
+                random-alphanumeric-address@google.com
+
+        """
+        events = []
+        page_token = None
+        service = self._get_google_service()
+
+        while True:
+            event_list = service.events().list(
+                calendarId=calendar_uid,
+                updatedMin=sync_from_time,
+                showDeleted=True,
+                pageToken=page_token,
+                maxResults=2500).execute()
+
+            events += event_list['items']
+            page_token = event_list.get('nextPageToken')
+
+            if page_token is None:
+                return [self._parse_event_response(e) for e in events]
+
+    def _parse_event_response(self, event):
+        """
+        Constructs an Event object from a Google calendar entry.
+
+        Parameters
+        ----------
+        event: dict
 
         Returns
         -------
-        ..models.tables.base.Event
-            A corresponding Inbox Event instance.
+        A corresponding Event instance.
 
         Raises
         ------
         MalformedEventError
            If the calendar data could not be parsed correctly.
+
         """
         try:
             uid = str(event['id'])
-
             # The entirety of the raw event data in json representation.
             raw_data = str(event)
+            title = event['summary']
+            # Timing data
+            _start = event['start']
+            start = _parse_start_end(_start)
 
-            # 'cancelled' events signify those instances within a series
-            # that have been cancelled (for that given series). As such,
-            # since full support for dealing with single instances within
-            # a reocurring event series is not added, right now we just
-            # ignore the event. -cg3
-            # TODO: Add support for reocurring events (see ways to handle
-            # this generically across providers)
-            if 'status' in event and event['status'] == 'cancelled':
-                return None
+            _end = event['end']
+            end = _parse_start_end(_end)
 
-            title = event.get('summary', '')
+            # STOPSHIP(emfree): why is this the case?
+            all_day = (_start.get('date') and _end.get('date'))
+
             description = event.get('description', None)
             location = event.get('location', None)
-            all_day = False
-            read_only = True
-            is_owner = False
 
-            start = event['start']
-            end = event['end']
-            g_recur = event.get('recurrence', None)
+            # Ownership, read_only information
+            creator = event.get('creator', None)
 
-            recurrence = str(g_recur) if g_recur else None
+            owner = u'{} <{}>'.format(
+                creator.get('displayName', ''), creator.get('email', '')) if \
+                creator else ''
 
-            busy = event.get('transparency', True)
-            if busy == 'transparent':
-                busy = False
+            is_owner = True if (creator and creator.get('self')) else False
+            read_only = False if (is_owner or event.get('guestsCanModify')) \
+                else True
 
-            reminders = []
-            if 'dateTime' in start:
-
-                if 'reminders' in event:
-                    if event['reminders']['useDefault']:
-                        reminder_source = cal_info['defaultReminders']
-                    elif 'overrides' in event['reminders']:
-                        reminder_source = event['reminders']['overrides']
-                    else:
-                        reminder_source = None
-
-                    if reminder_source:
-                        for reminder in reminder_source:
-                            reminders.append(reminder['minutes'])
-
-                try:
-                    start = parse_datetime(start['dateTime'])
-                    end = parse_datetime(end['dateTime'])
-                except TypeError:
-                    self.log.error('Invalid start: {} or end: {}'
-                                   .format(start['dateTime'],
-                                           end['dateTime']))
-                    raise MalformedEventError()
-
-            else:
-                start = date_parser.parse(start['date'])
-                end = date_parser.parse(end['date'])
-                all_day = True
-
-            reminders = str(reminders) if reminders else None
-
-            # Convert google's notion of status into our own
             participants = []
-            for attendee in event.get('attendees', []):
-                g_status = attendee.get('responseStatus')
-                if g_status not in GoogleEventsProvider.status_map:
-                    self.log.error("Unknown event responseStatus: {}"
-                                   .format(g_status))
-                    raise MalformedEventError()
-                status = GoogleEventsProvider.status_map[g_status]
+            attendees = event.get('attendees', [])
+            for attendee in attendees:
+                status = STATUS_MAP.get(attendee.get['responseStatus'])
+                p = dict(email_address=attendee.get('email'),
+                         name=attendee.get('displayName'),
+                         status=status,
+                         notes=attendee.get('comment'))
+                participants.append(p)
 
-                dct = {'status': status}
-
-                email = attendee.get('email')
-                if email:
-                    dct['email'] = email
-
-                name = attendee.get('displayName')
-                if name:
-                    dct['name'] = name
-
-                if 'additionalGuests' in attendee:
-                    dct['guests'] = attendee['additionalGuests']
-                elif 'comment' in attendee:
-                    dct['notes'] = attendee['comment']
-
-                participants.append(dct)
-
-            if 'guestsCanModify' in event:
-                read_only = False
-            owner = ''
-            if 'creator' in event:
-                creator = event['creator']
-                if 'self' in creator:
-                    is_owner = True
-                    read_only = False
-
-                owner = u'{} <{}>'.format(creator.get('displayName', ''),
-                                          creator.get('email', ''))
-
-        except (KeyError, AttributeError) as e:
-            raise MalformedEventError(e)
+        except (KeyError, AttributeError):
+            # STOPSHIP(emfree): LOL WTF?
+            raise MalformedEventError()
 
         return Event(namespace_id=self.namespace_id,
                      uid=uid,
-                     provider_name=self.PROVIDER_NAME,
                      raw_data=raw_data,
                      title=title,
                      description=description,
                      location=location,
-                     reminders=reminders,
-                     recurrence=recurrence,
                      start=start,
                      end=end,
-                     owner=owner,
-                     is_owner=is_owner,
-                     busy=busy,
                      all_day=all_day,
+                     owner=owner,
                      read_only=read_only,
-                     source='remote',
                      participants=participants)
-
-    def create_attendee(self, participant):
-        inv_status_map = {value: key for key, value in
-                          GoogleEventsProvider.status_map.iteritems()}
-
-        att = {}
-        if 'name' in participant:
-            att["displayName"] = participant['name']
-
-            if 'status' in participant:
-                att["responseStatus"] = inv_status_map[participant['status']]
-
-            if 'email' in participant:
-                att["email"] = participant['email']
-
-            if 'guests' in participant:
-                att["additionalGuests"] = participant['guests']
-
-        return att
 
     def dump_event(self, event):
         """Convert an event db object to the Google API JSON format."""
@@ -278,96 +248,38 @@ class GoogleEventsProvider(BaseEventProvider):
             dump["end"] = {"dateTime": event.end.isoformat('T'),
                            "timeZone": "UTC"}
 
-        if len(event.participants) > 0:
-            attendees = [self.create_attendee(participant) for participant
+        if event.participants:
+            attendees = [self._create_attendee(participant) for participant
                          in event.participants]
             dump["attendees"] = [attendee for attendee in attendees
                                  if attendee]
 
         return dump
 
-    def fetch_calendar_items(self, provider_calendar_name, calendar_id,
-                             sync_from_dt=None):
-        """Fetch the events for an individual calendar.
-        parameters:
-            calendarId: the google identifier for the calendar. Usually,
-                username@gmail.com for the primary calendar otherwise
-                random-alphanumeric-address@google.com
-            calendar_id: the id of the calendar in our db.
+    def _create_attendee(self, participant):
+        inv_status_map = {value: key for key, value in
+                          STATUS_MAP.iteritems()}
 
-        This function yields tuples to fetch_items. These tuples are eventually
-        consumed by base_poll in inbox.sync.base_sync.
-        """
-        service = self._get_google_service()
-        # If applicable, only fetch results that have changed since we last
-        # synced.
-        kwargs = {}
-        if sync_from_dt:
-            # convert date to ISO 8601 format
-            kwargs = {'updatedMin': datetime.isoformat(sync_from_dt) + 'Z'}
-        try:
-            resp = service.events().list(
-                calendarId=provider_calendar_name, **kwargs).execute()
-        except HttpError as e:
-            error = json.loads(e.content)
-            if error.get('error', {}).get('code') == 410:
-                # Minimum modification too far in the past: sync again.
-                # https://developers.google.com/google-apps/calendar/v3/sync
-                del kwargs['updatedMin']
-                resp = service.events().list(
-                    calendarId=provider_calendar_name, **kwargs).execute()
-            else:
-                raise
+        att = {}
+        if 'name' in participant:
+            att["displayName"] = participant['name']
 
-        extra = {k: v for k, v in resp.iteritems() if k != 'items'}
-        raw_events = resp['items']
-        # The Google calendar API may return paginated results; make sure we
-        # get all of them.
-        while 'nextPageToken' in resp:
-            resp = service.events().list(
-                calendarId=provider_calendar_name,
-                pageToken=resp['nextPageToken'],
-                **kwargs).execute()
-            raw_events += resp['items']
+            if 'status' in participant:
+                att["responseStatus"] = inv_status_map[participant['status']]
 
-        for event in raw_events:
-            yield (calendar_id, event, extra)
+            if 'email' in participant:
+                att["email"] = participant['email']
 
-    def fetch_items(self, sync_from_dt=None):
-        """Fetch all events for all calendars. This function proxies
-        fetch_calendar_items and yields the results to inbox.sync.base_sync."""
+            if 'guests' in participant:
+                att["additionalGuests"] = participant['guests']
 
-        service = self._get_google_service()
-        try:
-            calendars = service.calendarList().list().execute()['items']
-        except AccessTokenRefreshError:
-            self.log.error("Invalid user credentials given")
-            with session_scope() as db_session:
-                account = db_session.query(GmailAccount).get(self.account_id)
-                account.mark_invalid()
-                db_session.add(account)
-                db_session.commit()
-            raise ValidationError
-        except HttpError as e:
-            self.log.warn("Error retrieving events",
-                          message=str(e))
-            return
+        return att
 
-        for response_calendar in calendars:
-            # update the calendar
-            with session_scope() as db_session:
-                # FIXME: refactor this to take a db session.
-                calendar_id = self.get_calendar_id(
-                    response_calendar['id'],
-                    description=response_calendar['summary'])
-                # Update calendar statuses. They may have changed.
-                calendar = db_session.query(Calendar).get(calendar_id)
-                if response_calendar['accessRole'] == 'reader':
-                    calendar.read_only = True
 
-                calendar_id = calendar.id
+def _parse_start_end(field):
+    dt = field.get('dateTime')
+    # STOPSHIP(emfree) do we need to parse the timezone?
+    #tz = field.get('timeZone')
+    date = field.get('date')
 
-            for item in self.fetch_calendar_items(
-                    response_calendar['id'], calendar_id,
-                    sync_from_dt=sync_from_dt):
-                yield item
+    return parse_datetime(dt) if dt else parse_date(date)
