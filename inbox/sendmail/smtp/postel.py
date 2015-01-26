@@ -205,17 +205,14 @@ class BaseSMTPClient(object):
             with self._get_connection() as smtpconn:
                 failures = smtpconn.sendmail(self.email_address, recipients,
                                              msg)
-        # Sent to none successfully
+            # Sent to none successfully
         except smtplib.SMTPRecipientsRefused:
-            raise SendError('Sending to all recipients failed',
-                            exception='Refused')
+            raise SendError('Refused', failures=failures)
         except smtplib.SMTPException as e:
-            raise SendError('Sending to all recipients failed',
-                            exception=str(e))
+            raise SendError('Sending failed: Exception {0}'.format(e))
         # Send to at least one failed
         if failures:
-            raise SendError('Sending to atleast one recipent failed',
-                            failures=failures)
+            raise SendError('Send failed', failures=failures)
 
         # Sent to all successfully
         self.log.info('Sending successful', sender=self.email_address,
