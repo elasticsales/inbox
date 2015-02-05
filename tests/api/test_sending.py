@@ -264,6 +264,20 @@ def test_reply_headers_set(patch_smtp, api_client, example_draft):
     assert 'References' in parsed.headers
 
 
+def test_message_encoded_as_b64_utf8(patch_smtp, api_client):
+    draft = {
+        'to': [{'email': 'bob@foocorp.com'}],
+        'subject': 'greetings',
+        'body': '<html><body>hello there</body></html>'
+    }
+    api_client.post_data('/send', draft)
+    _, msg = patch_smtp[-1]
+    parsed = mime.from_string(msg)
+    for part in parsed.parts:
+        assert part.content_encoding.value == 'base64'
+        assert part.content_type.get_charset() == 'utf-8'
+
+
 def test_draft_not_persisted_if_sending_fails(recipients_refused, api_client,
                                               db):
     api_client.post_data('/send', {'to': [{'email': 'bob@foocorp.com'}],

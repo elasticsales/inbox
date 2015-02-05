@@ -37,7 +37,7 @@ setup(
         "futures>=2.1.3",
         "Flask-RESTful>=0.2.12",
         "pynacl>=0.2.3",
-        "flanker>=0.4.26",
+        "flanker>=0.4.27",
         "httplib2>=0.8",
         "google-api-python-client>=1.2",
         "oauth2client==1.3",
