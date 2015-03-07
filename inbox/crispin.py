@@ -140,6 +140,7 @@ class CrispinConnectionPool(geventconnpool.ConnectionPool):
             self.provider_info = account.provider_info
             self.imap_endpoint = account.imap_endpoint
             self.sync_state = account.sync_state
+            self.auth_handler = account.auth_handler
 
             if self.provider_name == 'gmail':
                 self.client_cls = GmailCrispinClient
@@ -177,11 +178,9 @@ class CrispinConnectionPool(geventconnpool.ConnectionPool):
         # Ensure that connections are initialized serially, so as not to use
         # many db sessions on startup.
         with self._new_conn_lock as _:
-            auth_handler = handler_from_provider(self.provider_name)
-
             for retry_count in range(MAX_TRANSIENT_ERRORS):
                 try:
-                    conn = auth_handler.connect_account(self.email_address,
+                    conn = self.auth_handler.connect_account(self.email_address,
                                                         self.credential,
                                                         self.imap_endpoint,
                                                         self.account_id)

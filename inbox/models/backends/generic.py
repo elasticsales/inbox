@@ -51,3 +51,20 @@ class GenericAccount(ImapAccount):
     def thread_cls(self):
         from inbox.models.backends.imap import ImapThread
         return ImapThread
+
+    # Override provider_info and auth_handler to make sure we always get
+    # password authentication for generic accounts, even if the actual provider
+    # supports other authentication mechanisms. That way, we can e.g. add
+    # password-based Gmail accounts as generic accounts and simply set the
+    # provider attribute to "gmail" to use the Gmail sync engine.
+
+    @property
+    def provider_info(self):
+        provider_info = super(GenericAccount, self).provider_info
+        provider_info['auth'] = 'password'
+        return provider_info
+
+    @property
+    def auth_handler(self):
+        from inbox.auth.base import handler_from_provider
+        return handler_from_provider('custom')
