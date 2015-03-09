@@ -60,7 +60,8 @@ class GenericAccount(ImapAccount):
 
     @property
     def provider_info(self):
-        provider_info = super(GenericAccount, self).provider_info
+        # Make sure to copy the dict before making changes.
+        provider_info = dict(super(GenericAccount, self).provider_info)
         provider_info['auth'] = 'password'
         return provider_info
 
