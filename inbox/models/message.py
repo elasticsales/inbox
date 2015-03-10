@@ -260,7 +260,8 @@ class Message(MailSyncBase, HasRevisions, HasPublicID):
                     continue  # TODO should we store relations?
                 msg._parse_mimepart(mimepart, mid, i, account.namespace.id)
 
-            msg.calculate_sanitized_body()
+            msg.calculate_sanitized_body(store_body=config.get('STORE_SANITIZED_MESSAGE_BODY', True))
+
         except (mime.DecodingError, AttributeError, RuntimeError, TypeError,
                 ValueError) as e:
             # Message parsing can fail for several reasons. Occasionally iconv
@@ -346,16 +347,22 @@ class Message(MailSyncBase, HasRevisions, HasPublicID):
         if self.snippet is None:
             self.snippet = ''
 
-    def calculate_sanitized_body(self):
+    def calculate_sanitized_body(self, store_body=True):
         plain_part, html_part = self.body
         # TODO: also strip signatures.
         if html_part:
             assert '\r' not in html_part, "newlines not normalized"
             self.snippet = self.calculate_html_snippet(html_part)
-            self.sanitized_body = html_part
+            if store_body:
+                self.sanitized_body = html_part
+            else:
+                self.sanitized_body = u''
         elif plain_part:
             self.snippet = self.calculate_plaintext_snippet(plain_part)
-            self.sanitized_body = plaintext2html(plain_part, False)
+            if store_body:
+                self.sanitized_body = plaintext2html(plain_part, False)
+            else:
+                self.sanitized_body = u''
         else:
             self.sanitized_body = u''
             self.snippet = u''
