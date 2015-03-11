@@ -196,6 +196,13 @@ class Message(MailSyncBase, HasRevisions, HasPublicID):
         msg = Message()
 
         try:
+            from inbox.models.block import Block, Part
+            body_block = Block()
+            body_block.namespace_id = account.namespace.id
+            body_block.data = body_string
+            body_block.content_type = "text/plain"
+            msg.full_body = body_block
+
             msg.namespace_id = account.namespace.id
             parsed = mime.from_string(body_string)
 
@@ -368,8 +375,6 @@ class Message(MailSyncBase, HasRevisions, HasPublicID):
             self.snippet = u''
 
     def calculate_html_snippet(self, text):
-        text = text.replace('<br>', ' ').replace('<br/>', ' '). \
-            replace('<br />', ' ')
         text = strip_tags(text)
         return self.calculate_plaintext_snippet(text)
 
