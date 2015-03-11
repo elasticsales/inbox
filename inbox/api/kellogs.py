@@ -84,6 +84,7 @@ def encode(obj, namespace_public_id=None):
             'cc': format_address_list(obj.cc_addr),
             'bcc': format_address_list(obj.bcc_addr),
             'date': obj.received_date,
+            'message_id_header': obj.message_id_header,
             'thread_id': obj.thread.public_id,
             'snippet': obj.snippet,
             'body': obj.sanitized_body,
