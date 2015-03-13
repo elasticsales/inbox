@@ -67,7 +67,7 @@ def create_email(sender_name,
     # Create a multipart/alternative message
     msg = mime.create.multipart('alternative')
     msg.append(
-        mime.create.text('text', plaintext),
+        mime.create.text('plain', plaintext),
         mime.create.text('html', html))
 
     # Create an outer multipart/mixed message
@@ -109,7 +109,7 @@ def create_email(sender_name,
         msg.headers['Cc'] = u', '.join(full_cc_specs)
     if bcc_addr:
         full_bcc_specs = [address.EmailAddress(name, spec).full_spec()
-                          for name, spec in cc_addr]
+                          for name, spec in bcc_addr]
         msg.headers['Bcc'] = u', '.join(full_bcc_specs)
 
     add_inbox_headers(msg, inbox_uid)

@@ -13,7 +13,7 @@ setup(
         "click>=2.4",
         "cpu_affinity>=0.1.0",
         "pyyaml",
-        "SQLAlchemy>=0.9.6",
+        "SQLAlchemy==0.9.6",
         "alembic>=0.6.4",
         "requests>=2.4.3",
         "raven>=5.0.0",
@@ -40,8 +40,6 @@ setup(
         "pynacl>=0.2.3",
         "flanker>=0.4.26",
         "httplib2>=0.8",
-        "google-api-python-client>=1.2",
-        "oauth2client==1.3",
         "six>=1.8",
         "vobject>=0.8.1c",
         "lxml>=3.4.2"
