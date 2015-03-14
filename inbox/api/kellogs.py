@@ -1,5 +1,6 @@
 import datetime
 import calendar
+from collections import OrderedDict
 from json import JSONEncoder, dumps
 
 from flask import Response
@@ -104,6 +105,10 @@ def encode(obj, namespace_public_id=None):
         return resp
 
     elif isinstance(obj, Thread):
+        # Strip duplicates (e.g. when a message is moved) but preserve order
+        message_id_headers = list(OrderedDict.fromkeys([m.message_id_header
+                for m in obj.messages if not m.is_draft]))
+
         return {
             'id': obj.public_id,
             'object': 'thread',
@@ -115,6 +120,7 @@ def encode(obj, namespace_public_id=None):
             'snippet': obj.snippet,
             'message_ids': [m.public_id for m in obj.messages if not
                             m.is_draft],
+            'message_id_headers': message_id_headers,
             'draft_ids': [m.public_id for m in obj.drafts],
             'tags': format_tags_list(obj.tags),
             'version': obj.version
