@@ -6,9 +6,9 @@ from inbox.models import (Contact, Event, Calendar, Message,
 
 
 def threads(namespace_id, subject, from_addr, to_addr, cc_addr, bcc_addr,
-            any_email, thread_public_id, started_before, started_after,
-            last_message_before, last_message_after, filename, tag, limit,
-            offset, view, db_session):
+            message_id_header, any_email, thread_public_id, started_before,
+            started_after, last_message_before, last_message_after, filename,
+            tag, limit, offset, view, db_session):
 
     if view == 'count':
         query = db_session.query(func.count(Thread.id))
@@ -84,6 +84,11 @@ def threads(namespace_id, subject, from_addr, to_addr, cc_addr, bcc_addr,
             filter(Contact.email_address == any_email,
                    Contact.namespace_id == namespace_id).subquery()
         query = query.filter(Thread.id.in_(any_contact_query))
+
+    if message_id_header is not None:
+        message_id_query = db_session.query(Message.thread_id). \
+            filter(Message.message_id_header == message_id_header)
+        query = query.filter(Thread.id.in_(message_id_query))
 
     if filename is not None:
         files_query = db_session.query(Message.thread_id). \

@@ -500,3 +500,7 @@ Index('ix_message_ns_id_is_draft_received_date', Message.namespace_id,
 # For async deletion.
 Index('ix_message_namespace_id_deleted_at', Message.namespace_id,
       Message.deleted_at)
+
+# For querying messages by Message-ID.
+Index('ix_message_namespace_id_message_id_header', Message.namespace_id,
+      Message.message_id_header)
