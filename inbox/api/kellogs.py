@@ -106,8 +106,13 @@ def encode(obj, namespace_public_id=None):
 
     elif isinstance(obj, Thread):
         # Strip duplicates (e.g. when a message is moved) but preserve order
-        message_id_headers = list(OrderedDict.fromkeys([m.message_id_header
-                for m in obj.messages if not m.is_draft]))
+        seen = set()
+        messages = []
+        for message in obj.messages:
+            if message.public_id in seen:
+                continue
+            seen.add(message.public_id)
+            messages.append(encode(message))
 
         return {
             'id': obj.public_id,
@@ -120,7 +125,7 @@ def encode(obj, namespace_public_id=None):
             'snippet': obj.snippet,
             'message_ids': [m.public_id for m in obj.messages if not
                             m.is_draft],
-            'message_id_headers': message_id_headers,
+            'messages': messages,
             'draft_ids': [m.public_id for m in obj.drafts],
             'tags': format_tags_list(obj.tags),
             'version': obj.version
