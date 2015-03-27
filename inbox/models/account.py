@@ -4,7 +4,6 @@ from sqlalchemy import (Column, Integer, String, DateTime, Boolean, ForeignKey,
                         Enum)
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql.expression import true, false
-from inbox.sqlalchemy_ext.util import generate_public_id
 
 from inbox.sqlalchemy_ext.util import JSON, MutableDict
 from inbox.util.file import Lock
@@ -13,7 +12,6 @@ from inbox.models.mixins import HasPublicID, HasEmailAddress
 from inbox.models.base import MailSyncBase
 from inbox.models.folder import Folder
 from inbox.models.calendar import Calendar
-from inbox.models.constants import MAX_INDEXABLE_LENGTH
 from inbox.providers import provider_info
 
 
@@ -123,32 +121,35 @@ class Account(MailSyncBase, HasPublicID, HasEmailAddress):
     important_folder = relationship('Folder', post_update=True,
                                     foreign_keys=[important_folder_id])
 
-    default_calendar_id = Column(Integer,
-                                 ForeignKey('calendar.id',
-                                            ondelete='SET NULL',
-                                            use_alter=True,
-                                            name='account_ibfk_10'),
-                                 nullable=True)
+    emailed_events_calendar_id = Column(Integer,
+                                        ForeignKey('calendar.id',
+                                                   ondelete='SET NULL',
+                                                   use_alter=True,
+                                                   name='emailed_events_cal'),
+                                        nullable=True)
 
-    _default_calendar = relationship('Calendar', post_update=True)
+    _emailed_events_calendar = relationship(
+        'Calendar', post_update=True,
+        foreign_keys=[emailed_events_calendar_id])
+
+    def create_emailed_events_calendar(self):
+        if not self._emailed_events_calendar:
+            calname = "Emailed events"
+            cal = Calendar(namespace=self.namespace,
+                           description=calname,
+                           uid='inbox',
+                           name=calname,
+                           read_only=True)
+            self._emailed_events_calendar = cal
 
     @property
-    def default_calendar(self):
-        if not self._default_calendar:
-            public_id = generate_public_id()
-            new_cal = Calendar()
-            new_cal.public_id = public_id
-            new_cal.namespace = self.namespace
-            new_cal.uid = public_id
-            new_cal.read_only = False
-            new_cal.name = 'default'
-            new_cal.provider_name = 'inbox'
-            self._default_calendar = new_cal
-        return self._default_calendar
+    def emailed_events_calendar(self):
+        self.create_emailed_events_calendar()
+        return self._emailed_events_calendar
 
-    @default_calendar.setter
-    def default_calendar(self, cal):
-        self._default_calendar = cal
+    @emailed_events_calendar.setter
+    def emailed_events_calendar(self, cal):
+        self._emailed_events_calendar = cal
 
     sync_host = Column(String(255), nullable=True)
 
@@ -173,13 +174,6 @@ class Account(MailSyncBase, HasPublicID, HasEmailAddress):
 
     _sync_status = Column(MutableDict.as_mutable(JSON), default={},
                           nullable=True)
-
-    # We want to have only one account per email address. Unfortunately,
-    # because of a bug/feature in SQLAlchemy, redefining __table_args doesn't
-    # work. To work around this, we redefine _canonicalized_address.
-    # - karim
-    _canonicalized_address = Column(String(MAX_INDEXABLE_LENGTH),
-                                    nullable=True, index=True, unique=True)
 
     @property
     def sync_status(self):
@@ -290,6 +284,15 @@ class Account(MailSyncBase, HasPublicID, HasEmailAddress):
     @property
     def is_sync_locked(self):
         return self._sync_lock.locked()
+
+    def __init__(self, *args, **kwargs):
+        MailSyncBase.__init__(self, *args, **kwargs)
+
+        # Note: SQLAlchemy calls an object's constructor only when
+        # it's created, not on subsequent db reads
+        # (http://docs.sqlalchemy.org/en/rel_0_9/orm/constructors.html)
+        # so it's safe to call a method that creates a calendar here.
+        self.create_emailed_events_calendar()
 
     discriminator = Column('type', String(16))
     __mapper_args__ = {'polymorphic_identity': 'account',

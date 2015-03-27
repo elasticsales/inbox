@@ -77,9 +77,7 @@ from inbox.util.concurrency import retry_and_report_killed
 from inbox.util.debug import bind_context
 from inbox.util.itert import chunk
 from inbox.util.misc import or_none
-from inbox.util.threading import (thread_messages,
-                                  fetch_corresponding_thread,
-                                  MAX_THREAD_LENGTH)
+from inbox.util.threading import fetch_corresponding_thread, MAX_THREAD_LENGTH
 from inbox.basicauth import AuthError
 from inbox.log import get_logger
 log = get_logger()
@@ -94,6 +92,7 @@ from inbox.mailsync.backends.base import (create_db_objects,
                                           mailsync_session_scope,
                                           THROTTLE_WAIT)
 from inbox.heartbeat.store import HeartbeatStatusProxy
+from inbox.events.ical import import_attached_events
 
 GenericUIDMetadata = namedtuple('GenericUIDMetadata', 'throttled')
 
@@ -181,6 +180,8 @@ class FolderSyncEngine(Greenlet):
     def _run(self):
         # Bind greenlet-local logging context.
         log.new(account_id=self.account_id, folder=self.folder_name)
+        # eagerly signal the sync status
+        self.heartbeat_status.publish()
         return retry_and_report_killed(self._run_impl,
                                        account_id=self.account_id,
                                        folder_name=self.folder_name,
@@ -196,8 +197,6 @@ class FolderSyncEngine(Greenlet):
         # objects are the only objects deleted by the mail sync backends
         # anyway.
         saved_folder_status = self._load_state()
-        # eagerly signal the sync status
-        self.heartbeat_status.publish(state=self.state)
         # NOTE: The parent ImapSyncMonitor handler could kill us at any
         # time if it receives a shutdown command. The shutdown command is
         # equivalent to ctrl-c.
@@ -417,6 +416,15 @@ class FolderSyncEngine(Greenlet):
         new_uid = common.create_imap_message(db_session, log, acct, folder,
                                              msg)
         new_uid = self.add_message_attrs(db_session, new_uid, msg)
+
+        # We're calling import_attached_events here instead of some more
+        # obvious place (like Message.create_from_synced) because the function
+        # requires new_uid.message to have been flushed.
+        # This is necessary because the import_attached_events does db lookups.
+        if new_uid.message.has_attached_events:
+            with db_session.no_autoflush:
+                import_attached_events(db_session, acct, new_uid.message)
+
         return new_uid
 
     def _count_thread_messages(self, thread_id, db_session):
@@ -427,8 +435,8 @@ class FolderSyncEngine(Greenlet):
     def add_message_attrs(self, db_session, new_uid, msg):
         """ Post-create-message bits."""
         with db_session.no_autoflush:
-            parent_thread = fetch_corresponding_thread(db_session,
-                            self.namespace_id, new_uid.message)
+            parent_thread = fetch_corresponding_thread(
+                db_session, self.namespace_id, new_uid.message)
             construct_new_thread = True
 
             if parent_thread:
@@ -442,12 +450,8 @@ class FolderSyncEngine(Greenlet):
             if construct_new_thread:
                 new_uid.message.thread = ImapThread.from_imap_message(
                     db_session, new_uid.account.namespace, new_uid.message)
-                new_uid.message.thread_order = 0
             else:
                 parent_thread.messages.append(new_uid.message)
-                constructed_thread = thread_messages(parent_thread.messages)
-                for index, message in enumerate(constructed_thread):
-                    message.thread_order = index
 
         db_session.flush()
         # Make sure this thread has all the correct labels

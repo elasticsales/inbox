@@ -3,11 +3,14 @@ from datetime import datetime
 from inbox.log import get_logger
 logger = get_logger()
 
+from inbox.basicauth import AccessNotEnabledError
 from inbox.sync.base_sync import BaseSyncMonitor
 from inbox.models import Event, Account, Calendar
+from inbox.models.event import RecurringEvent, RecurringEventOverride
 from inbox.util.debug import bind_context
 from inbox.models.session import session_scope
 
+from inbox.events.recurring import link_events
 from inbox.events.google import GoogleEventsProvider
 
 
@@ -20,8 +23,6 @@ class EventSync(BaseSyncMonitor):
     def __init__(self, email_address, provider_name, account_id, namespace_id,
                  poll_frequency=300):
         bind_context(self, 'eventsync', account_id)
-        self.log = logger.new(account_id=account_id, component='event sync')
-        self.log.info('Begin syncing Events...')
         # Only Google for now, can easily parametrize by provider later.
         self.provider = GoogleEventsProvider(account_id, namespace_id)
 
@@ -38,15 +39,22 @@ class EventSync(BaseSyncMonitor):
         """Query a remote provider for updates and persist them to the
         database. This function runs every `self.poll_frequency`.
         """
+        self.log.info('syncing events')
         # Get a timestamp before polling, so that we don't subsequently miss
         # remote updates that happen while the poll loop is executing.
         sync_timestamp = datetime.utcnow()
 
         with session_scope() as db_session:
             account = db_session.query(Account).get(self.account_id)
+
             last_sync = account.last_synced_events
 
-        deleted_uids, calendar_changes = self.provider.sync_calendars()
+        try:
+            deleted_uids, calendar_changes = self.provider.sync_calendars()
+        except AccessNotEnabledError:
+            self.log.warning(
+                'Access to provider calendar API not enabled; bypassing sync')
+            return
         with session_scope() as db_session:
             handle_calendar_deletes(self.namespace_id, deleted_uids,
                                     self.log, db_session)
@@ -113,7 +121,8 @@ def handle_calendar_updates(namespace_id, calendars, log, db_session):
 
         ids_.append((local_calendar.uid, local_calendar.id))
 
-    log.info('calendar sync', added=added_count, updated=updated_count)
+    log.info('synced added and updated calendars', added=added_count,
+             updated=updated_count)
     return ids_
 
 
@@ -128,6 +137,9 @@ def handle_event_deletes(namespace_id, calendar_id, deleted_event_uids,
             Event.uid == uid,
             Event.calendar_id == calendar_id).first()
         if local_event is not None:
+            # Delete stored overrides for this event too, if it is recurring
+            if isinstance(local_event, RecurringEvent):
+                deleted_event_uids.extend(list(local_event.override_uids))
             deleted_count += 1
             db_session.delete(local_event)
     log.info('synced deleted events',
@@ -154,11 +166,18 @@ def handle_event_updates(namespace_id, calendar_id, events, log, db_session):
             local_event.update(event)
             updated_count += 1
         else:
-            local_event = Event(namespace_id=namespace_id,
-                                calendar_id=calendar_id)
-            local_event.update(event)
+            local_event = event
+            local_event.namespace_id = namespace_id
+            local_event.calendar_id = calendar_id
             db_session.add(local_event)
             added_count += 1
+
+        # If we just updated/added a recurring event or override, make sure
+        # we link it to the right master event.
+        if isinstance(event, RecurringEvent) or \
+                isinstance(event, RecurringEventOverride):
+            db_session.flush()
+            link_events(db_session, event)
 
     log.info('synced added and updated events',
              calendar_id=calendar_id,

@@ -1,6 +1,10 @@
 import os
 import base64
 import uuid
+import gevent
+import time
+from inbox.models.session import session_scope
+
 
 from flask import request, g, Blueprint, make_response, Response
 from flask import jsonify as flask_jsonify
@@ -16,10 +20,11 @@ from inbox.api import filtering
 from inbox.api.validation import (get_tags, get_attachments, get_calendar,
                                   get_recipients, get_draft, valid_public_id,
                                   valid_event, valid_event_update, timestamp,
-                                  bounded_str, view, strict_parse_args, limit,
-                                  ValidatableArgument,
+                                  bounded_str, view, strict_parse_args,
+                                  limit, ValidatableArgument, strict_bool,
                                   validate_draft_recipients,
                                   validate_search_query,
+                                  validate_search_sort,
                                   valid_delta_object_types)
 import inbox.contacts.crud
 from inbox.sendmail.base import (create_draft, update_draft, delete_draft)
@@ -39,6 +44,7 @@ engine = main_engine()
 
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 1000
+LONG_POLL_REQUEST_TIMEOUT = 120
 
 
 app = Blueprint(
@@ -278,6 +284,7 @@ def thread_query_api():
     g.parser.add_argument('thread_id', type=valid_public_id, location='args')
     g.parser.add_argument('tag', type=bounded_str, location='args')
     g.parser.add_argument('view', type=view, location='args')
+
     args = strict_parse_args(g.parser, request.args)
 
     threads = filtering.threads(
@@ -301,20 +308,26 @@ def thread_query_api():
         view=args['view'],
         db_session=g.db_session)
 
-    return g.encoder.jsonify(threads)
+    # Use a new encoder object with the expand parameter set.
+    encoder = APIEncoder(g.namespace.public_id, args['view'] == 'expanded')
+    return encoder.jsonify(threads)
 
 
 @app.route('/threads/search', methods=['POST'])
 def thread_search_api():
     args = strict_parse_args(g.parser, request.args)
     data = request.get_json(force=True)
-    query = data.get('query')
 
+    query = data.get('query')
     validate_search_query(query)
+
+    sort = data.get('sort')
+    validate_search_sort(sort)
 
     try:
         search_engine = NamespaceSearchEngine(g.namespace_public_id)
         results = search_engine.threads.search(query=query,
+                                               sort=sort,
                                                max_results=args.limit,
                                                offset=args.offset)
     except SearchEngineError as e:
@@ -326,12 +339,16 @@ def thread_search_api():
 
 @app.route('/threads/<public_id>')
 def thread_api(public_id):
+    g.parser.add_argument('view', type=view, location='args')
+    args = strict_parse_args(g.parser, request.args)
+    # Use a new encoder object with the expand parameter set.
+    encoder = APIEncoder(g.namespace.public_id, args['view'] == 'expanded')
     try:
         valid_public_id(public_id)
         thread = g.db_session.query(Thread).filter(
             Thread.public_id == public_id,
             Thread.namespace_id == g.namespace.id).one()
-        return g.encoder.jsonify(thread)
+        return encoder.jsonify(thread)
     except NoResultFound:
         raise NotFoundError("Couldn't find thread `{0}`".format(public_id))
 
@@ -455,9 +472,13 @@ def message_search_api():
 
     validate_search_query(query)
 
+    sort = data.get('sort')
+    validate_search_sort(sort)
+
     try:
         search_engine = NamespaceSearchEngine(g.namespace_public_id)
         results = search_engine.messages.search(query=query,
+                                                sort=sort,
                                                 max_results=args.limit,
                                                 offset=args.offset)
     except SearchEngineError as e:
@@ -572,11 +593,14 @@ def event_search_api():
     g.parser.add_argument('title', type=bounded_str, location='args')
     g.parser.add_argument('description', type=bounded_str, location='args')
     g.parser.add_argument('location', type=bounded_str, location='args')
+    g.parser.add_argument('busy', type=strict_bool, location='args')
     g.parser.add_argument('starts_before', type=timestamp, location='args')
     g.parser.add_argument('starts_after', type=timestamp, location='args')
     g.parser.add_argument('ends_before', type=timestamp, location='args')
     g.parser.add_argument('ends_after', type=timestamp, location='args')
     g.parser.add_argument('view', type=bounded_str, location='args')
+    g.parser.add_argument('expand_recurring', type=strict_bool,
+                          location='args')
     args = strict_parse_args(g.parser, request.args)
 
     results = filtering.events(
@@ -586,6 +610,7 @@ def event_search_api():
         title=args['title'],
         description=args['description'],
         location=args['location'],
+        busy=args['busy'],
         starts_before=args['starts_before'],
         starts_after=args['starts_after'],
         ends_before=args['ends_before'],
@@ -593,6 +618,7 @@ def event_search_api():
         limit=args['limit'],
         offset=args['offset'],
         view=args['view'],
+        expand_recurring=args['expand_recurring'],
         db_session=g.db_session)
 
     return g.encoder.jsonify(results)
@@ -613,6 +639,7 @@ def event_create_api():
     description = data.get('description')
     location = data.get('location')
     when = data.get('when')
+    busy = data.get('busy', True)
 
     participants = data.get('participants', [])
     for p in participants:
@@ -628,6 +655,7 @@ def event_create_api():
         title=title,
         description=description,
         location=location,
+        busy=busy,
         when=when,
         read_only=False,
         is_owner=True,
@@ -1029,7 +1057,11 @@ def sync_deltas():
                           required=True)
     g.parser.add_argument('exclude_types', type=valid_delta_object_types,
                           location='args')
+    g.parser.add_argument('wait', type=bool, default=False,
+                          location='args')
+    # TODO(emfree): should support `expand` parameter in delta endpoints.
     args = strict_parse_args(g.parser, request.args)
+    exclude_types = args.get('exclude_types')
     cursor = args['cursor']
     if cursor == '0':
         start_pointer = 0
@@ -1040,19 +1072,35 @@ def sync_deltas():
                        Transaction.namespace_id == g.namespace.id).one()
         except NoResultFound:
             raise InputError('Invalid cursor parameter')
-    exclude_types = args.get('exclude_types')
-    deltas, _ = delta_sync.format_transactions_after_pointer(
-        g.namespace.id, start_pointer, g.db_session, args['limit'],
-        delta_sync._format_transaction_for_delta_sync, exclude_types)
-    response = {
-        'cursor_start': cursor,
-        'deltas': deltas,
-    }
-    if deltas:
-        response['cursor_end'] = deltas[-1]['cursor']
-    else:
-        # No changes.
-        response['cursor_end'] = cursor
+
+    # The client wants us to wait until there are changes
+    g.db_session.close()  # hack to close the flask session
+    poll_interval = 1
+
+    start_time = time.time()
+    while time.time() - start_time < LONG_POLL_REQUEST_TIMEOUT:
+        with session_scope() as db_session:
+            deltas, _ = delta_sync.format_transactions_after_pointer(
+                g.namespace.id, start_pointer, db_session, args['limit'],
+                delta_sync._format_transaction_for_delta_sync, exclude_types)
+
+        response = {
+            'cursor_start': cursor,
+            'deltas': deltas,
+        }
+        if deltas:
+            response['cursor_end'] = deltas[-1]['cursor']
+            return g.encoder.jsonify(response)
+
+        # No changes. perhaps wait
+        elif args['wait']:
+            gevent.sleep(poll_interval)
+        else:  # Return immediately
+            response['cursor_end'] = cursor
+            return g.encoder.jsonify(response)
+
+    # If nothing happens until timeout, just return the end of the cursor
+    response['cursor_end'] = cursor
     return g.encoder.jsonify(response)
 
 
@@ -1081,7 +1129,7 @@ def stream_changes():
     g.parser.add_argument('exclude_types', type=valid_delta_object_types,
                           location='args')
     args = strict_parse_args(g.parser, request.args)
-    timeout = args['timeout'] or 3600
+    timeout = args['timeout'] or 1800
     transaction_pointer = None
     cursor = args['cursor']
     if cursor == '0':
@@ -1098,6 +1146,7 @@ def stream_changes():
     # Hack to not keep a database session open for the entire (long) request
     # duration.
     g.db_session.close()
+    # TODO make transaction log support the `expand` feature
     generator = delta_sync.streaming_change_generator(
         g.namespace.id, transaction_pointer=transaction_pointer,
         poll_interval=1, timeout=timeout, exclude_types=exclude_types)

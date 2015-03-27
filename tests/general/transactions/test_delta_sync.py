@@ -54,6 +54,7 @@ def test_event_generation(api_client):
         thread_path = '/threads/{}'.format(thread_id)
         api_client.put_data(thread_path, {'add_tags': ['foo']})
 
+    time.sleep(1)
     cursor = get_cursor(api_client, ts)
 
     sync_data = api_client.get_data('/delta?cursor={0}&limit={1}'.
@@ -67,7 +68,7 @@ def test_event_generation(api_client):
 
 def test_events_are_condensed(api_client):
     """Test that multiple revisions of the same object are rolled up in the
-    delta sync response."""
+    delta response."""
     ts = int(time.time())
     api_client.post_data('/tags/', {'name': 'foo'})
     cursor = get_cursor(api_client, ts)

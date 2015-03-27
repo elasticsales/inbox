@@ -1,9 +1,10 @@
 """Utilities for validating user input to the API."""
-from datetime import datetime
+import arrow
+from arrow.parser import ParserError
 from flanker.addresslib import address
 from flask.ext.restful import reqparse
 from sqlalchemy.orm.exc import NoResultFound
-from inbox.models import Account, Calendar, Tag, Thread, Block, Message
+from inbox.models import Calendar, Tag, Thread, Block, Message
 from inbox.models.when import parse_as_when
 from inbox.api.err import InputError, NotFoundError, ConflictError
 
@@ -23,8 +24,15 @@ def bounded_str(value, key):
     return value
 
 
+def strict_bool(value, key):
+    if value.lower() not in ['true', 'false']:
+        raise ValueError('Value must be "true" or "false" (not "{}") for {}'
+                         .format(value, key))
+    return value.lower() == 'true'
+
+
 def view(value, key):
-    allowed_views = ["count", "ids"]
+    allowed_views = ["count", "ids", "expanded"]
     if value not in allowed_views:
         raise ValueError('Unknown view type {}.'.format(value))
     return value
@@ -55,10 +63,12 @@ def valid_public_id(value):
 
 def timestamp(value, key):
     try:
-        return datetime.utcfromtimestamp(int(value))
+        return arrow.get(value).datetime
     except ValueError:
         raise ValueError('Invalid timestamp value {} for {}'.
                          format(value, key))
+    except ParserError:
+        raise ValueError('Invalid datetime value {} for {}'.format(value, key))
 
 
 def strict_parse_args(parser, raw_args):
@@ -187,10 +197,6 @@ def get_recipients(recipients, field):
 
 
 def get_calendar(calendar_public_id, namespace, db_session):
-    if calendar_public_id is None:
-        account = db_session.query(Account).filter(
-            Account.id == namespace.account_id).one()
-        return account.default_calendar
     valid_public_id(calendar_public_id)
     try:
         return db_session.query(Calendar). \
@@ -203,7 +209,7 @@ def get_calendar(calendar_public_id, namespace, db_session):
 def valid_when(when):
     try:
         parse_as_when(when)
-    except ValueError as e:
+    except (ValueError, ParserError) as e:
         raise InputError(str(e))
 
 
@@ -212,6 +218,9 @@ def valid_event(event):
         raise InputError("Must specify 'when' when creating an event.")
 
     valid_when(event['when'])
+
+    if 'busy' in event and not isinstance(event.get('busy'), bool):
+        raise InputError("'busy' must be true or false")
 
     participants = event.get('participants', [])
     for p in participants:
@@ -228,7 +237,7 @@ def valid_event_update(event, namespace, db_session):
         valid_when(event['when'])
 
     if 'busy' in event and not isinstance(event.get('busy'), bool):
-        raise InputError('\'busy\' must be true or false')
+        raise InputError("'busy' must be true or false")
 
     participants = event.get('participants', [])
     for p in participants:
@@ -270,3 +279,8 @@ def validate_search_query(query):
         return
 
     return
+
+
+def validate_search_sort(sort):
+    if sort not in ('datetime', 'relevance', None):
+        raise InputError("Sort order must be 'datetime' or 'relevance'")

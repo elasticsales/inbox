@@ -1,15 +1,15 @@
-Title: Delta Sync
+Title: Deltas
 
-As the Nilas Sync Engine syncs your users' mailboxes, it builds a transaction log that records every change. Your application can use these changes, exposed through the Delta Sync API, to build email applications that process new data quickly without fetching an index of the user's mailbox or performing a large number of API calls.
+The Nilas Sync Engine builds a transaction log that records every change as it sychronizes your users' mailboxes. Your application can use these changes, exposed through the Delta endpoint, to build email applications that process new data quickly without fetching an index of the user's mailbox or performing a large number of API calls.
 
-To use the Delta Sync API, your application needs to maintain a sync `cursor`,
+To use the Delta API, your application needs to maintain a sync `cursor`,
 a record of the last change you successfully processed. Each time you perform a
-sync, you process the delta updates provided by the API and update your stored `cursor`.
+sync, you process the deltas provided by the API and update your stored `cursor`.
 
 
-# Obtaining a Delta Sync Cursor
+# Obtaining a Delta Cursor
 
-The first time you sync using the Delta Sync API, you need to obtain a cursor. The `generate_cursor` API allows you to exchange a unix timestamp for a cursor so you can begin a sync at an arbitrary point in the user's mailbox history. Alternatively, if you want to start consuming the user's entire mailbox history you can set your cursor to `0`.
+The first time you sync using the Delta API, you need to obtain a cursor. The `generate_cursor` API allows you to exchange a unix timestamp for a cursor so you can begin a sync at an arbitrary point in the user's mailbox history. Alternatively, if you want to start consuming the user's entire mailbox history you can set your cursor to `0`.
 
 Once you have a cursor, you should store it and update it as you make sync requests.
 
@@ -133,8 +133,17 @@ Each element of the response contains the following fields:
 After you've processed the deltas, your application should update its stored
 `cursor` to the value of `cursor_end` in the response. Nilas may only return the first batch of changes, so it's important to make this API call repeatedly until you receive the same `cursor_end` that you sent (`cursor_start`). This indicates that you have consumed the entire transaction log of the user's mailbox and your application is up-to-date.
 
-# Streaming delta updates
-The streaming endpoint allows you to get changes in real time, without needing to repeatedly poll. First obtain a delta sync cursor as described above, and then use it to query the `/delta/streaming` endpoint:
+# Long-polling Delta Updates
+Normally a request with the latest cursor will immediately return an empty list with no deltas. Adding the URL parameter `wait=true` will instruct the server to hold open the request until either new changes are available, or a 2-minute timeout occurs. This behavior can be used to provide real-time updates on platforms that do not support partial response parsing (such as web browsers).
+
+```
+:::xml
+GET https://api.nilas.com/n/<namespace_id>/delta?cursor=<cursor>&wait=true
+```
+
+
+# Streaming Delta Updates
+The streaming endpoint allows you to get changes in real time, without needing to repeatedly poll. First obtain a delta cursor as described above, and then use it to query the `/delta/streaming` endpoint:
 
 ```
 :::xml

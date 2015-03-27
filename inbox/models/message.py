@@ -64,7 +64,6 @@ class Message(MailSyncBase, HasRevisions, HasPublicID):
     # Do delete messages if their associated thread is deleted.
     thread_id = Column(Integer, ForeignKey('thread.id', ondelete='CASCADE'),
                        nullable=False)
-    thread_order = Column(Integer, nullable=False, default=0)
 
     thread = relationship(
         'Thread',
@@ -90,7 +89,7 @@ class Message(MailSyncBase, HasRevisions, HasPublicID):
     message_id_header = Column(String(998), nullable=True)
     # There is no hard limit on subject limit in the spec, but 255 is common.
     subject = Column(String(255), nullable=True, default='')
-    received_date = Column(DateTime, nullable=False)
+    received_date = Column(DateTime, nullable=False, index=True)
     size = Column(Integer, nullable=False)
     data_sha256 = Column(String(255), nullable=True)
 
@@ -268,9 +267,7 @@ class Message(MailSyncBase, HasRevisions, HasPublicID):
                                 mid=mid)
                     continue  # TODO should we store relations?
                 msg._parse_mimepart(mimepart, mid, i, account.namespace.id)
-
             msg.calculate_sanitized_body(store_body=config.get('STORE_SANITIZED_MESSAGE_BODY', True))
-
         except (mime.DecodingError, AttributeError, RuntimeError, TypeError,
                 ValueError) as e:
             # Message parsing can fail for several reasons. Occasionally iconv
@@ -488,10 +485,20 @@ class Message(MailSyncBase, HasRevisions, HasPublicID):
     def versioned_relationships(self):
         return ['parts']
 
+    @property
+    def has_attached_events(self):
+        return 'text/calendar' in [p.block.content_type for p in self.parts]
 
-# Need to explicitly specify the index length for MySQL 5.6, because the
-# subject column is too long to be fully indexed with utf8mb4 collation.
+    @property
+    def attached_event_files(self):
+        return [part for part in self.parts
+                if part.block.content_type == 'text/calendar']
+
+
+# Need to explicitly specify the index length for table generation with MySQL
+# 5.6 when columns are too long to be fully indexed with utf8mb4 collation.
 Index('ix_message_subject', Message.subject, mysql_length=191)
+Index('ix_message_data_sha256', Message.data_sha256, mysql_length=191)
 
 # For API querying performance.
 Index('ix_message_ns_id_is_draft_received_date', Message.namespace_id,

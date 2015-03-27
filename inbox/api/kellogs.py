@@ -1,13 +1,13 @@
+import arrow
 import datetime
 import calendar
 from collections import OrderedDict
 from json import JSONEncoder, dumps
-
 from flask import Response
 
-from inbox.models import (Message, Contact, Calendar, Event,
-                          Time, TimeSpan, Date, DateSpan,
+from inbox.models import (Message, Contact, Calendar, Event, When,
                           Thread, Namespace, Block, Tag)
+from inbox.models.event import RecurringEvent, RecurringEventOverride
 
 
 def format_address_list(addresses):
@@ -22,7 +22,7 @@ def format_tags_list(tags):
     return [{'name': tag.name, 'id': tag.public_id} for tag in tags]
 
 
-def encode(obj, namespace_public_id=None):
+def encode(obj, namespace_public_id=None, expand=False):
     """
     Returns a dictionary representation of an Inbox model object obj, or
     None if there is no such representation defined. If the optional
@@ -54,10 +54,19 @@ def encode(obj, namespace_public_id=None):
 
         return dct
 
+    def _get_lowercase_class_name(obj):
+        return type(obj).__name__.lower()
+
     # Flask's jsonify() doesn't handle datetimes or json arrays as primary
     # objects.
     if isinstance(obj, datetime.datetime):
         return calendar.timegm(obj.utctimetuple())
+
+    if isinstance(obj, datetime.date):
+        return obj.isoformat()
+
+    if isinstance(obj, arrow.arrow.Arrow):
+        return encode(obj.datetime)
 
     elif isinstance(obj, Namespace):
         return {
@@ -91,7 +100,8 @@ def encode(obj, namespace_public_id=None):
             'snippet': obj.snippet,
             'body': obj.sanitized_body,
             'unread': not obj.is_read,
-            'files': obj.api_attachment_metadata
+            'files': obj.api_attachment_metadata,
+            'events': [event.public_id for event in obj.events],
         }
 
         # If the message is a draft (Inbox-created or otherwise):
@@ -105,16 +115,7 @@ def encode(obj, namespace_public_id=None):
         return resp
 
     elif isinstance(obj, Thread):
-        # Strip duplicates (e.g. when a message is moved) but preserve order
-        seen = set()
-        messages = []
-        for message in obj.messages:
-            if message.public_id in seen:
-                continue
-            seen.add(message.public_id)
-            messages.append(encode(message))
-
-        return {
+        base = {
             'id': obj.public_id,
             'object': 'thread',
             'namespace_id': _get_namespace_public_id(obj),
@@ -123,13 +124,61 @@ def encode(obj, namespace_public_id=None):
             'last_message_timestamp': obj.recentdate,
             'first_message_timestamp': obj.subjectdate,
             'snippet': obj.snippet,
-            'message_ids': [m.public_id for m in obj.messages if not
-                            m.is_draft],
-            'messages': messages,
-            'draft_ids': [m.public_id for m in obj.drafts],
             'tags': format_tags_list(obj.tags),
             'version': obj.version
         }
+
+        if not expand:
+            base['message_ids'] = \
+                [m.public_id for m in obj.messages if not m.is_draft]
+            base['draft_ids'] = [m.public_id for m in obj.drafts]
+            return base
+
+        # Strip duplicates (e.g. when a message is moved) but preserve order
+        seen = set()
+        messages = []
+        for message in obj.messages:
+            if message.public_id in seen:
+                continue
+            seen.add(message.public_id)
+            messages.append(message)
+
+        # Expand messages within threads
+        all_expanded_messages = []
+        all_expanded_drafts = []
+        for msg in messages:
+            resp = {
+                'id': msg.public_id,
+                'object': 'message',
+                'namespace_id': _get_namespace_public_id(msg),
+                'subject': msg.subject,
+                'from': format_address_list(msg.from_addr),
+                'to': format_address_list(msg.to_addr),
+                'cc': format_address_list(msg.cc_addr),
+                'bcc': format_address_list(msg.bcc_addr),
+                'date': msg.received_date,
+                'message_id_header': obj.message_id_header,
+                'thread_id': msg.thread.public_id,
+                'snippet': msg.snippet,
+                'unread': not msg.is_read,
+                'files': msg.api_attachment_metadata
+            }
+
+            if msg.is_draft:
+                resp['object'] = 'draft'
+                resp['version'] = msg.version
+                if msg.reply_to_message is not None:
+                    resp['reply_to_message_id'] = \
+                        msg.reply_to_message.public_id
+                else:
+                    resp['reply_to_message_id'] = None
+                all_expanded_drafts.append(resp)
+            else:
+                all_expanded_messages.append(resp)
+
+        base['messages'] = all_expanded_messages
+        base['drafts'] = all_expanded_drafts
+        return base
 
     elif isinstance(obj, Contact):
         return {
@@ -141,19 +190,32 @@ def encode(obj, namespace_public_id=None):
         }
 
     elif isinstance(obj, Event):
-        return {
+        resp = {
             'id': obj.public_id,
             'object': 'event',
             'namespace_id': _get_namespace_public_id(obj),
             'calendar_id': obj.calendar.public_id if obj.calendar else None,
+            'message_id': obj.message.public_id if obj.message else None,
             'title': obj.title,
             'description': obj.description,
             'participants': [_format_participant_data(participant)
                              for participant in obj.participants],
             'read_only': obj.read_only,
             'location': obj.location,
-            'when': encode(obj.when)
+            'when': encode(obj.when),
+            'busy': obj.busy,
         }
+        if isinstance(obj, RecurringEvent):
+            resp['recurrence'] = {
+                'rrule': obj.recurrence,
+                'timezone': obj.start_timezone
+            }
+        if isinstance(obj, RecurringEventOverride):
+            resp['cancelled'] = obj.cancelled
+            resp['original_start_time'] = encode(obj.original_start_time)
+            if obj.master:
+                resp['master_event_id'] = obj.master.public_id
+        return resp
 
     elif isinstance(obj, Calendar):
         return {
@@ -165,31 +227,12 @@ def encode(obj, namespace_public_id=None):
             'read_only': obj.read_only,
         }
 
-    elif isinstance(obj, Time):
-        return {
-            'object': 'time',
-            'time': obj.time
-        }
-
-    elif isinstance(obj, TimeSpan):
-        return {
-            'object': 'timespan',
-            'start_time': obj.start_time,
-            'end_time': obj.end_time
-        }
-
-    elif isinstance(obj, Date):
-        return {
-            'object': 'date',
-            'date': obj.date.isoformat()
-        }
-
-    elif isinstance(obj, DateSpan):
-        return {
-            'object': 'datespan',
-            'start_date': obj.start_date.isoformat(),
-            'end_date': obj.end_date.isoformat()
-        }
+    elif isinstance(obj, When):
+        # Get time dictionary e.g. 'start_time': x, 'end_time': y or 'date': z
+        times = obj.get_time_dict()
+        resp = {k: encode(v) for k, v in times.iteritems()}
+        resp['object'] = _get_lowercase_class_name(obj)
+        return resp
 
     elif isinstance(obj, Block):  # ie: Attachments/Files
         resp = {
@@ -239,13 +282,15 @@ class APIEncoder(object):
         public id of the namespace to which the object to serialize belongs.
 
     """
-    def __init__(self, namespace_public_id=None):
-        self.encoder_class = self._encoder_factory(namespace_public_id)
+    def __init__(self, namespace_public_id=None, expand=False):
+        self.encoder_class = self._encoder_factory(namespace_public_id, expand)
 
-    def _encoder_factory(self, namespace_public_id):
+    def _encoder_factory(self, namespace_public_id, expand):
         class InternalEncoder(JSONEncoder):
             def default(self, obj):
-                custom_representation = encode(obj, namespace_public_id)
+                custom_representation = encode(obj,
+                                               namespace_public_id,
+                                               expand=expand)
                 if custom_representation is not None:
                     return custom_representation
                 # Let the base class default method raise the TypeError

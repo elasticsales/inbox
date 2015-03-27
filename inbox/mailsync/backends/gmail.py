@@ -100,9 +100,12 @@ class GmailFolderSyncEngine(CondstoreFolderSyncEngine):
                 # Put UIDs on the stack such that UIDs for messages in the
                 # inbox get downloaded first, and such that higher (i.e., more
                 # recent) UIDs get downloaded before lower ones.
-                inbox_uids = crispin_client.conn.search(['X-GM-LABELS inbox'])
+                inbox_uids = crispin_client.search_uids(['X-GM-LABELS inbox'])
+                inbox_uid_set = set(inbox_uids)
+                # Note that we have to be checking membership in a /set/ for
+                # performance.
                 ordered_uids_to_sync = [u for u in sorted(remote_uids) if u not
-                                        in inbox_uids] + sorted(inbox_uids)
+                                        in inbox_uid_set] + sorted(inbox_uids)
                 for uid in ordered_uids_to_sync:
                     if uid in remote_g_metadata:
                         metadata = GMetadata(remote_g_metadata[uid].msgid,
@@ -238,7 +241,6 @@ class GmailFolderSyncEngine(CondstoreFolderSyncEngine):
             new_uid.message.g_thrid = msg.g_thrid
 
             # we rely on Gmail's threading instead of our threading algorithm.
-            new_uid.message.thread_order = 0
             new_uid.update_flags_and_labels(msg.flags, msg.g_labels)
 
             thread = new_uid.message.thread = ImapThread.from_gmail_message(

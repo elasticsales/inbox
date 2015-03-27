@@ -51,6 +51,13 @@ def raw_message_with_bad_date():
 
 
 @pytest.fixture
+def raw_message_with_ical_invite():
+    raw_msg_path = full_path('../data/raw_message_with_ical_invite')
+    with open(raw_msg_path) as f:
+        return f.read()
+
+
+@pytest.fixture
 def new_message_from_synced(db):
     received_date = datetime.datetime(2014, 9, 22, 17, 25, 46)
     new_msg = Message.create_from_synced(default_account(db),

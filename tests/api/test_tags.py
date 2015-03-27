@@ -304,7 +304,7 @@ def test_unread_cascades_to_messages(patch_network_functions, log, api_client,
     assert all([msg['unread'] for msg in messages])
 
     api_client.put_data(thread_path, {'remove_tags': ['unread']})
-    gevent.sleep(1)
+    gevent.sleep(3)
     messages = api_client.get_data('/messages?thread_id={}'.format(thread_id))
     assert not any([msg['unread'] for msg in messages])
 
@@ -348,7 +348,7 @@ def test_actions_syncback(patch_network_functions, api_client, db,
     api_client.put_data(thread_path, {'add_tags': ['starred']})
     api_client.put_data(thread_path, {'remove_tags': ['starred']})
 
-    gevent.sleep(0.5)
+    gevent.sleep(2)
 
     action_log_entries = db.session.query(ActionLog)
     assert ({log_entry.action for log_entry in action_log_entries} ==
