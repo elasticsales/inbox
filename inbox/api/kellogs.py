@@ -157,7 +157,7 @@ def encode(obj, namespace_public_id=None, expand=False):
                 'cc': format_address_list(msg.cc_addr),
                 'bcc': format_address_list(msg.bcc_addr),
                 'date': msg.received_date,
-                'message_id_header': obj.message_id_header,
+                'message_id_header': msg.message_id_header,
                 'thread_id': msg.thread.public_id,
                 'snippet': msg.snippet,
                 'unread': not msg.is_read,
