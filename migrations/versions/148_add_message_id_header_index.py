@@ -15,7 +15,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import mysql
 
 def upgrade():
-    op.create_index('ix_message_namespace_id_message_id_header', 'message', ['namespace_id', 'message_id_header'], unique=False)
+    op.create_index('ix_message_namespace_id_message_id_header', 'message', ['namespace_id', 'message_id_header'], unique=False, mysql_length={'message_id_header': 191})
 
 
 def downgrade():

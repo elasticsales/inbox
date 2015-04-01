@@ -503,4 +503,4 @@ Index('ix_message_namespace_id_deleted_at', Message.namespace_id,
 
 # For querying messages by Message-ID.
 Index('ix_message_namespace_id_message_id_header', Message.namespace_id,
-      Message.message_id_header)
+      Message.message_id_header, mysql_length={'message_id_header': 191})
