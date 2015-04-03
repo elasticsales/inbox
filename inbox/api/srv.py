@@ -78,6 +78,41 @@ def ns_all():
         return encoder.jsonify(namespaces)
 
 
+#
+# Create a namespace
+#
+@app.route('/n/', methods=['POST'])
+def create_namespace():
+    data = request.get_json(force=True)
+
+    namespace = Namespace()
+
+    if data['type'] == 'generic':
+        from inbox.models.backends.generic import GenericAccount
+        account = GenericAccount(namespace=namespace)
+        account.imap_username = data['imap_username']
+        account.imap_endpoint = data['imap_endpoint']
+        account.password = data['imap_password']
+        #account.smtp_username = data['smtp_username']
+        #account.smtp_endpoint = data['smtp_endpoint']
+        account.provider = data.get('provider', 'custom')
+    elif data['type'] == 'gmail':
+        from inbox.models.backends.gmail import GmailAccount
+        account = GmailAccount(namespace=namespace)
+        account.refresh_token = data['refresh_token']
+    else:
+        raise ValueError('Account type not supported.')
+
+    account.email_address = data['email_address']
+
+    with session_scope() as db_session:
+        db_session.add(account)
+        db_session.commit()
+
+        encoder = APIEncoder()
+        return encoder.jsonify(namespace)
+
+
 @app.route('/')
 def home():
     return """
