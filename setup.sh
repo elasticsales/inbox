@@ -76,7 +76,8 @@ echo "mysql-server mysql-server/root_password_again password root";
 
 
 color '35;1' 'Installing dependencies from apt-get...'
-apt-get -y install git \
+apt-get -y -o Dpkg::Options::="--force-confold" install \
+                   git \
                    wget \
                    supervisor \
                    mysql-server \
