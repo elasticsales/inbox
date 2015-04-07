@@ -3,10 +3,14 @@
 set -e
 
 prod=false
-while getopts "p" opt; do
+ignore_config=false
+while getopts "pi" opt; do
     case $opt in
         p)
             prod=true
+            ;;
+        i)
+            ignore_config=true
             ;;
     esac
 done
@@ -204,51 +208,53 @@ color '35;1' 'Finished installing dependencies.'
 mkdir -p /etc/inboxapp
 chown $SUDO_UID:$SUDO_GID /etc/inboxapp
 
-color '35;1' 'Copying default development configuration to /etc/inboxapp'
-src=./etc/config-dev.json
-dest=/etc/inboxapp/config.json
-if [ ! -f $dest ]; then
-    install -m0644 -o$SUDO_UID $src $dest
-elif [ $src -nt $dest ]; then
-    set +e
-    diff_result=$(diff -q $src $dest)
-    different=$?
-    set -e
-    if [ $different -ne 0 ]; then
+if ! $ignore_config; then
+    color '35;1' 'Copying default development configuration to /etc/inboxapp'
+    src=./etc/config-dev.json
+    dest=/etc/inboxapp/config.json
+    if [ ! -f $dest ]; then
+        install -m0644 -o$SUDO_UID $src $dest
+    elif [ $src -nt $dest ]; then
+        set +e
+        diff_result=$(diff -q $src $dest)
+        different=$?
+        set -e
+        if [ $different -ne 0 ]; then
         echo "Error: inbox config is newer and merging of configs not (yet) supported."
         echo "Diffs:"
         echo "src: $src dest: $dest"
         diff $dest $src
         exit 1
+        fi
     fi
-fi
-# make sure that users upgrading from a previous release get file permissions
-# right
-chmod 0644 $dest
-chown $SUDO_UID:$SUDO_GID $dest
+    # make sure that users upgrading from a previous release get file permissions
+    # right
+    chmod 0644 $dest
+    chown $SUDO_UID:$SUDO_GID $dest
 
-color '35;1' 'Copying default secrets configuration to /etc/inboxapp'
-src=./etc/secrets-dev.yml
-dest=/etc/inboxapp/secrets.yml
-if [ ! -f $dest ]; then
-    install -m0600 -o$SUDO_UID $src $dest
-elif [ $src -nt $dest ]; then
-    set +e
-    diff_result=$(diff -q $src $dest)
-    different=$?
-    set -e
-    if [ $different -ne 0 ]; then
+    color '35;1' 'Copying default secrets configuration to /etc/inboxapp'
+    src=./etc/secrets-dev.yml
+    dest=/etc/inboxapp/secrets.yml
+    if [ ! -f $dest ]; then
+        install -m0600 -o$SUDO_UID $src $dest
+    elif [ $src -nt $dest ]; then
+        set +e
+        diff_result=$(diff -q $src $dest)
+        different=$?
+        set -e
+        if [ $different -ne 0 ]; then
         echo "Error: inbox secrets config is newer and merging of configs not (yet) supported."
         echo "Diffs:"
         echo "src: $src dest: $dest"
         diff $dest $src
         exit 1
+        fi
     fi
+    # make sure that users upgrading from a previous release get file permissions
+    # right
+    chmod 0600 $dest
+    chown $SUDO_UID:$SUDO_GID $dest
 fi
-# make sure that users upgrading from a previous release get file permissions
-# right
-chmod 0600 $dest
-chown $SUDO_UID:$SUDO_GID $dest
 
 if ! $prod; then
     # Mysql config
