@@ -30,7 +30,6 @@ from inbox.util.debug import bind_context
 from inbox.crispin import GmailSettingError
 from inbox.log import get_logger
 from inbox.models import Message, Folder, Namespace, Account
-from inbox.models.backends.gmail import GmailAccount
 from inbox.models.backends.imap import ImapFolderInfo, ImapUid, ImapThread
 from inbox.mailsync.backends.base import (create_db_objects,
                                           commit_uids,
@@ -387,7 +386,7 @@ def add_new_imapuids(crispin_client, remote_g_metadata, syncmanager_lock,
             uids = [uid for uid in uids if uid not in local_folder_uids]
 
             if uids:
-                acc = db_session.query(GmailAccount).get(
+                acc = db_session.query(Account).get(
                     crispin_client.account_id)
 
                 # collate message objects to relate the new imapuids to
