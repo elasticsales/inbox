@@ -223,6 +223,8 @@ class Account(MailSyncBase, HasPublicID, HasEmailAddress):
         self.sync_should_run = False
         if reason:
             self._sync_status['sync_disabled_reason'] = reason
+        elif 'sync_disabled_reason' in self._sync_status:
+            del self._sync_status['sync_disabled_reason']
 
     def mark_invalid(self, reason='invalid credentials'):
         """ In the event that the credentials for this account are invalid,
