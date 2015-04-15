@@ -112,6 +112,40 @@ def create_namespace():
         encoder = APIEncoder()
         return encoder.jsonify(namespace)
 
+#
+# Modify a namespace
+#
+@app.route('/n/<namespace_public_id>/', methods=['PUT'])
+def modify_namespace(namespace_public_id):
+    from inbox.models.backends.generic import GenericAccount
+    from inbox.models.backends.gmail import GmailAccount
+
+    with session_scope() as db_session:
+        namespace = db_session.query(Namespace) \
+            .filter(Namespace.public_id == namespace_public_id).one()
+
+        account = namespace.account
+
+        data = request.get_json(force=True)
+
+        if isinstance(account, GenericAccount):
+            if 'imap_username' in data:
+                account.imap_username = data['imap_username']
+            if 'imap_endpoint' in data:
+                account.imap_endpoint = data['imap_endpoint']
+            if 'imap_password' in data:
+                account.password = data['imap_password']
+        elif isinstance(account, GmailAccount):
+            if 'refresh_token' in data:
+                account.refresh_token = data['refresh_token']
+        else:
+            raise ValueError('Account type not supported.')
+
+        db_session.add(account)
+        db_session.commit()
+
+        encoder = APIEncoder()
+        return encoder.jsonify(namespace)
 
 @app.route('/')
 def home():
