@@ -3,6 +3,7 @@
 """
 import re
 import imaplib
+import imapclient
 
 # Even though RFC 2060 says that the date component must have two characters
 # (either two digits or space+digit), it seems that some IMAP servers only
@@ -67,6 +68,10 @@ _lock_map = defaultdict(threading.Lock)
 
 class GmailSettingError(Exception):
     """ Thrown on misconfigured Gmail accounts. """
+    pass
+
+
+class FolderMissingError(Exception):
     pass
 
 
@@ -347,8 +352,18 @@ class CrispinClient(object):
         this does things like e.g. makes sure we're not getting
         cached/out-of-date values for HIGHESTMODSEQ from the IMAP server.
         """
-        select_info = self.conn.select_folder(
-            folder, readonly=self.readonly)
+        try:
+            select_info = self.conn.select_folder(
+                folder, readonly=self.readonly)
+        except imapclient.IMAPClient.Error as e:
+            # Specifically point out folders that come back as missing by
+            # checking for Yahoo / Gmail / Outlook (Hotmail) specific errors:
+            if 'EXAMINE error - Folder does not exist' in e.message or \
+               '[NONEXISTENT] Unknown Mailbox:' in e.message or \
+               '[TRYCREATE] Specified mailbox does not exist' in e.message:
+                raise FolderMissingError(folder)
+            raise
+
         select_info['UIDVALIDITY'] = long(select_info['UIDVALIDITY'])
         self.selected_folder = (folder, select_info)
         # don't propagate cached information from previous session
@@ -662,18 +677,24 @@ class GmailCrispinClient(CondStoreCrispinClient):
         list
             Folders to sync (as strings).
         """
-        if 'all' not in self.folder_names():
+        required_folders = {'all': "All Mail", 'trash': "Trash"}
+        missing_folders = []
+        # All Mail is required to sync all mail. Trash is required for deletes.
+        for folder in required_folders:
+            if folder not in self.folder_names():
+                missing_folders.append(required_folders.get(folder))
+        if len(missing_folders) > 0:
             raise GmailSettingError(
-                "Account {} ({}) has no detected 'All Mail' folder. This is "
-                "probably because it is disabled from appearing in IMAP. "
+                "Account {} ({}) is missing the {} folder(s). This is "
+                "probably due to 'Show in IMAP' being disabled. "
                 "Please enable at "
                 "https://mail.google.com/mail/#settings/labels"
-                .format(self.account_id, self.email_address))
-        folders = [self.folder_names()['all']]
-        # Non-essential folders, so don't error out if they're not present.
-        for tag in ('trash', 'spam'):
-            if tag in self.folder_names():
-                folders.append(self.folder_names()[tag])
+                .format(self.account_id, self.email_address,
+                        " and ".join(missing_folders)))
+        folders = [self.folder_names()['all'], self.folder_names()['trash']]
+        # Spam is non-essential, so don't error out if it's absent.
+        if 'spam' in self.folder_names():
+            folders.append(self.folder_names()['spam'])
         return folders
 
     def flags(self, uids):
@@ -787,7 +808,12 @@ class GmailCrispinClient(CondStoreCrispinClient):
         """
         self.log.debug('fetching X-GM-MSGID and X-GM-THRID',
                        uid_count=len(uids))
-        data = self.conn.fetch(uids, ['X-GM-MSGID', 'X-GM-THRID'])
+        # Super long sets of uids may fail with BAD ['Could not parse command']
+        # In that case, just fetch metadata for /all/ uids.
+        if len(uids) > 1e6:
+            data = self.conn.fetch('1:*', ['X-GM-MSGID', 'X-GM-THRID'])
+        else:
+            data = self.conn.fetch(uids, ['X-GM-MSGID', 'X-GM-THRID'])
         uid_set = set(uids)
         return {uid: GMetadata(ret['X-GM-MSGID'], ret['X-GM-THRID'])
                 for uid, ret in data.items() if uid in uid_set}

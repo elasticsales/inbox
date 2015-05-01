@@ -136,9 +136,10 @@ structlog.configure(
 get_logger = structlog.get_logger
 
 
-def configure_logging(is_prod):
+def configure_logging(is_prod=False):
+    # The is_prod argument is ignored and only retained for compatibility.
     tty_handler = logging.StreamHandler(sys.stdout)
-    if not is_prod:
+    if sys.stdout.isatty():
         # Use a more human-friendly format.
         formatter = colorlog.ColoredFormatter(
             '%(log_color)s[%(levelname)s]%(reset)s %(message)s',
@@ -226,7 +227,7 @@ def sentry_alert(*args, **kwargs):
         get_sentry_client().captureException(*args, **kwargs)
 
 
-def log_uncaught_errors(logger=None, account_id=None):
+def log_uncaught_errors(logger=None, account_id=None, action_id=None):
     """
     Helper to log uncaught exceptions.
 
@@ -234,8 +235,9 @@ def log_uncaught_errors(logger=None, account_id=None):
     ----------
     logger: structlog.BoundLogger, optional
         The logging object to write to.
+
     """
     logger = logger or get_logger()
-    logger.error('Uncaught error', exc_info=True)
-    user_data = {'account_id': account_id}
+    logger.error('Uncaught error', exc_info=True, action_id=action_id)
+    user_data = {'account_id': account_id, 'action_id': action_id}
     sentry_alert(extra=user_data)

@@ -1,12 +1,11 @@
 import arrow
 from datetime import datetime
-time_parse = datetime.utcfromtimestamp
 from dateutil.parser import parse as date_parse
 import ast
 
 from sqlalchemy import (Column, String, ForeignKey, Text, Boolean, Integer,
                         DateTime, Enum, Index, event)
-from sqlalchemy.orm import relationship, backref, validates
+from sqlalchemy.orm import relationship, backref, validates, reconstructor
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.ext.associationproxy import association_proxy
 
@@ -33,6 +32,9 @@ _LENGTHS = {'location': LOCATION_MAX_LEN,
             'reminders': REMINDER_MAX_LEN,
             'title': TITLE_MAX_LEN,
             'raw_data': MAX_TEXT_LENGTH}
+EVENT_STATUSES = ["confirmed", "tentative", "cancelled"]
+
+time_parse = lambda x: arrow.get(x).to('utc').naive
 
 
 class FlexibleDateTime(TypeDecorator):
@@ -110,6 +112,8 @@ class Event(MailSyncBase, HasRevisions, HasPublicID):
     all_day = Column(Boolean, nullable=False)
     is_owner = Column(Boolean, nullable=False, default=True)
     last_modified = Column(FlexibleDateTime, nullable=True)
+    status = Column('status', Enum(*EVENT_STATUSES),
+                    server_default='confirmed')
 
     # This column is only used for events that are synced from iCalendar
     # files.
@@ -166,7 +170,84 @@ class Event(MailSyncBase, HasRevisions, HasPublicID):
             self.end = date_parse(when['end_date'])
             self.all_day = True
 
+    def _merge_participant_attributes(self, left, right):
+        """Merge right into left. Right takes precedence unless it's null."""
+        for attribute in right.keys():
+                # Special cases:
+                if right[attribute] is None:
+                    continue
+                elif right[attribute] == '':
+                    continue
+                elif right['status'] == 'noreply':
+                    continue
+                else:
+                    left[attribute] = right[attribute]
+
+        return left
+
+    def _partial_participants_merge(self, event):
+        """Merge the participants from event into self.participants.
+        event always takes precedence over self, except if
+        a participant in self isn't in event.
+
+        This method is only called by the ical merging code because
+        iCalendar attendance updates are partial: an RSVP reply often
+        only contains the status of the person that RSVPs.
+        It would be very wrong to call this method to merge, say, Google
+        Events participants because they handle the merging themselves.
+        """
+
+        # We have to jump through some hoops because a participant may
+        # not have an email or may not have a name, so we build a hash
+        # where we can find both. Also note that we store names in the
+        # hash only if the email is None.
+        self_hash = {}
+        for participant in self.participants:
+            email = participant['email']
+            name = participant['name']
+            if email is not None:
+                self_hash[email] = participant
+            elif name is not None:
+                # We have a name without an email.
+                self_hash[name] = participant
+
+        for participant in event.participants:
+            email = participant['email']
+            name = participant['name']
+
+            # This is the tricky part --- we only want to store one entry per
+            # participant --- we check if there's an email we already know, if
+            # not we create it. Otherwise we use the name. This sorta works
+            # because we're merging updates to an event and ical updates
+            # always have an email address.
+            # - karim
+            if email is not None:
+                if email in self_hash:
+                    self_hash[email] =\
+                     self._merge_participant_attributes(self_hash[email],
+                                                        participant)
+                else:
+                    self_hash[email] = participant
+            elif name is not None:
+                if name in self_hash:
+                    self_hash[name] =\
+                     self._merge_participant_attributes(self_hash[name],
+                                                        participant)
+                else:
+                    self_hash[name] = participant
+
+        return self_hash.values()
+
     def update(self, event):
+        if event.namespace is not None and event.namespace.id is not None:
+            self.namespace_id = event.namespace.id
+
+        if event.calendar is not None and event.calendar.id is not None:
+            self.calendar_id = event.calendar.id
+
+        if event.provider_name is not None:
+            self.provider_name = event.provider_name
+
         self.uid = event.uid
         self.raw_data = event.raw_data
         self.title = event.title
@@ -184,6 +265,7 @@ class Event(MailSyncBase, HasRevisions, HasPublicID):
         self.recurrence = event.recurrence
         self.last_modified = event.last_modified
         self.message = event.message
+        self.status = event.status
 
     @property
     def recurring(self):
@@ -205,6 +287,17 @@ class Event(MailSyncBase, HasRevisions, HasPublicID):
     @property
     def length(self):
         return self.when.delta
+
+    @property
+    def cancelled(self):
+        return self.status == 'cancelled'
+
+    @cancelled.setter
+    def cancelled(self, is_cancelled):
+        if is_cancelled:
+            self.status = 'cancelled'
+        else:
+            self.status = 'confirmed'
 
     @classmethod
     def __new__(cls, *args, **kwargs):
@@ -253,6 +346,15 @@ class RecurringEvent(Event, HasRevisions):
             self.unwrap_rrule()
         except Exception as e:
             log.error("Error parsing RRULE entry", event_id=self.id,
+                      error=e, exc_info=True)
+
+    # FIXME @karim: use an overrided property instead of a reconstructor.
+    @reconstructor
+    def reconstruct(self):
+        try:
+            self.unwrap_rrule()
+        except Exception as e:
+            log.error("Error parsing stored RRULE entry", event_id=self.id,
                       error=e, exc_info=True)
 
     def inflate(self, start=None, end=None):
@@ -318,10 +420,6 @@ class RecurringEventOverride(Event, HasRevisions):
     master_event_uid = Column(String(767, collation='ascii_general_ci'),
                               index=True)
     original_start_time = Column(FlexibleDateTime)
-    # We have to store individual cancellations as overrides, as the EXDATE
-    # isn't always updated. (Fun, right?)
-    cancelled = Column(Boolean, default=False)
-
     master = relationship(RecurringEvent, foreign_keys=[master_event_id],
                           backref=backref('overrides', lazy="dynamic"))
 

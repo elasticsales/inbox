@@ -5,7 +5,7 @@ import traceback
 from datetime import datetime, date
 from icalendar import Calendar as iCalendar
 
-from inbox.models.event import Event
+from inbox.models.event import Event, EVENT_STATUSES
 from inbox.events.util import MalformedEventError
 from inbox.util.addr import canonicalize_address
 from timezones import timezones_table
@@ -28,7 +28,13 @@ def events_from_ics(namespace, calendar, ics_str):
 
     events = []
 
+    # See: https://tools.ietf.org/html/rfc5546#section-3.2
+    calendar_method = None
+
     for component in cal.walk():
+        if component.name == "VCALENDAR":
+            calendar_method = component.get('method')
+
         if component.name == "VTIMEZONE":
             tzname = component.get('TZID')
             assert tzname in timezones_table,\
@@ -101,8 +107,34 @@ def events_from_ics(namespace, calendar, ics_str):
                 assert last_modified is not None, \
                     "Event should have a DtStamp or LAST-MODIFIED timestamp"
 
-            title = component.get('summary')
+            title = None
+            summaries = component.get('summary', [])
+            if not isinstance(summaries, list):
+                summaries = [summaries]
+
+            if summaries != []:
+                title = " - ".join(summaries)
+
             description = unicode(component.get('description'))
+
+            event_status = component.get('status')
+            if event_status is not None:
+                event_status = event_status.lower()
+            else:
+                # Some providers (e.g: iCloud) don't use the status field.
+                # Instead they use the METHOD field to signal cancellations.
+                method = component.get('method')
+                if method and method.lower() == 'cancel':
+                    event_status = 'cancelled'
+                elif calendar_method and calendar_method.lower() == 'cancel':
+                    # So, this particular event was not cancelled. Maybe the
+                    # whole calendar was.
+                    event_status = 'cancelled'
+                else:
+                    # Otherwise assume the event has been confirmed.
+                    event_status = 'confirmed'
+
+            assert event_status in EVENT_STATUSES
 
             recur = component.get('rrule')
             if recur:
@@ -198,6 +230,7 @@ def events_from_ics(namespace, calendar, ics_str):
                 last_modified=last_modified,
                 original_start_tz=original_start_tz,
                 source='local',
+                status=event_status,
                 participants=participants)
 
             events.append(event)
@@ -254,5 +287,39 @@ def import_attached_events(db_session, account, message):
                 existing_event = existing_events_table[event.uid]
 
                 if event.last_modified > existing_event.last_modified:
+                    # Most RSVP replies only contain the status of the person
+                    # replying. We need to merge the reply with the data we
+                    # already have otherwise we'd be losing information.
+                    merged_participants = existing_event.\
+                        _partial_participants_merge(event)
+
+                    # FIXME: What we really should do here is distinguish
+                    # between the case where we're organizing an event and
+                    # receiving RSVP messages and the case where we're just an
+                    # attendant getting updates from the organizer.
+                    #
+                    # We don't store (yet) information about the organizer so
+                    # we assume we're the creator of the event. We'll do soon
+                    # though.
                     existing_event.update(event)
                     existing_event.message = message
+
+                    # We have to do this mumbo-jumbo because MutableList does
+                    # not register changes to nested elements.
+                    # We could probably change MutableList to handle it (see:
+                    # https://groups.google.com/d/msg/sqlalchemy/i2SIkLwVYRA/mp2WJFaQxnQJ)
+                    # but this sounds a very brittle.
+                    existing_event.participants = []
+                    for participant in merged_participants:
+                        existing_event.participants.append(participant)
+                else:
+                    # This is an older message but it still may contain
+                    # valuable RSVP information --- remember that when someone
+                    # RSVPs, the event's participant list often only
+                    # contains the RSVPing person.
+                    merged_participants = existing_event.\
+                        _partial_participants_merge(event)
+
+                    existing_event.participants = []
+                    for participant in merged_participants:
+                        existing_event.participants.append(participant)

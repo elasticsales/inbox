@@ -49,11 +49,11 @@ class DeleteHandler(gevent.Greenlet):
 
     def _run_impl(self):
         while True:
-            self.check()
+            current_time = datetime.datetime.utcnow()
+            self.check(current_time)
             gevent.sleep(self.message_ttl.total_seconds())
 
-    def check(self):
-        current_time = datetime.datetime.utcnow()
+    def check(self, current_time):
         with session_scope() as db_session:
             dangling_messages = db_session.query(Message).filter(
                 Message.namespace_id == self.namespace_id,
@@ -92,4 +92,9 @@ class DeleteHandler(gevent.Greenlet):
                         thread.tags.discard(unread_tag)
                     if not any(m.attachments for m in non_draft_messages):
                         thread.tags.discard(attachment_tag)
-            db_session.commit()
+                # YES this is at the right indentation level. Delete statements
+                # may cause InnoDB index locks to be acquired, so we opt to
+                # simply commit after each delete in order to prevent bulk
+                # delete scenarios from creating a long-running, blocking
+                # transaction.
+                db_session.commit()

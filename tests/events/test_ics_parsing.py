@@ -127,7 +127,6 @@ def test_event_update(db, default_account, message):
 
 
 def test_recurring_ical(db, default_account):
-
     with open(absolute_path(FIXTURES + 'gcal_recur.ics')) as fd:
         ics_data = fd.read()
 
@@ -185,3 +184,144 @@ def test_multiple_events(db, default_account):
     assert len(ev1.participants) == 0
 
     assert ev1.start == arrow.get(2015, 03, 17, 0, 0)
+
+
+def test_participant_merging(db, default_account, message):
+    add_fake_calendar(db.session, default_account.namespace.id,
+                      name="Emailed events", read_only=True)
+
+    with open(absolute_path(FIXTURES + 'invite_w_rsvps1.ics')) as fd:
+        ics_data = fd.read()
+
+    msg = add_fake_msg_with_calendar_part(
+        db.session, default_account, ics_data)
+
+    import_attached_events(db.session, default_account, msg)
+    db.session.commit()
+
+    ev = db.session.query(Event).filter(
+        Event.uid == ("040000008200E00074C5B7101A82E00800000000"
+                      "F9125A30B06BD001000000000000000010000000"
+                      "9D791C7548BFD144BFA54F14213CAD25")).one()
+
+    assert len(ev.participants) == 2
+    for participant in ev.participants:
+        assert participant['status'] == 'noreply'
+
+    with open(absolute_path(FIXTURES + 'invite_w_rsvps2.ics')) as fd:
+        ics_data = fd.read()
+
+    msg2 = add_fake_msg_with_calendar_part(
+        db.session, default_account, ics_data)
+
+    import_attached_events(db.session, default_account, msg2)
+    db.session.commit()
+
+    ev = db.session.query(Event).filter(
+        Event.uid == ("040000008200E00074C5B7101A82E00800000000"
+                      "F9125A30B06BD001000000000000000010000000"
+                      "9D791C7548BFD144BFA54F14213CAD25")).one()
+
+    assert len(ev.participants) == 2
+    for participant in ev.participants:
+        if participant['email'] == 'test1@example.com':
+            assert participant['status'] == 'maybe'
+            assert participant['name'] == 'Inbox Apptest'
+        elif participant['email'] == 'karim@example.com':
+            assert participant['status'] == 'noreply'
+
+    with open(absolute_path(FIXTURES + 'invite_w_rsvps3.ics')) as fd:
+        ics_data = fd.read()
+
+    msg3 = add_fake_msg_with_calendar_part(
+        db.session, default_account, ics_data)
+
+    import_attached_events(db.session, default_account, msg3)
+    db.session.commit()
+
+    ev = db.session.query(Event).filter(
+        Event.uid == ("040000008200E00074C5B7101A82E00800000000"
+                      "F9125A30B06BD001000000000000000010000000"
+                      "9D791C7548BFD144BFA54F14213CAD25")).one()
+
+    assert len(ev.participants) == 2
+
+    for participant in ev.participants:
+        if participant['email'] == 'test1@example.com':
+            assert participant['status'] == 'maybe'
+            assert participant['name'] == 'Inbox Apptest'
+        elif participant['email'] == 'karim@example.com':
+            assert participant['name'] == 'Karim Hamidou'
+            assert participant['status'] == 'yes'
+
+
+def test_cancelled_event(db, default_account):
+    with open(absolute_path(FIXTURES + 'google_cancelled1.ics')) as fd:
+        ics_data = fd.read()
+
+    msg = add_fake_msg_with_calendar_part(
+        db.session, default_account, ics_data)
+
+    import_attached_events(db.session, default_account, msg)
+    db.session.commit()
+
+    ev = db.session.query(Event).filter(
+        Event.uid == "c74p2nmutcd0kt69ku7rs8vu2g@google.com").one()
+
+    assert ev.status == 'confirmed'
+
+    with open(absolute_path(FIXTURES + 'google_cancelled2.ics')) as fd:
+        ics_data = fd.read()
+
+    msg2 = add_fake_msg_with_calendar_part(
+        db.session, default_account, ics_data)
+
+    import_attached_events(db.session, default_account, msg2)
+    db.session.commit()
+
+    ev = db.session.query(Event).filter(
+        Event.uid == "c74p2nmutcd0kt69ku7rs8vu2g@google.com").one()
+
+    assert ev.status == 'cancelled'
+
+
+def test_icloud_cancelled_event(db, default_account):
+    with open(absolute_path(FIXTURES + 'icloud_cancelled1.ics')) as fd:
+        ics_data = fd.read()
+
+    msg = add_fake_msg_with_calendar_part(
+        db.session, default_account, ics_data)
+
+    import_attached_events(db.session, default_account, msg)
+    db.session.commit()
+
+    ev = db.session.query(Event).filter(
+        Event.uid == "5919D444-7C99-4687-A526-FC5D10091318").one()
+
+    assert ev.status == 'confirmed'
+
+    with open(absolute_path(FIXTURES + 'icloud_cancelled2.ics')) as fd:
+        ics_data = fd.read()
+
+    msg = add_fake_msg_with_calendar_part(
+        db.session, default_account, ics_data)
+
+    import_attached_events(db.session, default_account, msg)
+    db.session.commit()
+
+    ev = db.session.query(Event).filter(
+        Event.uid == "5919D444-7C99-4687-A526-FC5D10091318").one()
+
+    assert ev.status == 'cancelled'
+
+
+def test_multiple_summaries(db, default_account):
+    data = None
+    with open(absolute_path(FIXTURES + 'multiple_summaries.ics')) as fd:
+        data = fd.read()
+
+    events = events_from_ics(default_account.namespace,
+                             default_account.emailed_events_calendar, data)
+
+    assert len(events) == 1
+    assert events[0].title == 'The Strokes - Is this it?'

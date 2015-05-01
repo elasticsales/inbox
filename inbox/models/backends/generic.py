@@ -56,6 +56,11 @@ class GenericAccount(ImapAccount):
         from inbox.models.backends.imap import ImapThread
         return ImapThread
 
+    @property
+    def actionlog_cls(self):
+        from inbox.models.action_log import ActionLog
+        return ActionLog
+
     # Override provider_info and auth_handler to make sure we always get
     # password authentication for generic accounts, even if the actual provider
     # supports other authentication mechanisms. That way, we can e.g. add

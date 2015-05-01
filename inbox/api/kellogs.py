@@ -91,6 +91,7 @@ def encode(obj, namespace_public_id=None, expand=False):
             'namespace_id': _get_namespace_public_id(obj),
             'subject': obj.subject,
             'from': format_address_list(obj.from_addr),
+            'reply_to': format_address_list(obj.reply_to),
             'to': format_address_list(obj.to_addr),
             'cc': format_address_list(obj.cc_addr),
             'bcc': format_address_list(obj.bcc_addr),
@@ -153,6 +154,7 @@ def encode(obj, namespace_public_id=None, expand=False):
                 'namespace_id': _get_namespace_public_id(msg),
                 'subject': msg.subject,
                 'from': format_address_list(msg.from_addr),
+                'reply_to': format_address_list(msg.reply_to),
                 'to': format_address_list(msg.to_addr),
                 'cc': format_address_list(msg.cc_addr),
                 'bcc': format_address_list(msg.bcc_addr),
@@ -204,6 +206,7 @@ def encode(obj, namespace_public_id=None, expand=False):
             'location': obj.location,
             'when': encode(obj.when),
             'busy': obj.busy,
+            'status': obj.status,
         }
         if isinstance(obj, RecurringEvent):
             resp['recurrence'] = {
@@ -211,7 +214,6 @@ def encode(obj, namespace_public_id=None, expand=False):
                 'timezone': obj.start_timezone
             }
         if isinstance(obj, RecurringEventOverride):
-            resp['cancelled'] = obj.cancelled
             resp['original_start_time'] = encode(obj.original_start_time)
             if obj.master:
                 resp['master_event_id'] = obj.master.public_id

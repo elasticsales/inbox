@@ -2,7 +2,6 @@ import json
 import os
 import subprocess
 from datetime import datetime, timedelta
-from mockredis import mock_strict_redis_client
 
 from pytest import fixture, yield_fixture
 
@@ -70,10 +69,14 @@ def db(request, config):
     testdb.teardown()
 
 
+def mock_redis_client(*args, **kwargs):
+    return None
+
+
 @fixture(autouse=True)
 def mock_redis(monkeypatch):
     monkeypatch.setattr("inbox.heartbeat.store.HeartbeatStore.__init__",
-                        mock_strict_redis_client)
+                        mock_redis_client)
 
 
 @yield_fixture
@@ -271,11 +274,9 @@ class ContactsProviderStub(object):
 
 def add_fake_account(db_session, email_address='test@nilas.com'):
     from inbox.models import Account, Namespace
-    account = Account(email_address=email_address)
     namespace = Namespace()
-    namespace.account = account
+    account = Account(email_address=email_address, namespace=namespace)
     db_session.add(account)
-    db_session.add(namespace)
     db_session.commit()
     return account
 

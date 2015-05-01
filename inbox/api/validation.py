@@ -186,6 +186,7 @@ def get_recipients(recipients, field):
         return None
     if not isinstance(recipients, list):
         raise InputError('Invalid {} field'.format(field))
+
     for r in recipients:
         if not (isinstance(r, dict) and 'email' in r and
                 isinstance(r['email'], basestring)):
@@ -219,10 +220,14 @@ def valid_event(event):
 
     valid_when(event['when'])
 
-    if 'busy' in event and not isinstance(event.get('busy'), bool):
-        raise InputError("'busy' must be true or false")
+    if 'busy' in event and event.get('busy') is not None:
+        # client libraries can send busy: None
+        if not isinstance(event.get('busy'), bool):
+            raise InputError("'busy' must be true or false")
 
-    participants = event.get('participants', [])
+    participants = event.get('participants')
+    if participants is None:
+        participants = []
     for p in participants:
         if 'email' not in p:
             raise InputError("'participants' must must have email")
@@ -252,7 +257,7 @@ def valid_event_update(event, namespace, db_session):
 def valid_delta_object_types(types_arg):
     types = [item.strip() for item in types_arg.split(',')]
     allowed_types = ('contact', 'message', 'event', 'file', 'message', 'tag',
-                     'thread')
+                     'thread', 'calendar')
     for type_ in types:
         if type_ not in allowed_types:
             raise InputError('Invalid object type {}'.format(type_))

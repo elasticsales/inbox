@@ -1,5 +1,6 @@
 import os
 import base64
+import email.header
 import uuid
 import gevent
 import time
@@ -244,9 +245,10 @@ def tag_create_api():
         raise InputError('Malformed tag request')
     if 'namespace_id' in data.keys():
         ns_id = data['namespace_id']
-        valid_public_id(ns_id)
-        if ns_id != g.namespace.public_id:
-            raise InputError('Cannot change the namespace on a tag.')
+        if ns_id is not None:
+            valid_public_id(ns_id)
+            if ns_id != g.namespace.public_id:
+                raise InputError('Cannot change the namespace on a tag.')
     # Lowercase tag name, regardless of input casing.
     tag_name = data['name'].lower()
     if not Tag.name_available(tag_name, g.namespace.id, g.db_session):
@@ -619,6 +621,7 @@ def event_search_api():
     g.parser.add_argument('view', type=bounded_str, location='args')
     g.parser.add_argument('expand_recurring', type=strict_bool,
                           location='args')
+    g.parser.add_argument('show_cancelled', type=strict_bool, location='args')
     args = strict_parse_args(g.parser, request.args)
 
     results = filtering.events(
@@ -637,6 +640,7 @@ def event_search_api():
         offset=args['offset'],
         view=args['view'],
         expand_recurring=args['expand_recurring'],
+        show_cancelled=args['show_cancelled'],
         db_session=g.db_session)
 
     return g.encoder.jsonify(results)
@@ -657,9 +661,15 @@ def event_create_api():
     description = data.get('description')
     location = data.get('location')
     when = data.get('when')
-    busy = data.get('busy', True)
+    busy = data.get('busy')
+    # client libraries can send explicit key = None automagically
+    if busy is None:
+        busy = True
 
-    participants = data.get('participants', [])
+    participants = data.get('participants')
+    if participants is None:
+        participants = []
+
     for p in participants:
         if 'status' not in p:
             p['status'] = 'noreply'
@@ -682,7 +692,8 @@ def event_create_api():
     g.db_session.add(event)
     g.db_session.flush()
 
-    schedule_action('create_event', event, g.namespace.id, g.db_session)
+    schedule_action('create_event', event, g.namespace.id, g.db_session,
+                    calendar_uid=event.calendar.uid)
     return g.encoder.jsonify(event)
 
 
@@ -724,7 +735,8 @@ def event_update_api(public_id):
             setattr(event, attr, data[attr])
 
     g.db_session.commit()
-    schedule_action('update_event', event, g.namespace.id, g.db_session)
+    schedule_action('update_event', event, g.namespace.id, g.db_session,
+                    calendar_uid=event.calendar.uid)
     return g.encoder.jsonify(event)
 
 
@@ -742,8 +754,7 @@ def event_delete_api(public_id):
                          'calendar.'.format(public_id))
 
     schedule_action('delete_event', event, g.namespace.id, g.db_session,
-                    event_uid=event.uid,
-                    calendar_name=event.calendar.name,
+                    event_uid=event.uid, calendar_name=event.calendar.name,
                     calendar_uid=event.calendar.uid)
     g.db_session.delete(event)
     g.db_session.commit()
@@ -873,8 +884,15 @@ def file_download_api(public_id):
     response = make_response(f.data)
 
     response.headers['Content-Type'] = 'application/octet-stream'  # ct
+    # Werkzeug will try to encode non-ascii header values as latin-1. Try that
+    # first; if it fails, use RFC2047/MIME encoding. See
+    # https://tools.ietf.org/html/rfc7230#section-3.2.4.
+    try:
+        name = name.encode('latin-1')
+    except UnicodeEncodeError:
+        name = email.header.Header(name, 'utf-8').encode()
     response.headers['Content-Disposition'] = \
-        u"attachment; filename={0}".format(name)
+        'attachment; filename={0}'.format(name)
     g.log.info(response.headers)
     return response
 
@@ -1007,6 +1025,14 @@ def draft_update_api(public_id):
     to = get_recipients(data.get('to'), 'to')
     cc = get_recipients(data.get('cc'), 'cc')
     bcc = get_recipients(data.get('bcc'), 'bcc')
+    from_addr = get_recipients(data.get('from_addr'), 'from_addr')
+    reply_to = get_recipients(data.get('reply_to'), 'reply_to')
+
+    if from_addr and len(from_addr) > 1:
+        raise InputError("from_addr field can have at most one item")
+    if reply_to and len(reply_to) > 1:
+        raise InputError("reply_to field can have at most one item")
+
     subject = data.get('subject')
     body = data.get('body')
     tags = get_tags(data.get('tags'), g.namespace.id, g.db_session)
@@ -1014,7 +1040,8 @@ def draft_update_api(public_id):
 
     try:
         draft = update_draft(g.db_session, g.namespace.account, original_draft,
-                             to, subject, body, files, cc, bcc, tags)
+                             to, subject, body, files, cc, bcc, from_addr,
+                             reply_to, tags)
     except ActionError as e:
         return err(e.error, str(e))
 
