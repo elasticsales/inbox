@@ -126,14 +126,16 @@ def format_transactions_after_pointer(namespace_id, pointer, db_session,
 
     deltas = []
     # If there are multiple transactions for the same object, only publish the
-    # most recent.
+    # most recent. Also store the command, so we e.g. return inserts properly.
     # Note: Works as is even when we're querying across all namespaces (i.e.
     # namespace_id = None) because the object is identified by its id in
     # addition to type, and all objects are restricted to a single namespace.
     object_identifiers = set()
     for transaction in sorted(transactions, key=lambda trx: trx.id,
                               reverse=True):
-        object_identifier = (transaction.object_type, transaction.record_id)
+        object_identifier = (transaction.object_type,
+                             transaction.record_id,
+                             transaction.command)
         if object_identifier in object_identifiers:
             continue
 
