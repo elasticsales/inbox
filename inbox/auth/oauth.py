@@ -13,7 +13,7 @@ log = get_logger()
 
 
 class OAuthAuthHandler(AuthHandler):
-    def connect_account(self, email, pw, imap_endpoint, account_id=None):
+    def connect_account(self, email, pw, imap_endpoint, account_id=None, debug=False):
         """Provide a connection to a IMAP account.
 
         Raises
@@ -23,7 +23,9 @@ class OAuthAuthHandler(AuthHandler):
         IMAPClient.error
             If the credentials are invalid.
         """
-        conn = self.connect_to_imap(imap_endpoint)
+        conn = self.connect_to_imap(imap_endpoint,
+                                    account_id=account_id,
+                                    debug=debug)
 
         try:
             conn.oauth2_login(email, pw)

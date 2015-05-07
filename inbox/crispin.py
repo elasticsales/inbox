@@ -158,6 +158,7 @@ class CrispinConnectionPool(geventconnpool.ConnectionPool):
             self.imap_endpoint = account.imap_endpoint
             self.sync_state = account.sync_state
             self.auth_handler = account.auth_handler
+            self.debug = account.debug
 
             if self.provider_name == 'gmail':
                 self.client_cls = GmailCrispinClient
@@ -201,7 +202,8 @@ class CrispinConnectionPool(geventconnpool.ConnectionPool):
                     conn = self.auth_handler.connect_account(self.email_address,
                                                         self.credential,
                                                         self.imap_endpoint,
-                                                        self.account_id)
+                                                        self.account_id,
+                                                        debug=self.debug)
 
                     # If we can connect the account, then we can set the sate
                     # to 'running' if it wasn't already
