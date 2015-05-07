@@ -172,6 +172,9 @@ class Account(MailSyncBase, HasPublicID, HasEmailAddress):
     # folders and heartbeats.
     sync_should_run = Column(Boolean, server_default=true())
 
+    # Whether to enable IMAP debugging.
+    debug = Column(Boolean, server_default=false())
+
     _sync_status = Column(MutableDict.as_mutable(JSON), default={},
                           nullable=True)
 
