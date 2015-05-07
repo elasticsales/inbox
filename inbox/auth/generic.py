@@ -50,7 +50,7 @@ class GenericAuthHandler(AuthHandler):
         return account
 
     def connect_account(self, email, credential, imap_endpoint,
-                        account_id=None):
+                        account_id=None, debug=False):
         """Provide a connection to a generic IMAP account.
 
         Raises
@@ -63,7 +63,9 @@ class GenericAuthHandler(AuthHandler):
         ValidationError
             If the credentials are invalid.
         """
-        conn = self.connect_to_imap(imap_endpoint)
+        conn = self.connect_to_imap(imap_endpoint,
+                                    account_id=account_id,
+                                    debug=debug)
 
         username, password = credential
         if username is None:

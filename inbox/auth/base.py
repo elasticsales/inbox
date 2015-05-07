@@ -47,7 +47,7 @@ class AuthHandler(object):
     def __init__(self, provider_name):
         self.provider_name = provider_name
 
-    def connect_to_imap(self, imap_endpoint):
+    def connect_to_imap(self, imap_endpoint, account_id=None, debug=False):
         host, port, is_secure = imap_endpoint
         try:
             conn = IMAPClient(host, port=port, use_uid=True, ssl=(port == 993))
@@ -71,11 +71,20 @@ class AuthHandler(object):
                       error='[ALERT] (Failure): {0}'.format(str(e)))
             raise ConnectionError(str(e))
 
-        conn.debug = False
+        if debug:
+            def _log(text):
+                log.debug('imap_log',
+                         account_id=account_id,
+                         text=text)
+
+            conn.debug = 4
+            conn._imap._mesg = _log
+        else:
+            conn.debug = False
         return conn
 
     # optional
-    def connect_account(self, email, secret, imap_endpoint):
+    def connect_account(self, email, secret, imap_endpoint, debug=False):
         """Return an authenticated IMAPClient instance for the given
         credentials.
 
