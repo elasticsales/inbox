@@ -86,8 +86,7 @@ class Message(MailSyncBase, HasRevisions, HasPublicID):
     in_reply_to = Column(JSON, nullable=True)
     # From: http://tools.ietf.org/html/rfc4130, section 5.3.3,
     # max message_id_header is 998 characters
-    message_id_header = Column(String(998), nullable=True, index=True,
-                               mysql_length=191)
+    message_id_header = Column(String(998), nullable=True)
     # There is no hard limit on subject limit in the spec, but 255 is common.
     subject = Column(String(255), nullable=True, default='')
     received_date = Column(DateTime, nullable=False, index=True)
@@ -497,6 +496,8 @@ class Message(MailSyncBase, HasRevisions, HasPublicID):
 # 5.6 when columns are too long to be fully indexed with utf8mb4 collation.
 Index('ix_message_subject', Message.subject, mysql_length=191)
 Index('ix_message_data_sha256', Message.data_sha256, mysql_length=191)
+Index('ix_message_message_id_header', Message.message_id_header,
+      mysql_length=191)
 
 # For API querying performance.
 Index('ix_message_ns_id_is_draft_received_date', Message.namespace_id,
