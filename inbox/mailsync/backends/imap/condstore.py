@@ -10,8 +10,7 @@ No support for server-side threading, so we have to thread messages ourselves.
 """
 from gevent import sleep
 from inbox.crispin import retry_crispin
-from inbox.mailsync.backends.base import (save_folder_names, new_or_updated,
-                                          mailsync_session_scope)
+from inbox.mailsync.backends.base import new_or_updated, mailsync_session_scope
 from inbox.mailsync.backends.imap import common
 from inbox.mailsync.backends.imap.generic import (FolderSyncEngine,
                                                   uidvalidity_cb, UIDStack)
@@ -85,15 +84,13 @@ class CondstoreFolderSyncEngine(FolderSyncEngine):
                             new_highestmodseq=new_highestmodseq,
                             saved_highestmodseq=saved_highestmodseq)
                 return
-            save_folder_names(log, self.account_id,
-                              crispin_client.folder_names(), db_session)
         # Highestmodseq has changed, update accordingly.
         new_uidvalidity = crispin_client.selected_uidvalidity
         changed_uids = crispin_client.new_and_updated_uids(saved_highestmodseq)
         remote_uids = crispin_client.all_uids()
         with mailsync_session_scope() as db_session:
             local_uids = common.all_uids(self.account_id, db_session,
-                                         self.folder_name)
+                                         self.folder_id)
         stack_uids = {uid for uid, _ in download_stack}
         local_with_pending_uids = local_uids | stack_uids
         new, updated = new_or_updated(changed_uids, local_with_pending_uids)

@@ -2,6 +2,7 @@
 
 """
 import re
+import time
 import imaplib
 import imapclient
 
@@ -362,7 +363,8 @@ class CrispinClient(object):
             # checking for Yahoo / Gmail / Outlook (Hotmail) specific errors:
             if 'EXAMINE error - Folder does not exist' in e.message or \
                '[NONEXISTENT] Unknown Mailbox:' in e.message or \
-               '[TRYCREATE] Specified mailbox does not exist' in e.message:
+               '[TRYCREATE] Specified mailbox does not exist' in e.message or \
+               '[TRYCREATE] SELECT error - Folder does not exist' in e.message:
                 raise FolderMissingError(folder)
             raise
 
@@ -470,8 +472,20 @@ class CrispinClient(object):
         list
             UIDs as integers sorted in ascending order.
         """
-        data = self.conn.search(['NOT DELETED'])
-        return sorted([long(s) for s in data])
+        # Note that this list may include items which have been marked for
+        # deletion with the \Deleted flag, but not yet actually removed via
+        # an EXPUNGE command. I choose to include them here since most clients
+        # will still display them (sometimes with a strikethrough). If showing
+        # these is a problem, we can either switch back to searching for
+        # 'UNDELETED' or doing a fetch for ['UID', 'FLAGS'] and filtering.
+
+        t = time.time()
+        fetch_result = self.conn.search(['ALL'])
+        elapsed = time.time() - t
+        self.log.debug('Searching for `ALL` when getting UIDs',
+                         search_time=elapsed,
+                         total_uids=len(fetch_result))
+        return sorted([long(uid) for uid in fetch_result])
 
     def uids(self, uids):
         raw_messages = self.conn.fetch(uids,
