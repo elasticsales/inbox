@@ -4,6 +4,7 @@ from inbox.basicauth import ConnectionError, TransientConnectionError
 from inbox.providers import providers
 from inbox.basicauth import NotSupportedError
 from inbox.log import get_logger
+from socket import gaierror, error as socket_error
 log = get_logger()
 
 
