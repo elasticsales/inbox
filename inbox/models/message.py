@@ -119,7 +119,8 @@ class Message(MailSyncBase, HasRevisions, HasPublicID):
     full_body = relationship('Block', cascade='all, delete')
 
     # this might be a mail-parsing bug, or just a message from a bad client
-    decode_error = Column(Boolean, server_default=false(), nullable=False)
+    decode_error = Column(Boolean, server_default=false(), nullable=False,
+                          index=True)
 
     # only on messages from Gmail (TODO: use different table)
     #
