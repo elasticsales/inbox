@@ -1,14 +1,14 @@
 """update folder unique constraint
 
 Revision ID: 2235895f313b
-Revises: 365071c47fa7
+Revises: 1b0b4e6fdf96
 Create Date: 2015-05-12 01:51:34.556738
 
 """
 
 # revision identifiers, used by Alembic.
 revision = '2235895f313b'
-down_revision = '365071c47fa7'
+down_revision = '1b0b4e6fdf96'
 
 from alembic import op
 
