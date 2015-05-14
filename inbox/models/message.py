@@ -11,6 +11,7 @@ from sqlalchemy.dialects.mysql import LONGBLOB
 from sqlalchemy.orm import relationship, backref, validates
 from sqlalchemy.sql.expression import false
 
+from inbox.config import config
 from inbox.util.html import plaintext2html, strip_tags
 from inbox.sqlalchemy_ext.util import JSON, json_field_too_long
 
