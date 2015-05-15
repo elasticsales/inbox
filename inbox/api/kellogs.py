@@ -127,10 +127,10 @@ def encode(obj, namespace_public_id=None, expand=False):
 
         imapuids = g.db_session.query(ImapUid).filter( \
                        ImapUid.message_id == obj.id)
-        imap_folder_info = []
+        imap_uid_info = []
         for imapuid in imapuids:
-            imap_folder_info.append(encode_imapuid(imapuid))
-        resp['imap_folder_info'] = imap_folder_info
+            imap_uid_info.append(encode_imapuid(imapuid))
+        resp['imap_uid_info'] = imap_uid_info
 
         return resp
 
@@ -163,11 +163,11 @@ def encode(obj, namespace_public_id=None, expand=False):
             seen.add(message.public_id)
             messages.append(message)
 
-        imap_folder_info_by_msg = defaultdict(list)
+        imap_uid_info_by_msg = defaultdict(list)
         imapuids = g.db_session.query(ImapUid).filter( \
                        ImapUid.message_id.in_([m.id for m in messages]))
         for imapuid in imapuids:
-            imap_folder_info_by_msg[imapuid.message_id].append( \
+            imap_uid_info_by_msg[imapuid.message_id].append( \
                 encode_imapuid(imapuid))
 
         # Expand messages within threads
@@ -190,7 +190,7 @@ def encode(obj, namespace_public_id=None, expand=False):
                 'snippet': msg.snippet,
                 'unread': not msg.is_read,
                 'files': msg.api_attachment_metadata,
-                'imap_folder_info': imap_folder_info_by_msg[msg.id],
+                'imap_uid_info': imap_uid_info_by_msg[msg.id],
             }
 
             if msg.is_draft:
