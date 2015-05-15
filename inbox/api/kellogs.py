@@ -1,12 +1,13 @@
 import arrow
 import datetime
 import calendar
-from collections import OrderedDict
+from collections import defaultdict, OrderedDict
 from json import JSONEncoder, dumps
-from flask import Response
+from flask import Response, g
 
 from inbox.models import (Message, Contact, Calendar, Event, When,
                           Thread, Namespace, Block, Tag)
+from inbox.models.backends.imap import ImapUid
 from inbox.models.event import RecurringEvent, RecurringEventOverride
 
 
@@ -113,6 +114,18 @@ def encode(obj, namespace_public_id=None, expand=False):
                 resp['reply_to_message_id'] = obj.reply_to_message.public_id
             else:
                 resp['reply_to_message_id'] = None
+
+        imapuids = g.db_session.query(ImapUid).filter( \
+                       ImapUid.message_id == obj.id)
+        imap_folder_info = []
+        for imapuid in imapuids:
+            imap_folder_info.append({
+                'uid': imapuid.msg_uid,
+                'folder_name': imapuid.folder.name,
+                'extra_flags': imapuid.extra_flags,
+            })
+        resp['imap_folder_info'] = imap_folder_info
+
         return resp
 
     elif isinstance(obj, Thread):
@@ -144,6 +157,16 @@ def encode(obj, namespace_public_id=None, expand=False):
             seen.add(message.public_id)
             messages.append(message)
 
+        imap_folder_info_by_msg = defaultdict(list)
+        imapuids = g.db_session.query(ImapUid).filter( \
+                       ImapUid.message_id.in_([m.id for m in messages]))
+        for imapuid in imapuids:
+            imap_folder_info_by_msg[imapuid.message_id].append({
+                'uid': imapuid.msg_uid,
+                'folder_name': imapuid.folder.name,
+                'extra_flags': imapuid.extra_flags,
+            })
+
         # Expand messages within threads
         all_expanded_messages = []
         all_expanded_drafts = []
@@ -163,7 +186,8 @@ def encode(obj, namespace_public_id=None, expand=False):
                 'thread_id': msg.thread.public_id,
                 'snippet': msg.snippet,
                 'unread': not msg.is_read,
-                'files': msg.api_attachment_metadata
+                'files': msg.api_attachment_metadata,
+                'imap_folder_info': imap_folder_info_by_msg[msg.id],
             }
 
             if msg.is_draft:
