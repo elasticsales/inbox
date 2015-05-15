@@ -23,6 +23,16 @@ def format_tags_list(tags):
     return [{'name': tag.name, 'id': tag.public_id} for tag in tags]
 
 
+def encode_imapuid(imapuid):
+    return {
+        'uid': imapuid.msg_uid,
+        'folder_name': imapuid.folder.name,
+        'folder_canonical_name': imapuid.folder.canonical_name,
+        'extra_flags': imapuid.extra_flags,
+        'g_labels': imapuid.g_labels,
+    }
+
+
 def encode(obj, namespace_public_id=None, expand=False):
     """
     Returns a dictionary representation of an Inbox model object obj, or
@@ -119,11 +129,7 @@ def encode(obj, namespace_public_id=None, expand=False):
                        ImapUid.message_id == obj.id)
         imap_folder_info = []
         for imapuid in imapuids:
-            imap_folder_info.append({
-                'uid': imapuid.msg_uid,
-                'folder_name': imapuid.folder.name,
-                'extra_flags': imapuid.extra_flags,
-            })
+            imap_folder_info.append(encode_imapuid(imapuid))
         resp['imap_folder_info'] = imap_folder_info
 
         return resp
@@ -161,11 +167,8 @@ def encode(obj, namespace_public_id=None, expand=False):
         imapuids = g.db_session.query(ImapUid).filter( \
                        ImapUid.message_id.in_([m.id for m in messages]))
         for imapuid in imapuids:
-            imap_folder_info_by_msg[imapuid.message_id].append({
-                'uid': imapuid.msg_uid,
-                'folder_name': imapuid.folder.name,
-                'extra_flags': imapuid.extra_flags,
-            })
+            imap_folder_info_by_msg[imapuid.message_id].append( \
+                encode_imapuid(imapuid))
 
         # Expand messages within threads
         all_expanded_messages = []
