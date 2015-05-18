@@ -28,6 +28,11 @@ def encode_imapuid(imapuid):
         'uid': imapuid.msg_uid,
         'folder_name': imapuid.folder.name,
         'folder_canonical_name': imapuid.folder.canonical_name,
+        'is_draft': imapuid.is_draft,
+        'is_seen': imapuid.is_seen,
+        'is_flagged': imapuid.is_flagged,
+        'is_recent': imapuid.is_recent,
+        'is_answered': imapuid.is_answered,
         'extra_flags': imapuid.extra_flags,
         'g_labels': imapuid.g_labels,
     }
