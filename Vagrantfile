@@ -39,12 +39,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
   config.vm.network "private_network", ip: "192.168.10.200"
   config.vm.provision :shell, :inline => "apt-get update -q && cd /vagrant && ./setup.sh"
 
-  # Share ports 5000 - 5008
-  9.times do |n|
-    config.vm.network "forwarded_port", guest: 5000+n, host: 5000+n, host_ip: "127.0.0.1"
-  end
-
-  config.vm.network "forwarded_port", guest: 8000, host: 8000, host_ip: "127.0.0.1"
+  # Share inbox API port
   config.vm.network "forwarded_port", guest: 5555, host: 5555, host_ip: "127.0.0.1"
 
   # This will share any folder in the parent directory that
