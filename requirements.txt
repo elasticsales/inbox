@@ -21,7 +21,7 @@ chardet==2.1.1
 setproctitle==1.1.8
 gdata==2.0.18
 git+https://github.com/nylas/dateutil.git#egg=python-dateutil
-flanker==0.4.26
+flanker==0.4.28
 -e git+https://github.com/elasticsales/imapclient.git#egg=imapclient
 alembic==0.6.4
 iconv==1.0
