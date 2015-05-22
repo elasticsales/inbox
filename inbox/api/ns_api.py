@@ -1,3 +1,4 @@
+import datetime
 import os
 import base64
 import email.header
@@ -1135,8 +1136,9 @@ def sync_deltas():
             'deltas': deltas,
         }
         if end_pointer and end_pointer != start_pointer:
-            response['cursor_end'] = db_session.query(Transaction). \
-                get(end_pointer).public_id
+            end_transaction = db_session.query(Transaction).get(end_pointer)
+            response['cursor_end'] = end_transaction.public_id
+            response['timestamp'] = end_transaction.created_at
             return g.encoder.jsonify(response)
 
         # No changes. perhaps wait
@@ -1144,6 +1146,7 @@ def sync_deltas():
             gevent.sleep(poll_interval)
         else:  # Return immediately
             response['cursor_end'] = cursor
+            response['timestamp'] = datetime.datetime.utcnow()
             return g.encoder.jsonify(response)
 
     # If nothing happens until timeout, just return the end of the cursor
