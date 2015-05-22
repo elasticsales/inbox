@@ -80,7 +80,7 @@ def index():
                 progress = None
 
             sync_status = account.sync_status
-            if not 'original_start_time' in sync_status or not account.id in heartbeat:
+            if not sync_status.get('sync_start_time') and not sync_status.get('sync_error'):
                 sync_status = 'starting'
             elif alive:
                 if initial_sync:
