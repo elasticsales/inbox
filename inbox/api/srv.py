@@ -9,6 +9,7 @@ from inbox.models.session import session_scope
 from inbox.api.validation import (bounded_str, ValidatableArgument,
                                   strict_parse_args, limit)
 
+from metrics_api import app as metrics_api
 from ns_api import app as ns_api
 from ns_api import DEFAULT_LIMIT
 
@@ -157,3 +158,4 @@ def home():
 """
 
 app.register_blueprint(ns_api)  # /n/<namespace_id>/...
+app.register_blueprint(metrics_api)
