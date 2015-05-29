@@ -79,7 +79,6 @@ color '35;1' 'Installing dependencies from apt-get...'
 apt-get -y -o Dpkg::Options::="--force-confold" install \
                    git \
                    wget \
-                   supervisor \
                    mysql-server \
                    mysql-client \
                    python \
