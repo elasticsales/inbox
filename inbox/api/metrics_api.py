@@ -58,9 +58,10 @@ def index():
                 account_folder_data = folder_data[account.id]
                 alive = account_heartbeat.alive
                 for folder_status in account_heartbeat.folders:
-                    if folder_status.id in account_folder_data:
+                    folder_status_id = int(folder_status.id)
+                    if folder_status_id in account_folder_data:
                         device = folder_status.devices[0]
-                        account_folder_data[folder_status.id].update({
+                        account_folder_data[folder_status_id].update({
                             'alive': folder_status.alive,
                             'heartbeat_at': device.heartbeat_at,
                         })
@@ -81,19 +82,16 @@ def index():
 
             sync_status = account.sync_status
             if not sync_status.get('sync_start_time') and not sync_status.get('sync_error'):
-                sync_status = 'starting'
+                sync_status_str = 'starting'
             elif alive:
                 if initial_sync:
-                    sync_status = 'initial'
+                    sync_status_str = 'initial'
                 else:
-                    sync_status = 'running'
+                    sync_status_str = 'running'
             elif sync_status['state'] == 'running':
-                if initial_sync:
-                    sync_status = 'initial delayed'
-                else:
-                    sync_status = 'delayed'
+                sync_status_str = 'delayed'
             else:
-                sync_status = 'dead'
+                sync_status_str = 'dead'
 
             data.append({
                 'account_id': account.public_id,
@@ -103,7 +101,9 @@ def index():
                 'provider_name': account.provider,
                 'email_address': account.email_address,
                 'folders': sorted(folder_data[account.id].values(), key=itemgetter('name')),
-                'sync_status': sync_status,
+                'sync_status': sync_status_str,
+                'sync_error': sync_status.get('sync_error'),
+                'sync_end_time': sync_status.get('sync_end_time'),
                 'progress': progress,
             })
 
