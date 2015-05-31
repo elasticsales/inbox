@@ -58,7 +58,6 @@ class AuthHandler(object):
         except IMAPClient.AbortError as e:
             log.error('account_connect_failed',
                       account_id=account_id,
-                      email=email,
                       host=host,
                       port=port,
                       error="[ALERT] Can't connect to host - may be transient")
@@ -66,7 +65,6 @@ class AuthHandler(object):
         except(IMAPClient.Error, gaierror, socket_error) as e:
             log.error('account_connect_failed',
                       account_id=account_id,
-                      email=email,
                       host=host,
                       port=port,
                       error='[ALERT] (Failure): {0}'.format(str(e)))
