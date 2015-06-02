@@ -98,8 +98,6 @@ class GenericAuthHandler(AuthHandler):
                 log.warning('Error issuing IMAP ID command; continuing',
                             account_id=account.id,
                             email=account.email_address,
-                            host=host,
-                            port=port,
                             error=exc)
 
         return conn
