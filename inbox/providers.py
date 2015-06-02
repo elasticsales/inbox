@@ -330,7 +330,12 @@ get_default_providers = lambda: {
         "domains": ["icloud.com"],
         "mx_servers": ["mx1.mail.icloud.com", "mx2.mail.icloud.com",
                        "mx3.mail.icloud.com", "mx4.mail.icloud.com",
-                       "mx5.mail.icloud.com", "mx6.mail.icloud.com"]
+                       "mx5.mail.icloud.com", "mx6.mail.icloud.com"],
+        "transient_error_messages": [("[UNAVAILABLE] Service temporarily "
+                                      "unavailable"),
+                                     ("LOGIN command error: BAD ["
+                                      "'[UNAVAILABLE] Service temporarily "
+                                      "unavailable']"), ],
     },
     "mail.ru": {
         "type": "generic",
@@ -390,7 +395,10 @@ get_default_providers = lambda: {
                        "mxvm2.mail.yahoo.com", "mx-van.mail.am0.yahoodns.net"],
         "transient_error_messages": [("[UNAVAILABLE] (#AUTH701) Service "
                                       "is not available; please try again "
-                                      "later.")],
+                                      "later."),
+                                     ("[UNAVAILABLE] LOGIN failure. Server "
+                                      "error--please try again after some "
+                                      "time. Error code OCF12")],
     },
     "yandex": {
         "type": "generic",

@@ -1,6 +1,5 @@
 from abc import ABCMeta, abstractmethod
 from imapclient import IMAPClient
-from inbox.basicauth import ConnectionError, TransientConnectionError
 from inbox.providers import providers
 from inbox.basicauth import NotSupportedError
 from inbox.log import get_logger
@@ -48,32 +47,27 @@ class AuthHandler(object):
     def __init__(self, provider_name):
         self.provider_name = provider_name
 
-    def connect_to_imap(self, imap_endpoint, account_id=None, debug=False):
-        host, port, is_secure = imap_endpoint
+    def connect_to_imap(self, account):
+        host, port, is_secure = account.imap_endpoint
+        debug = account.debug
         try:
             conn = IMAPClient(host, port=port, use_uid=True, ssl=(port == 993))
             if is_secure and port != 993:
                 # Raises an exception if TLS can't be established
                 conn._imap.starttls()
-        except IMAPClient.AbortError as e:
-            log.error('account_connect_failed',
-                      account_id=account_id,
+        except (IMAPClient.Error, socket.error) as exc:
+            log.error('Error instantiating IMAP connection',
+                      account_id=account.id,
+                      email=account.email_address,
                       host=host,
                       port=port,
-                      error="[ALERT] Can't connect to host - may be transient")
-            raise TransientConnectionError(str(e))
-        except(IMAPClient.Error, gaierror, socket_error) as e:
-            log.error('account_connect_failed',
-                      account_id=account_id,
-                      host=host,
-                      port=port,
-                      error='[ALERT] (Failure): {0}'.format(str(e)))
-            raise ConnectionError(str(e))
+                      error=exc)
+            raise
 
         if debug:
             def _log(text):
                 log.debug('imap_log',
-                         account_id=account_id,
+                         account_id=account.id,
                          text=text)
 
             conn.debug = 4
@@ -83,9 +77,8 @@ class AuthHandler(object):
         return conn
 
     # optional
-    def connect_account(self, email, secret, imap_endpoint, debug=False):
-        """Return an authenticated IMAPClient instance for the given
-        credentials.
+    def connect_account(self, account):
+        """Return an authenticated IMAPClient instance for the given account.
 
         This is an optional interface, which is only needed for accounts that
         are synced using IMAP.

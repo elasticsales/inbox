@@ -10,6 +10,8 @@ Includes:
 USE WITH CAUTION.
 
 """
+import time
+
 import click
 
 from inbox.models.session import session_scope
@@ -24,16 +26,18 @@ from inbox.heartbeat.status import clear_heartbeat_status
 def delete_account_data(account_id):
     with session_scope() as db_session:
         account = db_session.query(Account).get(account_id)
-        email_address = account.email_address
 
-        namespace = account.namespace
-        namespace_id = namespace.id
-        namespace_public_id = namespace.public_id
+        if not account:
+            print 'Account with id {} does NOT exist.'.format(account_id)
+            return
+
+        email_address = account.email_address
+        namespace_id = account.namespace.id
+        namespace_public_id = account.namespace.public_id
 
         if account.sync_should_run or not account.is_deleted:
-            print 'Account with id: {}, email_address: {} and namespace_id: {} '\
-                'NOT marked for deletion.\nWill NOT delete, goodbye. '.\
-                format(account_id, email_address, namespace_id)
+            print 'Account with id {} NOT marked for deletion.\n'\
+                  'Will NOT delete, goodbye.'.format(account_id)
             return -1
 
     question = 'Are you sure you want to delete all data for account with '\
@@ -46,33 +50,40 @@ def delete_account_data(account_id):
         print 'Will NOT delete, goodbye.'
         return 0
 
-    print 'Deleting...'
+    print 'Deleting account with id: {}...'.format(account_id)
+    start = time.time()
 
     # Delete search data
     try:
-        print 'Deleting search data -'
+        print 'Deleting search data'
         delete_index(namespace_id, namespace_public_id)
-        print 'Search data deleted.'
     except Exception as e:
-        error = 'Deletion of search data failed! Error: {}'\
-            '\nWill NOT delete from database, goodbye.'.format(str(e))
-
-        print error
+        print 'Deletion of search data failed! Error: {}\n'\
+              'Will NOT delete from database, goodbye.'.format(str(e))
         return -1
+
+    search_end = time.time()
+    print 'Search data deleted. Time taken: {}'.format(search_end - start)
 
     # Delete data in database
     try:
-        print 'Deleting database data -'
+        print 'Deleting database data'
         delete_namespace(account_id, namespace_id)
-        print 'Database data deleted.'
     except Exception as e:
         print 'Database data deletion failed! Error: {}'.format(str(e))
         return -1
 
+    database_end = time.time()
+    print 'Database data deleted. Time taken: {}'.\
+        format(database_end - search_end)
+
     # Delete liveness data
+    print 'Deleting liveness data'
     clear_heartbeat_status(account_id)
 
-    print 'All data deleted successfully!'
+    end = time.time()
+    print 'All data deleted successfully! TOTAL time taken: {}'.\
+        format(end - start)
     return 0
 
 
