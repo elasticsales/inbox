@@ -49,8 +49,10 @@ class ImapAccount(Account):
 
     @imap_endpoint.setter
     def imap_endpoint(self, endpoint):
-        self._imap_server_host, self._imap_server_port, \
-            self._imap_server_is_secure = endpoint
+        host, port, is_secure = endpoint
+        self._imap_server_host = host
+        self._imap_server_port = int(port)
+        self._imap_server_is_secure = is_secure
 
     @property
     def smtp_endpoint(self):
@@ -62,8 +64,10 @@ class ImapAccount(Account):
 
     @smtp_endpoint.setter
     def smtp_endpoint(self, endpoint):
-        self._smtp_server_host, self._smtp_server_port, \
-            self._smtp_server_is_secure = endpoint
+        host, port, is_secure = endpoint
+        self._smtp_server_host = host
+        self._smtp_server_port = int(port)
+        self._smtp_server_is_secure = is_secure
 
 
 class ImapUid(MailSyncBase):
