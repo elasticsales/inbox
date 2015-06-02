@@ -63,17 +63,6 @@ class AuthHandler(object):
                       port=port,
                       error=exc)
             raise
-
-        if debug:
-            def _log(text):
-                log.debug('imap_log',
-                         account_id=account.id,
-                         text=text)
-
-            conn.debug = 4
-            conn._imap._mesg = _log
-        else:
-            conn.debug = False
         return conn
 
     # optional

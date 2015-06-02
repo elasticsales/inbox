@@ -181,7 +181,6 @@ class CrispinConnectionPool(object):
             self.provider_info = account.provider_info
             self.email_address = account.email_address
             self.auth_handler = account.auth_handler
-            self.debug = account.debug
             if account.provider == 'gmail':
                 self.client_cls = GmailCrispinClient
             elif (getattr(account, 'supports_condstore', None) or
@@ -195,6 +194,16 @@ class CrispinConnectionPool(object):
             with session_scope() as db_session:
                 account = db_session.query(Account).get(self.account_id)
                 conn = self.auth_handler.connect_account(account)
+                if account.debug:
+                    def _log(text):
+                        logger.debug('imap_log',
+                                 account_id=self.account_id,
+                                 text=text)
+
+                    conn.debug = 4
+                    conn._imap._mesg = _log
+                else:
+                    conn.debug = False
                 # If we can connect the account, then we can set the state
                 # to 'running' if it wasn't already
                 if self.sync_state != 'running':
