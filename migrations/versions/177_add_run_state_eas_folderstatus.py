@@ -17,14 +17,16 @@ import sqlalchemy as sa
 def upgrade():
     from inbox.ignition import main_engine
     engine = main_engine(pool_size=1, max_overflow=0)
-    if engine.has_table('easuid'):
-        op.add_column('easfoldersyncstatus', sa.Column('sync_should_run',
-                      sa.Boolean(), server_default=sa.sql.expression.true(),
-                      nullable=False))
+    if not engine.has_table('easfoldersyncstatus'):
+        return
+    op.add_column('easfoldersyncstatus', sa.Column('sync_should_run',
+                  sa.Boolean(), server_default=sa.sql.expression.true(),
+                  nullable=False))
 
 
 def downgrade():
     from inbox.ignition import main_engine
     engine = main_engine(pool_size=1, max_overflow=0)
-    if engine.has_table('easuid'):
-        op.drop_column('easfoldersyncstatus', 'sync_should_run')
+    if not engine.has_table('easfoldersyncstatus'):
+        return
+    op.drop_column('easfoldersyncstatus', 'sync_should_run')
