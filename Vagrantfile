@@ -40,7 +40,6 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
 
   # Share inbox API port
   config.vm.network "forwarded_port", guest: 5555, host: 5555, host_ip: "127.0.0.1"
-  config.vm.network "forwarded_port", guest: 9200, host: 9200, host_ip: "127.0.0.1"
 
   # This will share any folder in the parent directory that
   # has the name share-*
