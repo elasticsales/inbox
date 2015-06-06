@@ -43,13 +43,16 @@ def index():
         folder_data = defaultdict(dict)
 
         for folder_sync_status in folder_sync_statuses:
+            metrics = folder_sync_status.metrics
             folder_data[folder_sync_status.account_id][folder_sync_status.folder_id] = {
-                'remote_uid_count': folder_sync_status.metrics.get('remote_uid_count'),
-                'download_uid_count': folder_sync_status.metrics.get('download_uid_count'),
+                'remote_uid_count': metrics.get('remote_uid_count'),
+                'download_uid_count': metrics.get('download_uid_count'),
                 'state': folder_sync_status.state,
                 'name': folder_sync_status.folder.name,
                 'alive': False,
-                'heartbeat_at': None
+                'heartbeat_at': None,
+                'run_state': metrics.get('run_state'),
+                'sync_error': metrics.get('sync_error'),
             }
 
         for account in accounts:
@@ -94,6 +97,8 @@ def index():
                 sync_status_str = 'dead'
 
             data.append({
+                'account_private_id': account.id,
+                'namespace_private_id': account.namespace.id,
                 'account_id': account.public_id,
                 'namespace_id': account.namespace.public_id,
                 'alive': alive,
@@ -104,6 +109,7 @@ def index():
                 'sync_status': sync_status_str,
                 'sync_error': sync_status.get('sync_error'),
                 'sync_end_time': sync_status.get('sync_end_time'),
+                'sync_host': account.sync_host,
                 'progress': progress,
             })
 
