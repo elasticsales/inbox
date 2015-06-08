@@ -220,6 +220,11 @@ class CrispinConnectionPool(object):
                 account.mark_invalid()
                 account.update_sync_error(str(e))
             raise
+        except Exception, e:
+            with session_scope() as db_session:
+                account = db_session.query(Account).get(self.account_id)
+                account.update_sync_error(str(e))
+            raise
 
 
 def _exc_callback():
