@@ -84,6 +84,8 @@ def events_from_ics(namespace, calendar, ics_str):
                 all_day = True
                 start = arrow.get(start)
                 end = arrow.get(end)
+            else:
+                raise MalformedEventError("Event lacks start and/or end time")
 
             # Get the last modification date.
             # Exchange uses DtStamp, iCloud and Gmail LAST-MODIFIED.
