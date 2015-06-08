@@ -433,9 +433,11 @@ class FolderSyncEngine(Greenlet):
         # obvious place (like Message.create_from_synced) because the function
         # requires new_uid.message to have been flushed.
         # This is necessary because the import_attached_events does db lookups.
+        """
         if new_uid.message.has_attached_events:
             with db_session.no_autoflush:
                 import_attached_events(db_session, acct, new_uid.message)
+        """
 
         return new_uid
 
