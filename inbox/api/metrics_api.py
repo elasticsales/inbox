@@ -59,10 +59,11 @@ def index():
             if account.id in heartbeat:
                 account_heartbeat = heartbeat[account.id]
                 account_folder_data = folder_data[account.id]
-                alive = account_heartbeat.alive
+                alive = True
                 for folder_status in account_heartbeat.folders:
                     folder_status_id = int(folder_status.id)
                     if folder_status_id in account_folder_data:
+                        alive = alive and folder_status.alive
                         device = folder_status.devices[0]
                         account_folder_data[folder_status_id].update({
                             'alive': folder_status.alive,
