@@ -510,7 +510,8 @@ class FolderSyncEngine(Greenlet):
         """ Update flags (the only metadata that can change). """
 
         # bigger chunk because the data being fetched here is very small
-        for uids in chunk(updated, 5 * crispin_client.CHUNK_SIZE):
+        #for uids in chunk(updated, 5 * crispin_client.CHUNK_SIZE):
+        for uids in chunk(updated, 100):
             new_flags = crispin_client.flags(uids)
             # Messages can disappear in the meantime; we'll update them next
             # sync.

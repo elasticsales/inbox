@@ -37,7 +37,7 @@ class ImapSyncMonitor(BaseMailSyncMonitor):
     """
     def __init__(self, account,
                  heartbeat=1, refresh_frequency=30, poll_frequency=30,
-                 retry_fail_classes=[], refresh_flags_max=2000):
+                 retry_fail_classes=[], refresh_flags_max=100):
         self.refresh_frequency = refresh_frequency
         self.poll_frequency = poll_frequency
         self.syncmanager_lock = BoundedSemaphore(1)
