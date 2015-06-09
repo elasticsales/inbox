@@ -1,5 +1,6 @@
-from gevent import Greenlet, joinall, sleep, GreenletExit, event
+from gevent import Greenlet, joinall, sleep, spawn, GreenletExit, event
 from sqlalchemy.exc import DataError
+import traceback
 
 from inbox.log import get_logger
 log = get_logger()
@@ -13,6 +14,10 @@ from inbox.mailsync.exc import SyncException
 from inbox.heartbeat.status import clear_heartbeat_status
 
 THROTTLE_WAIT = 60
+
+# How often to log a stacktrace of all the running greenlets (e.g. to debug
+# issues of greenlets being stuck)
+STACKTRACE_DEBUG_WAIT = 30*60
 
 mailsync_session_scope = session_scope
 
@@ -229,7 +234,22 @@ class BaseMailSyncMonitor(Greenlet):
         if not hasattr(self, 'shared_state'):
             self.shared_state = dict()
 
+        self.stacktrace_debug = None
+
         Greenlet.__init__(self)
+
+    def _stacktrace_debug(self):
+        while True:
+            sleep(STACKTRACE_DEBUG_WAIT)
+            for g in self.folder_monitors:
+                frame = g.gr_frame
+                if frame:
+                    stacktrace = ''.join(traceback.format_stack(frame))
+                    self.log.debug(
+                        greenlet_id=id(g),
+                        account_id=self.account_id,
+                        stacktrace=stacktrace,
+                    )
 
     def _run(self):
         return retry_and_report_killed(self._run_impl,
@@ -242,6 +262,7 @@ class BaseMailSyncMonitor(Greenlet):
                         account_id=self.account_id, logger=self.log,
                         fail_classes=self.retry_fail_classes)
         sync.start()
+        self.stacktrace_debug = spawn(self._stacktrace_debug)
 
         while not sync.ready():
             if self.shutdown.is_set():
@@ -276,6 +297,8 @@ class BaseMailSyncMonitor(Greenlet):
         raise NotImplementedError
 
     def _cleanup(self):
+        if self.stacktrace_debug:
+            self.stacktrace_debug.kill()
         with session_scope() as mailsync_db_session:
             map(lambda x: x.set_stopped(mailsync_db_session),
                 self.folder_monitors)
