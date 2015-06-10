@@ -3,6 +3,7 @@ from imapclient import IMAPClient
 from inbox.providers import providers
 from inbox.basicauth import NotSupportedError
 from inbox.log import get_logger
+import socket
 from socket import gaierror, error as socket_error
 log = get_logger()
 
