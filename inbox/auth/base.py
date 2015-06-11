@@ -48,11 +48,12 @@ class AuthHandler(object):
     def __init__(self, provider_name):
         self.provider_name = provider_name
 
-    def connect_to_imap(self, account):
+    def connect_to_imap(self, account, read_timeout=300):
         host, port, is_secure = account.imap_endpoint
         debug = account.debug
         try:
-            conn = IMAPClient(host, port=port, use_uid=True, ssl=(port == 993))
+            conn = IMAPClient(host, port=port, use_uid=True, ssl=(port == 993),
+                              read_timeout=read_timeout)
             if is_secure and port != 993:
                 # Raises an exception if TLS can't be established
                 conn._imap.starttls()
