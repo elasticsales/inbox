@@ -198,8 +198,7 @@ class Message(MailSyncBase, HasRevisions, HasPublicID):
 
             msg._parse_metadata(parsed, body_string, received_date, account.id,
                                 folder_name, mid)
-        except (mime.DecodingError, AttributeError, RuntimeError, TypeError,
-                ValueError) as e:
+        except Exception as e:
             parsed = None
             log.error('Error parsing message metadata',
                       folder_name=folder_name, account_id=account.id, error=e)
