@@ -246,7 +246,7 @@ class BaseMailSyncMonitor(Greenlet):
                 if frame:
                     stacktrace = ''.join(traceback.format_stack(frame))
                     self.log.debug(
-                        greenlet_id=id(g),
+                        stacktrace_greenlet_id=id(g),
                         account_id=self.account_id,
                         stacktrace=stacktrace,
                     )
