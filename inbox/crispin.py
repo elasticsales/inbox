@@ -426,7 +426,13 @@ class CrispinClient(object):
         return status
 
     def create_folder(self, name):
-        self.conn.create_folder(name)
+        try:
+            self.conn.create_folder(name)
+        except imaplib.IMAP4.error as e:
+            if 'Invalid mailbox name' in unicode(e) and not name.lower().startswith('inbox.'):
+                name = 'INBOX.%s' % name
+                self.conn.create_folder(name)
+        return name
 
     def search_uids(self, criteria):
         """ Find not-deleted UIDs in this folder matching the criteria.

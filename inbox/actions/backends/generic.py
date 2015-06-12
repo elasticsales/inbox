@@ -39,11 +39,9 @@ def get_imapuids_in_folder(db_session, thread_id, folder_id, account_id):
 
 def set_remote_archived(account, thread_id, archived, db_session):
     if account.archive_folder is None:
-        # account has no detected archive folder - create one.
-        archive_folder = Folder.find_or_create(db_session, account,
-                                               'Archive', 'archive')
-        account.archive_folder = archive_folder
-        db_session.commit()
+        archive_folder_name = 'Archive'
+    else:
+        archive_folder_name = account.archive_folder.name
 
     thread = db_session.query(Thread).get(thread_id)
 
@@ -53,10 +51,10 @@ def set_remote_archived(account, thread_id, archived, db_session):
     if archived:
         for folder in folders:
             remote_move(account, thread_id, folder,
-                        account.archive_folder.name, db_session,
+                        archive_folder_name, db_session,
                         create_destination=True)
     else:
-        remote_move(account, thread_id, account.archive_folder.name,
+        remote_move(account, thread_id, archive_folder_name,
                     account.inbox_folder.name, db_session)
 
 
@@ -131,7 +129,7 @@ def remote_move(account, thread_id, from_folder, to_folder, db_session,
         if to_folder not in folders.values() and \
            to_folder not in folders['extra']:
             if create_destination:
-                crispin_client.create_folder(to_folder)
+                to_folder = crispin_client.create_folder(to_folder)
             else:
                 raise Exception("Unknown to_folder '{}'".format(to_folder))
 
