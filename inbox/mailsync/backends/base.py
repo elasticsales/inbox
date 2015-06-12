@@ -102,12 +102,14 @@ def save_folder_names(log, account_id, folder_names, db_session):
     if len(local_folders):
         log.info("folders deleted from remote", folders=local_folders.keys())
     for name, folder in local_folders.iteritems():
+        """
         tag = folder.get_associated_tag(db_session, create_if_missing=False)
         if tag:
             if tag.name in tag.CANONICAL_TAG_NAMES:
                 log.warn("Canonical tag remotely deleted: {}".format(tag.name),
                          account_id=account.id)
             db_session.delete(tag)
+        """
         db_session.delete(folder)
         clear_heartbeat_status(account_id, folder.id)
 
