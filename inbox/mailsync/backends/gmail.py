@@ -91,15 +91,19 @@ class GmailFolderSyncEngine(CondstoreFolderSyncEngine):
             bind_context(change_poller, 'changepoller', self.account_id,
                          self.folder_id)
             if self.is_all_mail(crispin_client):
-                # Put UIDs on the stack such that UIDs for messages in the
-                # inbox get downloaded first, and such that higher (i.e., more
-                # recent) UIDs get downloaded before lower ones.
-                inbox_uids = crispin_client.search_uids(['X-GM-LABELS inbox'])
-                inbox_uid_set = set(inbox_uids)
-                # Note that we have to be checking membership in a /set/ for
-                # performance.
-                ordered_uids_to_sync = [u for u in sorted(remote_uids) if u not
-                                        in inbox_uid_set] + sorted(inbox_uids)
+                if remote_uid_count < 1e6:
+                    # Put UIDs on the stack such that UIDs for messages in the
+                    # inbox get downloaded first, and such that higher (i.e., more
+                    # recent) UIDs get downloaded before lower ones.
+                    inbox_uids = crispin_client.search_uids(['X-GM-LABELS inbox'])
+                    inbox_uid_set = set(inbox_uids)
+                    # Note that we have to be checking membership in a /set/ for
+                    # performance.
+                    ordered_uids_to_sync = [u for u in sorted(remote_uids) if u not
+                                            in inbox_uid_set] + sorted(inbox_uids)
+                else:
+                    ordered_uids_to_sync = sorted(remote_uids)
+
                 for uid in ordered_uids_to_sync:
                     if uid in remote_g_metadata:
                         metadata = GMetadata(remote_g_metadata[uid].msgid,
