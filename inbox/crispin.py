@@ -712,9 +712,9 @@ class GmailCrispinClient(CondStoreCrispinClient):
         list
             Folders to sync (as strings).
         """
-        required_folders = {'all': "All Mail", 'trash': "Trash"}
+        required_folders = {'all': "All Mail"}
         missing_folders = []
-        # All Mail is required to sync all mail. Trash is required for deletes.
+        # All Mail is required to sync all mail.
         for folder in required_folders:
             if folder not in self.folder_names():
                 missing_folders.append(required_folders.get(folder))
@@ -730,6 +730,9 @@ class GmailCrispinClient(CondStoreCrispinClient):
         # Spam is non-essential, so don't error out if it's absent.
         if 'spam' in self.folder_names():
             folders.append(self.folder_names()['spam'])
+        # Trash is required for deletes, but don't require it.
+        if 'trash' in self.folder_names():
+            folders.append(self.folder_names()['trash'])
         return folders
 
     def flags(self, uids):
