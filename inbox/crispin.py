@@ -726,7 +726,7 @@ class GmailCrispinClient(CondStoreCrispinClient):
                 "https://mail.google.com/mail/#settings/labels"
                 .format(self.account_id, self.email_address,
                         " and ".join(missing_folders)))
-        folders = [self.folder_names()['all'], self.folder_names()['trash']]
+        folders = [self.folder_names()['all']]
         # Spam is non-essential, so don't error out if it's absent.
         if 'spam' in self.folder_names():
             folders.append(self.folder_names()['spam'])
