@@ -196,7 +196,7 @@ class CrispinConnectionPool(object):
                 conn = self.auth_handler.connect_account(account)
                 if account.debug:
                     def _log(text):
-                        logger.debug('imap_log',
+                        log.debug('imap_log',
                                  account_id=self.account_id,
                                  text=text)
 
