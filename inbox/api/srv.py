@@ -136,9 +136,18 @@ def modify_namespace(namespace_public_id):
                 account.imap_endpoint = data['imap_endpoint']
             if 'imap_password' in data:
                 account.password = data['imap_password']
+
+            if 'refresh_token' in data:
+                raise ValueError('Cannot change the refresh token on a password account.')
+
         elif isinstance(account, GmailAccount):
             if 'refresh_token' in data:
                 account.refresh_token = data['refresh_token']
+
+            if 'imap_endpoint' in data or 'imap_username' in data or \
+               'imap_password' in data:
+                raise ValueError('Cannot change IMAP fields on a Gmail account.')
+
         else:
             raise ValueError('Account type not supported.')
 
