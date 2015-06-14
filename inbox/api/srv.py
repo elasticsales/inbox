@@ -8,6 +8,7 @@ from inbox.models import Namespace, Account
 from inbox.models.session import session_scope
 from inbox.api.validation import (bounded_str, ValidatableArgument,
                                   strict_parse_args, limit)
+from inbox.api.err import APIException, InputError
 
 from metrics_api import app as metrics_api
 from ns_api import app as ns_api
@@ -17,6 +18,12 @@ app = Flask(__name__)
 # Handle both /endpoint and /endpoint/ without redirecting.
 # Note that we need to set this *before* registering the blueprint.
 app.url_map.strict_slashes = False
+
+@app.errorhandler(APIException)
+def handle_input_error(error):
+    response = jsonify(message=error.message, type='invalid_request_error')
+    response.status_code = error.status_code
+    return response
 
 
 def default_json_error(ex):
@@ -138,7 +145,7 @@ def modify_namespace(namespace_public_id):
                 account.password = data['imap_password']
 
             if 'refresh_token' in data:
-                raise ValueError('Cannot change the refresh token on a password account.')
+                raise InputError('Cannot change the refresh token on a password account.')
 
         elif isinstance(account, GmailAccount):
             if 'refresh_token' in data:
@@ -146,7 +153,7 @@ def modify_namespace(namespace_public_id):
 
             if 'imap_endpoint' in data or 'imap_username' in data or \
                'imap_password' in data:
-                raise ValueError('Cannot change IMAP fields on a Gmail account.')
+                raise InputError('Cannot change IMAP fields on a Gmail account.')
 
         else:
             raise ValueError('Account type not supported.')
