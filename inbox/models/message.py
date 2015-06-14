@@ -353,7 +353,7 @@ class Message(MailSyncBase, HasRevisions, HasPublicID):
         if self.snippet is None:
             self.snippet = ''
 
-    def calculate_body(self, html_parts, plain_parts, story_body=True):
+    def calculate_body(self, html_parts, plain_parts, store_body=True):
         html_body = ''.join(html_parts).decode('utf-8').strip()
         plain_body = '\n'.join(plain_parts).decode('utf-8').strip()
         if html_body:
