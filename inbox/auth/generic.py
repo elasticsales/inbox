@@ -13,19 +13,11 @@ import inbox.auth.starttls
 from inbox.basicauth import ValidationError, UserRecoverableConfigError
 from inbox.models import Namespace
 from inbox.models.backends.generic import GenericAccount
+from inbox.sendmail.smtp.postel import SMTPClient
 
 
 PROVIDER = 'generic'
 AUTH_HANDLER_CLS = 'GenericAuthHandler'
-
-AUTH_INVALID_RESPONSES = [
-    '[AUTHENTICATIONFAILED] Authentication failed.',
-    '[AUTHENTICATIONFAILED] Invalid credentials (Failure)',
-    '[AUTHENTICATIONFAILED] Invalid username or password.',
-    '[AUTHENTICATIONFAILED] (#MBR1212) Incorrect username or password.',
-    'Incorrect username or password.',
-    'LOGIN failed'
-]
 
 
 class GenericAuthHandler(AuthHandler):
@@ -71,7 +63,7 @@ class GenericAuthHandler(AuthHandler):
         try:
             conn.login(account.imap_username, account.password)
         except IMAPClient.Error as exc:
-            if exc.message in AUTH_INVALID_RESPONSES:
+            if _auth_is_invalid(exc):
                 log.error('IMAP login failed',
                           account_id=account.id,
                           email=account.email_address,
@@ -142,6 +134,19 @@ class GenericAuthHandler(AuthHandler):
                                              "administrator and try again.")
         finally:
             conn.logout()
+        try:
+            # Check that SMTP settings work by establishing and closing and
+            # SMTP session.
+            smtp_client = SMTPClient(account)
+            with smtp_client._get_connection():
+                pass
+        except Exception as exc:
+            log.error('Failed to establish an SMTP connection',
+                      email=account.email_address,
+                      account_id=account.id,
+                      error=exc)
+            raise UserRecoverableConfigError("Please check that your SMTP "
+                                             "settings are correct.")
         return True
 
     def interactive_auth(self, email_address):
@@ -163,3 +168,17 @@ class GenericAuthHandler(AuthHandler):
                             smtp_server_port=smtp_server_port)
 
         return response
+
+
+def _auth_is_invalid(exc):
+    # IMAP doesn't really have error semantics, so we have to match the error
+    # message against a list of known response strings to determine whether we
+    # couldn't log in because the credentials are invalid, or because of some
+    # temporary server error.
+    AUTH_INVALID_PREFIXES = (
+        '[authenticationfailed]',
+        'incorrect username or password',
+        'login failed',
+    )
+    return any(exc.message.lower().startswith(msg) for msg in
+               AUTH_INVALID_PREFIXES)
