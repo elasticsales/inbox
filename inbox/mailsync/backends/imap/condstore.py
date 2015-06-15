@@ -94,7 +94,14 @@ class CondstoreFolderSyncEngine(FolderSyncEngine):
         stack_uids = {uid for uid, _ in download_stack}
         local_with_pending_uids = local_uids | stack_uids
         new, updated = new_or_updated(changed_uids, local_with_pending_uids)
-        if changed_uids:
+
+        missing_uids = set(remote_uids) - set(local_with_pending_uids) - \
+                       set(changed_uids)
+        if missing_uids:
+            log.warning('Found missing UIDs', missing_uids=sorted(missing_uids))
+            new += list(missing_uids)
+
+        if changed_uids or missing_uids:
             log.info("Changed UIDs", message="new: {} updated: {}"
                                              .format(len(new), len(updated)),
                      new_uid_count=len(new), updated_uid_count=len(updated))
