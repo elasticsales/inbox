@@ -138,7 +138,8 @@ def status():
         data = request.get_json(force=True)
         if 'sync_should_run' in data:
             if data['sync_should_run']:
-                account.enable_sync()
+                sync_host = data.get('sync_host', None)
+                account.enable_sync(sync_host=sync_host)
             else:
                 reason = data.get('disable_reason', None)
                 account.disable_sync(reason)
