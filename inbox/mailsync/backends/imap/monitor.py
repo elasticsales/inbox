@@ -49,10 +49,13 @@ class ImapSyncMonitor(BaseMailSyncMonitor):
                                      retry_fail_classes)
 
     def get_sync_engine_class(self, crispin_client):
+        """
         if 'CONDSTORE' in crispin_client.conn.capabilities():
             return CondstoreFolderSyncEngine
         else:
             return FolderSyncEngine
+        """
+        return FolderSyncEngine
 
     @retry_crispin
     def prepare_sync(self):
