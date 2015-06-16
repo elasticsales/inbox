@@ -43,19 +43,16 @@ class ImapSyncMonitor(BaseMailSyncMonitor):
         self.syncmanager_lock = BoundedSemaphore(1)
         self.refresh_flags_max = refresh_flags_max
 
-        provider_supports_condstore = account.provider_info.get('condstore',
-                                                                False)
-        account_supports_condstore = getattr(account, 'supports_condstore',
-                                             False)
-        if provider_supports_condstore or account_supports_condstore:
-            self.sync_engine_class = CondstoreFolderSyncEngine
-        else:
-            self.sync_engine_class = FolderSyncEngine
-
         self.folder_monitors = Group()
 
         BaseMailSyncMonitor.__init__(self, account, heartbeat,
                                      retry_fail_classes)
+
+    def get_sync_engine_class(self, crispin_client):
+        if 'CONDSTORE' in crispin_client.conn.capabilities():
+            return CondstoreFolderSyncEngine
+        else:
+            return FolderSyncEngine
 
     @retry_crispin
     def prepare_sync(self):
@@ -65,6 +62,8 @@ class ImapSyncMonitor(BaseMailSyncMonitor):
         order)."""
         with mailsync_session_scope() as db_session:
             with connection_pool(self.account_id).get() as crispin_client:
+                self.sync_engine_class = self.get_sync_engine_class(
+                                            crispin_client)
                 # the folders we should be syncing
                 sync_folders = crispin_client.sync_folders()
                 # get a fresh list of the folder names from the remote

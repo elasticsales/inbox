@@ -50,7 +50,9 @@ class GmailSyncMonitor(ImapSyncMonitor):
     def __init__(self, *args, **kwargs):
         kwargs['retry_fail_classes'] = [GmailSettingError]
         ImapSyncMonitor.__init__(self, *args, **kwargs)
-        self.sync_engine_class = GmailFolderSyncEngine
+
+    def get_sync_engine_class(self, crispin_client):
+        return GmailFolderSyncEngine
 
 log = get_logger()
 

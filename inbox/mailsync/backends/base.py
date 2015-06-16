@@ -240,6 +240,9 @@ class BaseMailSyncMonitor(Greenlet):
 
         Greenlet.__init__(self)
 
+    def get_sync_engine_class(self, crispin_client):
+        raise NotImplementedError()
+
     def _stacktrace_debug(self):
         while True:
             sleep(STACKTRACE_DEBUG_WAIT)

@@ -181,13 +181,6 @@ class CrispinConnectionPool(object):
             self.provider_info = account.provider_info
             self.email_address = account.email_address
             self.auth_handler = account.auth_handler
-            if account.provider == 'gmail':
-                self.client_cls = GmailCrispinClient
-            elif (getattr(account, 'supports_condstore', None) or
-                  account.provider_info.get('condstore')):
-                self.client_cls = CondStoreCrispinClient
-            else:
-                self.client_cls = CrispinClient
 
     def _new_connection(self):
         try:
@@ -204,11 +197,21 @@ class CrispinConnectionPool(object):
                     conn._imap._mesg = _log
                 else:
                     conn.debug = False
+
                 # If we can connect the account, then we can set the state
                 # to 'running' if it wasn't already
                 if self.sync_state != 'running':
                     self.sync_state = account.sync_state = 'running'
-            return self.client_cls(self.account_id, self.provider_info,
+
+                if account.provider == 'gmail':
+                    client_cls = GmailCrispinClient
+                else:
+                    if 'CONDSTORE' in conn.capabilities():
+                        client_cls = CondStoreCrispinClient
+                    else:
+                        client_cls = CrispinClient
+
+            return client_cls(self.account_id, self.provider_info,
                                    self.email_address, conn,
                                    readonly=self.readonly)
         except ValidationError, e:
