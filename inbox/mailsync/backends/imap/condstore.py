@@ -95,6 +95,10 @@ class CondstoreFolderSyncEngine(FolderSyncEngine):
         local_with_pending_uids = local_uids | stack_uids
         new, updated = new_or_updated(changed_uids, local_with_pending_uids)
 
+        log.debug('highestmodseq UIDs', changed_uids=sorted(changed_uids),
+                                        saved_highestmodseq=saved_highestmodseq,
+                                        new_highestmodseq=new_highestmodseq)
+
         missing_uids = set(remote_uids) - set(local_with_pending_uids) - \
                        set(changed_uids)
         if missing_uids:

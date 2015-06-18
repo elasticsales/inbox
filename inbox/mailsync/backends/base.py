@@ -164,7 +164,8 @@ def commit_uids(db_session, new_uids, provider):
     try:
         msg = u'count: {}'.format(len(new_uids))
         log.info('Commit new UIDs', message=msg,
-                 new_committed_message_count=len(new_uids), provider=provider)
+                 new_committed_message_count=len(new_uids), provider=provider,
+                 uids=sorted([u.msg_uid for u in new_uids]))
 
         db_session.add_all(new_uids)
         db_session.commit()
