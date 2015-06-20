@@ -5,7 +5,8 @@ from operator import itemgetter
 from inbox.api.kellogs import APIEncoder
 from inbox.heartbeat.status import get_heartbeat_status
 from inbox.models import Folder, Account, Namespace
-from inbox.models.backends.imap import ImapFolderSyncStatus
+from inbox.models.backends.generic import GenericAccount
+from inbox.models.backends.imap import ImapAccount, ImapFolderSyncStatus
 from inbox.models.session import session_scope
 
 app = Blueprint(
@@ -22,7 +23,8 @@ def index():
         else:
             namespace = None
 
-        accounts = db_session.query(Account)
+        accounts = db_session.query(ImapAccount).with_polymorphic([GenericAccount])
+
         if namespace:
             accounts = accounts.filter(Account.namespace == namespace)
 
