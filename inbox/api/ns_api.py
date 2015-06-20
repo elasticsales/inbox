@@ -5,8 +5,7 @@ import email.header
 import uuid
 import gevent
 import time
-from inbox.models.session import session_scope
-
+from datetime import datetime
 
 from flask import request, g, Blueprint, make_response, Response
 from flask import jsonify as flask_jsonify
@@ -14,22 +13,24 @@ from flask.ext.restful import reqparse
 from sqlalchemy import asc, or_, func
 from sqlalchemy.orm.exc import NoResultFound
 
+from inbox.models.session import session_scope
 from inbox.models import (Message, Block, Part, Thread, Namespace,
                           Tag, Contact, Calendar, Event, Transaction)
-from inbox.api.sending import send_draft
+from inbox.api.sending import send_draft, send_raw_mime
 from inbox.api.kellogs import APIEncoder
 from inbox.api import filtering
 from inbox.api.validation import (get_tags, get_attachments, get_calendar,
                                   get_recipients, get_draft, valid_public_id,
                                   valid_event, valid_event_update, timestamp,
                                   bounded_str, view, strict_parse_args,
-                                  limit, ValidatableArgument, strict_bool,
-                                  validate_draft_recipients,
+                                  limit, offset, ValidatableArgument,
+                                  strict_bool, validate_draft_recipients,
                                   validate_search_query,
                                   validate_search_sort,
                                   valid_delta_object_types)
 import inbox.contacts.crud
-from inbox.sendmail.base import (create_draft, update_draft, delete_draft)
+from inbox.sendmail.base import (create_draft, update_draft, delete_draft,
+                                    create_draft_from_mime)
 from inbox.log import get_logger
 from inbox.models.constants import MAX_INDEXABLE_LENGTH
 from inbox.models.action_log import schedule_action, ActionError
@@ -94,7 +95,7 @@ def start():
     g.parser = reqparse.RequestParser(argument_class=ValidatableArgument)
     g.parser.add_argument('limit', default=DEFAULT_LIMIT, type=limit,
                           location='args')
-    g.parser.add_argument('offset', default=0, type=int, location='args')
+    g.parser.add_argument('offset', default=0, type=offset, location='args')
 
 
 @app.after_request
@@ -739,8 +740,10 @@ def event_update_api(public_id):
             setattr(event, attr, data[attr])
 
     g.db_session.commit()
+
     schedule_action('update_event', event, g.namespace.id, g.db_session,
                     calendar_uid=event.calendar.uid)
+
     return g.encoder.jsonify(event)
 
 
@@ -754,14 +757,19 @@ def event_delete_api(public_id):
     except NoResultFound:
         raise NotFoundError("Couldn't find event {0}".format(public_id))
     if event.calendar.read_only:
-        raise InputError('Cannot delete event {} from read_only '
-                         'calendar.'.format(public_id))
+        raise InputError('Cannot delete event {} from read_only calendar.'.
+                         format(public_id))
+
+    # Set the local event status to 'cancelled' rather than deleting it,
+    # in order to be consistent with how we sync deleted events from the
+    # remote, and consequently return them through the events, delta sync APIs
+    event.status = 'cancelled'
+    g.db_session.commit()
 
     schedule_action('delete_event', event, g.namespace.id, g.db_session,
                     event_uid=event.uid, calendar_name=event.calendar.name,
                     calendar_uid=event.calendar.uid)
-    g.db_session.delete(event)
-    g.db_session.commit()
+
     return g.encoder.jsonify(None)
 
 
@@ -1069,6 +1077,24 @@ def draft_delete_api(public_id):
 
 @app.route('/send', methods=['POST'])
 def draft_send_api():
+    if request.content_type == "message/rfc822":
+        msg = create_draft_from_mime(g.namespace.account, request.data,
+                                                                 g.db_session)
+        validate_draft_recipients(msg)
+        resp = send_raw_mime(g.namespace.account, g.db_session, msg)
+        if resp.status_code == 200:
+            # At this point, the message has been successfully sent. If there's
+            # any sort of error in committing the updated state, don't allow it
+            # to cause the request to fail. Otherwise a client may think their
+            # message hasn't been sent, when it fact it has.
+            try:
+                g.db_session.add(msg)
+                g.db_session.commit()
+            except Exception as exc:
+                g.log.critical('Error committing draft after successful send',
+                               exc_info=True, error=exc)
+        return resp
+
     data = request.get_json(force=True)
     draft_public_id = data.get('draft_id')
     if draft_public_id is not None:
@@ -1158,11 +1184,19 @@ def sync_deltas():
 @app.route('/delta/generate_cursor', methods=['POST'])
 def generate_cursor():
     data = request.get_json(force=True)
+
     if data.keys() != ['start'] or not isinstance(data['start'], int):
         raise InputError('generate_cursor request body must have the format '
-                         '{"start": <Unix timestamp>}')
+                         '{"start": <Unix timestamp> (seconds)}')
 
     timestamp = int(data['start'])
+
+    try:
+        datetime.utcfromtimestamp(timestamp)
+    except ValueError:
+        raise InputError('generate_cursor request body must have the format '
+                         '{"start": <Unix timestamp> (seconds)}')
+
     cursor = delta_sync.get_transaction_cursor_near_timestamp(
         g.namespace.id, timestamp, g.db_session)
     return g.encoder.jsonify({'cursor': cursor})
