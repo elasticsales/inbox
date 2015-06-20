@@ -1,4 +1,3 @@
-import datetime
 import os
 import base64
 import email.header
@@ -1173,7 +1172,7 @@ def sync_deltas():
             gevent.sleep(poll_interval)
         else:  # Return immediately
             response['cursor_end'] = cursor
-            response['timestamp'] = datetime.datetime.utcnow()
+            response['timestamp'] = datetime.utcnow()
             return g.encoder.jsonify(response)
 
     # If nothing happens until timeout, just return the end of the cursor
