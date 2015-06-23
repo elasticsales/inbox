@@ -66,6 +66,10 @@ class DeleteHandler(gevent.Greenlet):
                     continue
 
                 thread = message.thread
+
+                if not thread or not message in thread.messages:
+                    continue
+
                 # Remove message from thread rather than deleting it
                 # outright, so that the change to the thread gets properly
                 # versioned.
