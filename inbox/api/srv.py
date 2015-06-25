@@ -174,4 +174,4 @@ def home():
 """
 
 app.register_blueprint(ns_api)  # /n/<namespace_id>/...
-app.register_blueprint(metrics_api)
+#app.register_blueprint(metrics_api)
