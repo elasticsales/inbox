@@ -18,6 +18,12 @@ from inbox.log import get_logger
 log = get_logger()
 
 
+# HACK
+# Until this is properly resolved, we go back further than the last stored
+# HIGHESTMODSEQ to fetch missing changes from Gmail accounts.
+MODSEQ_TOLERANCE_HACK = 500
+
+
 class CondstoreFolderSyncEngine(FolderSyncEngine):
     def should_idle(self, crispin_client):
         return self.folder_name == crispin_client.folder_names()['inbox']
@@ -86,7 +92,8 @@ class CondstoreFolderSyncEngine(FolderSyncEngine):
                 return
         # Highestmodseq has changed, update accordingly.
         new_uidvalidity = crispin_client.selected_uidvalidity
-        changed_uids = crispin_client.new_and_updated_uids(saved_highestmodseq)
+        changed_uids = crispin_client.new_and_updated_uids(
+            saved_highestmodseq-MODSEQ_TOLERANCE_HACK)
         remote_uids = crispin_client.all_uids()
         with mailsync_session_scope() as db_session:
             local_uids = common.all_uids(self.account_id, db_session,
