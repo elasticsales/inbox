@@ -87,11 +87,14 @@ class GmailFolderSyncEngine(CondstoreFolderSyncEngine):
                         db_session, remote_uid_count=remote_uid_count,
                         download_uid_count=len(unknown_uids))
 
-            remote_g_metadata = crispin_client.g_metadata(unknown_uids)
             download_stack = UIDStack()
             change_poller = spawn(self.poll_for_changes, download_stack)
             bind_context(change_poller, 'changepoller', self.account_id,
                          self.folder_id)
+
+            # It takes around 1 minute to fetch flags for 10K messages.
+            CHUNK_SIZE = 10000
+
             if self.is_all_mail(crispin_client):
                 if remote_uid_count < 1e6:
                     # Put UIDs on the stack such that UIDs for messages in the
@@ -101,24 +104,29 @@ class GmailFolderSyncEngine(CondstoreFolderSyncEngine):
                     inbox_uid_set = set(inbox_uids)
                     # Note that we have to be checking membership in a /set/ for
                     # performance.
-                    ordered_uids_to_sync = [u for u in sorted(remote_uids) if u not
-                                            in inbox_uid_set] + sorted(inbox_uids)
+                    ordered_uids_to_sync = [u for u in sorted(unknown_uids) if u not
+                                            in inbox_uid_set] + sorted(inbox_uid_set - local_uids)
                 else:
-                    ordered_uids_to_sync = sorted(remote_uids)
+                    ordered_uids_to_sync = sorted(unknown_uids)
 
-                for uid in ordered_uids_to_sync:
-                    if uid in remote_g_metadata:
-                        metadata = GMetadata(remote_g_metadata[uid].msgid,
-                                             remote_g_metadata[uid].thrid,
-                                             self.throttled)
-                        download_stack.put(uid, metadata)
-                self.__download_queued_threads(crispin_client, download_stack)
+                for uids in chunk(reversed(ordered_uids_to_sync), CHUNK_SIZE):
+                    remote_g_metadata = crispin_client.g_metadata(uids)
+                    for uid in reversed(uids):
+                        if uid in remote_g_metadata:
+                            metadata = GMetadata(remote_g_metadata[uid].msgid,
+                                                 remote_g_metadata[uid].thrid,
+                                                 self.throttled)
+                            download_stack.put(uid, metadata)
+                    self.__download_queued_threads(crispin_client, download_stack)
             else:
-                full_download = self.__deduplicate_message_download(
-                    crispin_client, remote_g_metadata, unknown_uids)
-                for uid in sorted(full_download):
-                    download_stack.put(uid, None)
-                self.download_uids(crispin_client, download_stack)
+                for uids in chunk(unknown_uids, CHUNK_SIZE):
+                    remote_g_metadata = crispin_client.g_metadata(uids)
+                    full_download = self.__deduplicate_message_download(
+                        crispin_client, remote_g_metadata, uids)
+                    for uid in sorted(full_download):
+                        download_stack.put(uid, None)
+                    self.download_uids(crispin_client, download_stack)
+
         finally:
             if change_poller is not None:
                 # schedule change_poller to die
