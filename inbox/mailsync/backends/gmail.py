@@ -95,8 +95,11 @@ class GmailFolderSyncEngine(CondstoreFolderSyncEngine):
             # It takes around 1 minute to fetch flags for 10K messages.
             CHUNK_SIZE = 10000
 
+            # Only use search commands on smaller mailboxes
+            SEARCH_THRESHOLD = 1e6
+
             if self.is_all_mail(crispin_client):
-                if remote_uid_count < 1e6:
+                if remote_uid_count < SEARCH_THRESHOLD:
                     # Put UIDs on the stack such that UIDs for messages in the
                     # inbox get downloaded first, and such that higher (i.e., more
                     # recent) UIDs get downloaded before lower ones.
@@ -117,7 +120,10 @@ class GmailFolderSyncEngine(CondstoreFolderSyncEngine):
                                                  remote_g_metadata[uid].thrid,
                                                  self.throttled)
                             download_stack.put(uid, metadata)
-                    self.__download_queued_threads(crispin_client, download_stack)
+                    if remote_uid_count < SEARCH_THRESHOLD:
+                        self.__download_queued_threads(crispin_client, download_stack)
+                    else:
+                        self.download_uids(crispin_client, download_stack)
             else:
                 for uids in chunk(unknown_uids, CHUNK_SIZE):
                     remote_g_metadata = crispin_client.g_metadata(uids)
