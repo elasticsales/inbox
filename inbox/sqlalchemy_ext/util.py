@@ -1,4 +1,5 @@
 import abc
+import datetime
 import uuid
 import struct
 import time
@@ -94,15 +95,18 @@ def receive_rollback(conn):
     if 'statements' in conn.info and 'begin_start_time' in conn.info:
         statements = conn.info.get('statements')
         transaction_time = now - conn.info.get('begin_start_time')
+        query_total_time = sum(s['execution_time'] for s in statements)
         if transaction_time > SLOW_TRANSACTION_THRESHOLD:
             log.warning('slow rollback', statements=statements,
-                                  transaction_time=transaction_time)
+                                         transaction_time=transaction_time,
+                                         query_total_time=query_total_time)
         del conn.info['statements']
         del conn.info['begin_start_time']
 
 @event.listens_for(Engine, "before_cursor_execute")
 def receive_before_cursor_execute(conn, cursor, statement,
                           parameters, context, executemany):
+    context._start_ts = datetime.datetime.utcnow()
     context._start_time = time.time()
 
 
@@ -115,6 +119,7 @@ def receive_after_cursor_execute(conn, cursor, statement,
             'statement': statement,
             'parameters': `parameters`,
             'execution_time': execution_time,
+            'timestamp': str(context._start_ts),
         })
 
 
