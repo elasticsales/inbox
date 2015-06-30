@@ -49,6 +49,75 @@ def after_cursor_execute(conn, cursor, statement,
             log.error('logging UnicodeDecodeError')
 
 
+# in seconds
+SLOW_TRANSACTION_THRESHOLD = 30
+
+# Couldn't figure out how to monkey-patch to add an event, so we're patching
+# _commit_impl
+from sqlalchemy.engine.base import Connection
+def _commit_impl(self, *args, **kwargs):
+    _original_commit_impl(self, *args, **kwargs)
+    receive_after_commit(self)
+_original_commit_impl = Connection._commit_impl
+Connection._commit_impl = _commit_impl
+
+@event.listens_for(Engine, 'begin')
+def receive_begin(conn):
+    #log.debug('begin')
+    conn.info['begin_start_time'] = time.time()
+    conn.info['statements'] = []
+
+@event.listens_for(Engine, 'commit')
+def receive_commit(conn):
+    conn.info['commit_start_time'] = time.time()
+
+def receive_after_commit(conn):
+    now = time.time()
+    if 'statements' in conn.info and 'begin_start_time' in conn.info \
+                                 and 'commit_start_time' in conn.info:
+        statements = conn.info.get('statements')
+        transaction_time = now - conn.info.get('begin_start_time')
+        commit_time = now - conn.info.get('commit_start_time')
+        query_total_time = sum(s['execution_time'] for s in statements)
+        if transaction_time > SLOW_TRANSACTION_THRESHOLD:
+            log.warning('slow transaction', statements=statements,
+                                          transaction_time=transaction_time,
+                                          commit_time=commit_time,
+                                          query_total_time=query_total_time)
+        del conn.info['statements']
+        del conn.info['begin_start_time']
+        del conn.info['commit_start_time']
+
+@event.listens_for(Engine, 'rollback')
+def receive_rollback(conn):
+    now = time.time()
+    if 'statements' in conn.info and 'begin_start_time' in conn.info:
+        statements = conn.info.get('statements')
+        transaction_time = now - conn.info.get('begin_start_time')
+        if transaction_time > SLOW_TRANSACTION_THRESHOLD:
+            log.warning('slow rollback', statements=statements,
+                                  transaction_time=transaction_time)
+        del conn.info['statements']
+        del conn.info['begin_start_time']
+
+@event.listens_for(Engine, "before_cursor_execute")
+def receive_before_cursor_execute(conn, cursor, statement,
+                          parameters, context, executemany):
+    context._start_time = time.time()
+
+
+@event.listens_for(Engine, "after_cursor_execute")
+def receive_after_cursor_execute(conn, cursor, statement,
+                         parameters, context, executemany):
+    execution_time = (time.time() - context._start_time)
+    if 'statements' in conn.info:
+        conn.info['statements'].append({
+            'statement': statement,
+            'parameters': `parameters`,
+            'execution_time': execution_time,
+        })
+
+
 class SQLAlchemyCompatibleAbstractMetaClass(DeclarativeMeta, abc.ABCMeta):
     """Declarative model classes that *also* inherit from an abstract base
     class need a metaclass like this one, in order to prevent metaclass
