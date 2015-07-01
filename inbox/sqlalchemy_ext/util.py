@@ -3,6 +3,7 @@ import datetime
 import uuid
 import struct
 import time
+import traceback
 
 from bson import json_util, EPOCH_NAIVE
 # Monkeypatch to not include tz_info in decoded JSON.
@@ -80,11 +81,13 @@ def receive_after_commit(conn):
         transaction_time = now - conn.info.get('begin_start_time')
         commit_time = now - conn.info.get('commit_start_time')
         query_total_time = sum(s['execution_time'] for s in statements)
+        tb = '\n'.join(traceback.format_stack())
         if transaction_time > SLOW_TRANSACTION_THRESHOLD:
             log.warning('slow transaction', statements=statements,
                                           transaction_time=transaction_time,
                                           commit_time=commit_time,
-                                          query_total_time=query_total_time)
+                                          query_total_time=query_total_time,
+                                          traceback=tb)
         del conn.info['statements']
         del conn.info['begin_start_time']
         del conn.info['commit_start_time']
@@ -96,10 +99,12 @@ def receive_rollback(conn):
         statements = conn.info.get('statements')
         transaction_time = now - conn.info.get('begin_start_time')
         query_total_time = sum(s['execution_time'] for s in statements)
+        tb = '\n'.join(traceback.format_stack())
         if transaction_time > SLOW_TRANSACTION_THRESHOLD:
             log.warning('slow rollback', statements=statements,
                                          transaction_time=transaction_time,
-                                         query_total_time=query_total_time)
+                                         query_total_time=query_total_time,
+                                         traceback=tb)
         del conn.info['statements']
         del conn.info['begin_start_time']
 
