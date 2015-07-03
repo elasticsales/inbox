@@ -93,7 +93,7 @@ class CondstoreFolderSyncEngine(FolderSyncEngine):
         # Highestmodseq has changed, update accordingly.
         new_uidvalidity = crispin_client.selected_uidvalidity
         changed_uids = crispin_client.new_and_updated_uids(
-            saved_highestmodseq-MODSEQ_TOLERANCE_HACK)
+            max(1, saved_highestmodseq-MODSEQ_TOLERANCE_HACK))
         remote_uids = crispin_client.all_uids()
         with mailsync_session_scope() as db_session:
             local_uids = common.all_uids(self.account_id, db_session,
