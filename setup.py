@@ -13,7 +13,7 @@ setup(
         "click>=2.4",
         "cpu_affinity>=0.1.0",
         "pyyaml",
-        "SQLAlchemy==0.9.8",
+        "SQLAlchemy==1.0.6",
         "alembic>=0.6.4",
         "requests>=2.4.3",
         "raven>=5.0.0",
@@ -32,7 +32,7 @@ setup(
         "simplejson>=3.6.0",
         "icalendar>=3.8.2",
         "simplejson>=3.6.0",
-        "imapclient>=0.11",
+        "imapclient>=0.13",
         "Flask>=0.10.1",
         "futures>=2.1.3",
         "Flask-RESTful==0.3.2",
@@ -69,6 +69,8 @@ setup(
              'bin/search-account-health',
              'bin/migrate-bodies',
              'bin/migrate-account',
+             'bin/migrate-account-bulk',
+             'bin/summary-stats',
              'bin/start-stop-account',
              'bin/inbox-auth',
              'bin/regen-labels',
@@ -77,7 +79,9 @@ setup(
              'bin/create-db',
              'bin/inbox-api',
              'bin/get-id',
-             'bin/syncback-service'],
+             'bin/get-object',
+             'bin/syncback-service',
+             'bin/test_contact_groups'],
 
     # See:
     # https://pythonhosted.org/setuptools/setuptools.html#dynamic-discovery-of-services-and-plugins

@@ -58,6 +58,8 @@ class Account(MailSyncBase, HasPublicID, HasEmailAddress, HasRunState):
     sync_events = Column(Boolean, nullable=False, default=False)
 
     last_synced_contacts = Column(DateTime, nullable=True)
+
+    # DEPRECATED
     last_synced_events = Column(DateTime, nullable=True)
 
     # Folder mappings for the data we sync back to the account backend.  All
@@ -291,15 +293,6 @@ class Account(MailSyncBase, HasPublicID, HasEmailAddress, HasRunState):
     @property
     def is_sync_locked(self):
         return self._sync_lock.locked()
-
-    def __init__(self, *args, **kwargs):
-        MailSyncBase.__init__(self, *args, **kwargs)
-
-        # Note: SQLAlchemy calls an object's constructor only when
-        # it's created, not on subsequent db reads
-        # (http://docs.sqlalchemy.org/en/rel_0_9/orm/constructors.html)
-        # so it's safe to call a method that creates a calendar here.
-        self.create_emailed_events_calendar()
 
     discriminator = Column('type', String(16))
     __mapper_args__ = {'polymorphic_identity': 'account',

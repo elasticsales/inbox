@@ -7,6 +7,7 @@ from sqlalchemy import (Column, String, ForeignKey, Text, Boolean, Integer,
                         DateTime, Enum, Index, event)
 from sqlalchemy.orm import relationship, backref, validates, reconstructor
 from sqlalchemy.types import TypeDecorator
+from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.ext.associationproxy import association_proxy
 
 from inbox.sqlalchemy_ext.util import MAX_TEXT_LENGTH, BigJSON, MutableList
@@ -103,7 +104,7 @@ class Event(MailSyncBase, HasRevisions, HasPublicID):
     # The database column is named differently for legacy reasons.
     owner = Column('owner2', String(OWNER_MAX_LEN), nullable=True)
 
-    description = Column(Text, nullable=True)
+    description = Column('_description', LONGTEXT, nullable=True)
     location = Column(String(LOCATION_MAX_LEN), nullable=True)
     busy = Column(Boolean, nullable=False, default=True)
     read_only = Column(Boolean, nullable=False)

@@ -17,9 +17,10 @@ import pkg_resources
 
 from flanker import mime
 from flanker.addresslib import address
+from flanker.addresslib.quote import smart_quote
+from flanker.mime.message.headers.encoding import encode_string
+from flanker.addresslib.parser import MAX_ADDRESS_LENGTH
 from html2text import html2text
-
-from inbox.sqlalchemy_ext.util import generate_public_id
 
 VERSION = pkg_resources.get_distribution('inbox-sync').version
 
@@ -127,21 +128,21 @@ def create_email(from_name,
     # Need to set these headers so recipients know we sent the email to them
     # TODO(emfree): should these really be unicode?
     if to_addr:
-        full_to_specs = [address.EmailAddress(name, spec).full_spec()
+        full_to_specs = [_get_full_spec_without_validation(name, spec)
                          for name, spec in to_addr]
         msg.headers['To'] = u', '.join(full_to_specs)
     if cc_addr:
-        full_cc_specs = [address.EmailAddress(name, spec).full_spec()
+        full_cc_specs = [_get_full_spec_without_validation(name, spec)
                          for name, spec in cc_addr]
         msg.headers['Cc'] = u', '.join(full_cc_specs)
     if bcc_addr:
-        full_bcc_specs = [address.EmailAddress(name, spec).full_spec()
+        full_bcc_specs = [_get_full_spec_without_validation(name, spec)
                           for name, spec in bcc_addr]
         msg.headers['Bcc'] = u', '.join(full_bcc_specs)
     if reply_to:
         # reply_to is only ever a list with one element
-        reply_to_spec = address.EmailAddress(reply_to[0][0], reply_to[0][1])
-        msg.headers['Reply-To'] = reply_to_spec.full_spec()
+        msg.headers['Reply-To'] = _get_full_spec_without_validation(
+            reply_to[0][0], reply_to[0][1])
 
     add_inbox_headers(msg, inbox_uid)
 
@@ -153,6 +154,20 @@ def create_email(from_name,
     rfcmsg = _rfc_transform(msg)
 
     return rfcmsg
+
+
+def _get_full_spec_without_validation(name, email):
+    """
+    This function is the same as calling full_spec() on
+    a Flanker address.EmailAddress object. This function exists
+    because you can't construct a Flanker EmailAddress object with
+    an invalid email address.
+    """
+    if name:
+        encoded_name = smart_quote(encode_string(
+            None, name, maxlinelen=MAX_ADDRESS_LENGTH))
+        return '{0} <{1}>'.format(encoded_name, email)
+    return u'{0}'.format(email)
 
 
 def add_inbox_headers(msg, inbox_uid):
@@ -171,15 +186,15 @@ def add_inbox_headers(msg, inbox_uid):
 
     """
 
-    our_uid = inbox_uid if inbox_uid else \
-        generate_public_id()  # base-36 encoded string
-
     # Set our own custom header for tracking in `Sent Mail` folder
-    msg.headers['X-INBOX-ID'] = our_uid
-    msg.headers['Message-Id'] = '<{}@mailer.nylas.com>'.format(our_uid)
-
+    msg.headers['X-INBOX-ID'] = inbox_uid
+    msg.headers['Message-Id'] = generate_message_id_header(inbox_uid)
     # Potentially also use `X-Mailer`
     msg.headers['User-Agent'] = 'NylasMailer/{0}'.format(VERSION)
+
+
+def generate_message_id_header(uid):
+    return '<{}@mailer.nylas.com>'.format(uid)
 
 
 def _rfc_transform(msg):
