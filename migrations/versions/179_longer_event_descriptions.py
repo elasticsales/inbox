@@ -1,14 +1,14 @@
 """longer event descriptions
 
 Revision ID: 56500282e024
-Revises: 41f957b595fc
+Revises: 2b9dd6f7593a
 Create Date: 2015-06-23 18:08:47.266984
 
 """
 
 # revision identifiers, used by Alembic.
 revision = '56500282e024'
-down_revision = '41f957b595fc'
+down_revision = '2b9dd6f7593a'
 
 from alembic import op
 import sqlalchemy as sa
