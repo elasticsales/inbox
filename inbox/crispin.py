@@ -206,13 +206,10 @@ class CrispinConnectionPool(object):
                 if account.provider == 'gmail':
                     client_cls = GmailCrispinClient
                 else:
-                    """
                     if 'CONDSTORE' in conn.capabilities():
                         client_cls = CondStoreCrispinClient
                     else:
                         client_cls = CrispinClient
-                    """
-                    client_cls = CrispinClient
 
             return client_cls(self.account_id, self.provider_info,
                                    self.email_address, conn,
