@@ -21,7 +21,7 @@ log = get_logger()
 # HACK
 # Until this is properly resolved, we go back further than the last stored
 # HIGHESTMODSEQ to fetch missing changes from Gmail accounts.
-MODSEQ_TOLERANCE_HACK = 500
+MODSEQ_TOLERANCE_HACK = 2000
 
 
 class CondstoreFolderSyncEngine(FolderSyncEngine):
