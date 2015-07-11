@@ -26,7 +26,7 @@ MODSEQ_TOLERANCE_HACK = 2000
 
 class CondstoreFolderSyncEngine(FolderSyncEngine):
     def should_idle(self, crispin_client):
-        return self.folder_name == crispin_client.folder_names()['inbox']
+        return self.folder_name in crispin_client.folder_names()['inbox']
 
     def poll_impl(self):
         with self.conn_pool.get() as crispin_client:

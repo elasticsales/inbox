@@ -1,6 +1,7 @@
 """Provide Google Calendar events."""
 import datetime
 import json
+import random
 import urllib
 import gevent
 import requests
@@ -154,7 +155,7 @@ class GoogleEventsProvider(object):
                     continue
                 elif r.status_code in (500, 503):
                     log.warning('Backend error in calendar API; retrying')
-                    gevent.sleep(30)
+                    gevent.sleep(30 + random.randrange(0, 60))
                     continue
                 elif r.status_code == 403:
                     try:
@@ -165,7 +166,7 @@ class GoogleEventsProvider(object):
                         r.raise_for_status()
                     if reason == 'userRateLimitExceeded':
                         log.warning('API request was rate-limited; retrying')
-                        gevent.sleep(30)
+                        gevent.sleep(30 + random.randrange(0, 60))
                         continue
                     elif reason == 'accessNotConfigured':
                         log.warning('API not enabled; returning empty result')

@@ -52,8 +52,8 @@ def events_from_ics(namespace, calendar, ics_str):
             end = original_end
             original_start_tz = None
 
+            all_day = False
             if isinstance(start, datetime) and isinstance(end, datetime):
-                all_day = False
                 original_start_tz = str(original_start.tzinfo)
 
                 # icalendar doesn't parse Windows timezones yet
@@ -86,6 +86,9 @@ def events_from_ics(namespace, calendar, ics_str):
                 end = arrow.get(end)
             else:
                 raise MalformedEventError("Event lacks start and/or end time")
+
+            assert type(start) == type(end), "Start and end should be of "\
+                                             "the same type"
 
             # Get the last modification date.
             # Exchange uses DtStamp, iCloud and Gmail LAST-MODIFIED.
@@ -251,7 +254,9 @@ def import_attached_events(db_session, account, message):
                                          part.block.data)
         except MalformedEventError:
             log.error('Attached event parsing error',
-                      account_id=account.id, message_id=message.id)
+                      account_id=account.id, message_id=message.id,
+                      logstash_tag='icalendar_autoimport',
+                      invite=part.block.data)
             continue
         except (AssertionError, TypeError, RuntimeError,
                 AttributeError, ValueError, UnboundLocalError,
@@ -260,6 +265,8 @@ def import_attached_events(db_session, account, message):
             # creation because of an error in the attached calendar.
             log.error('Unhandled exception during message parsing',
                       message_id=message.id,
+                      invite=part.block.data,
+                      logstash_tag='icalendar_autoimport',
                       traceback=traceback.format_exception(
                                     sys.exc_info()[0],
                                     sys.exc_info()[1],

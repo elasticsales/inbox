@@ -1,15 +1,15 @@
 from sqlalchemy import and_, or_, desc, asc, func
 from sqlalchemy.orm import subqueryload, contains_eager
 from inbox.models import (Contact, Event, Calendar, Message,
-                          MessageContactAssociation, Thread, Tag,
-                          TagItem, Block, Part)
+                          MessageContactAssociation, Thread,
+                          Block, Part, MessageCategory, Category)
 from inbox.models.event import RecurringEvent
 
 
 def threads(namespace_id, subject, from_addr, to_addr, cc_addr, bcc_addr,
             message_id_header, any_email, thread_public_id, started_before,
             started_after, last_message_before, last_message_after, filename,
-            tag, limit, offset, view, db_session):
+            in_, unread, starred, limit, offset, view, db_session):
 
     if view == 'count':
         query = db_session.query(func.count(Thread.id))
@@ -38,13 +38,6 @@ def threads(namespace_id, subject, from_addr, to_addr, cc_addr, bcc_addr,
         filters.append(Thread.subject == subject)
 
     query = query.filter(*filters)
-
-    if tag is not None:
-        tag_query = db_session.query(TagItem).join(Tag). \
-            filter(or_(Tag.public_id == tag, Tag.name == tag),
-                   Tag.namespace_id == namespace_id).subquery()
-
-        query = query.join(tag_query)
 
     if from_addr is not None:
         from_query = db_session.query(Message.thread_id). \
@@ -97,7 +90,27 @@ def threads(namespace_id, subject, from_addr, to_addr, cc_addr, bcc_addr,
                    Block.namespace_id == namespace_id). \
             subquery()
         query = query.filter(Thread.id.in_(files_query))
-        query = query.join(files_query)
+
+    if in_ is not None:
+        category_query = db_session.query(Message.thread_id). \
+            join(MessageCategory).join(Category). \
+            filter(Category.namespace_id == namespace_id,
+                   or_(Category.name == in_, Category.display_name == in_)). \
+            subquery()
+        query = query.filter(Thread.id.in_(category_query))
+
+    if unread is not None:
+        read = not unread
+        unread_query = db_session.query(Message.thread_id).filter(
+            Message.namespace_id == namespace_id,
+            Message.is_read == read).subquery()
+        query = query.filter(Thread.id.in_(unread_query))
+
+    if starred is not None:
+        starred_query = db_session.query(Message.thread_id).filter(
+            Message.namespace_id == namespace_id,
+            Message.is_starred == starred).subquery()
+        query = query.filter(Thread.id.in_(starred_query))
 
     if view == 'count':
         return {"count": query.one()[0]}
@@ -105,10 +118,6 @@ def threads(namespace_id, subject, from_addr, to_addr, cc_addr, bcc_addr,
     # Eager-load some objects in order to make constructing API
     # representations faster.
     if view != 'ids':
-        query = query.options(
-            subqueryload('tagitems').joinedload('tag').
-            load_only('public_id', 'name'))
-
         if view == 'expanded':
             query = query.options(
                 subqueryload(Thread.messages).
@@ -135,11 +144,11 @@ def threads(namespace_id, subject, from_addr, to_addr, cc_addr, bcc_addr,
     return query.all()
 
 
-def _messages_or_drafts(namespace_id, drafts, subject, from_addr, to_addr,
-                        cc_addr, bcc_addr, any_email, thread_public_id,
-                        started_before, started_after, last_message_before,
-                        last_message_after, filename, tag, limit, offset,
-                        view, db_session):
+def messages_or_drafts(namespace_id, drafts, subject, from_addr, to_addr,
+                       cc_addr, bcc_addr, any_email, thread_public_id,
+                       started_before, started_after, last_message_before,
+                       last_message_after, filename, in_, unread, starred,
+                       limit, offset, view, db_session):
 
     if view == 'count':
         query = db_session.query(func.count(Message.id))
@@ -160,6 +169,13 @@ def _messages_or_drafts(namespace_id, drafts, subject, from_addr, to_addr,
     if subject is not None:
         filters.append(Message.subject == subject)
 
+    if unread is not None:
+        read = not unread
+        filters.append(Message.is_read == read)
+
+    if starred is not None:
+        filters.append(Message.is_starred == starred)
+
     if thread_public_id is not None:
         filters.append(Thread.public_id == thread_public_id)
 
@@ -178,11 +194,6 @@ def _messages_or_drafts(namespace_id, drafts, subject, from_addr, to_addr,
     if last_message_after is not None:
         filters.append(Thread.recentdate > last_message_after)
         filters.append(Thread.namespace_id == namespace_id)
-
-    if tag is not None:
-        query = query.join(TagItem).join(Tag). \
-            filter(or_(Tag.public_id == tag, Tag.name == tag),
-                   Tag.namespace_id == namespace_id)
 
     if to_addr is not None:
         to_query = db_session.query(MessageContactAssociation.message_id). \
@@ -228,6 +239,11 @@ def _messages_or_drafts(namespace_id, drafts, subject, from_addr, to_addr,
             filter(Block.filename == filename,
                    Block.namespace_id == namespace_id)
 
+    if in_ is not None:
+        query = query.join(MessageCategory).join(Category). \
+            filter(Category.namespace_id == namespace_id,
+                   or_(Category.name == in_, Category.display_name == in_))
+
     query = query.filter(*filters)
 
     if view == 'count':
@@ -246,30 +262,6 @@ def _messages_or_drafts(namespace_id, drafts, subject, from_addr, to_addr,
     query = query.options(subqueryload(Message.parts).joinedload(Part.block))
 
     return query.all()
-
-
-def messages(namespace_id, subject, from_addr, to_addr, cc_addr, bcc_addr,
-             any_email, thread_public_id, started_before, started_after,
-             last_message_before, last_message_after, filename, tag, limit,
-             offset, view, db_session):
-    return _messages_or_drafts(namespace_id, False, subject, from_addr,
-                               to_addr, cc_addr, bcc_addr, any_email,
-                               thread_public_id, started_before,
-                               started_after, last_message_before,
-                               last_message_after, filename, tag, limit,
-                               offset, view, db_session)
-
-
-def drafts(namespace_id, subject, from_addr, to_addr, cc_addr, bcc_addr,
-           any_email, thread_public_id, started_before, started_after,
-           last_message_before, last_message_after, filename, tag, limit,
-           offset, view, db_session):
-    return _messages_or_drafts(namespace_id, True, subject, from_addr,
-                               to_addr, cc_addr, bcc_addr, any_email,
-                               thread_public_id, started_before,
-                               started_after, last_message_before,
-                               last_message_after, filename, tag, limit,
-                               offset, view, db_session)
 
 
 def files(namespace_id, message_public_id, filename, content_type,
@@ -348,13 +340,16 @@ def filter_event_query(query, event_cls, namespace_id, event_public_id,
 
 
 def recurring_events(filters, starts_before, starts_after, ends_before,
-                     ends_after, db_session):
+                     ends_after, db_session, show_cancelled=False):
     # Expands individual recurring events into full instances.
     # If neither starts_before or ends_before is given, the recurring range
     # defaults to now + 1 year (see events/recurring.py)
 
     recur_query = db_session.query(RecurringEvent)
     recur_query = filter_event_query(recur_query, RecurringEvent, *filters)
+
+    if show_cancelled is False:
+        recur_query = recur_query.filter(RecurringEvent.status != 'cancelled')
 
     before_criteria = []
     if starts_before:
@@ -436,7 +431,8 @@ def events(namespace_id, event_public_id, calendar_public_id, title,
 
     if expand_recurring:
         expanded = recurring_events(filters, starts_before, starts_after,
-                                    ends_before, ends_after, db_session)
+                                    ends_before, ends_after, db_session,
+                                    show_cancelled=show_cancelled)
 
         # Combine non-recurring events with expanded recurring ones
         all_events = query.filter(Event.discriminator == 'event').all() + \
