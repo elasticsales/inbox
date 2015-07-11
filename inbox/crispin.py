@@ -187,6 +187,7 @@ class CrispinConnectionPool(object):
                 if account.debug:
                     def _log(text):
                         log.debug('imap_log',
+                                 conn=id(conn),
                                  account_id=self.account_id,
                                  text=text)
 
