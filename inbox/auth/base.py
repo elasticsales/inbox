@@ -50,7 +50,6 @@ class AuthHandler(object):
 
     def connect_to_imap(self, account, read_timeout=300):
         host, port, is_secure = account.imap_endpoint
-        debug = account.debug
         try:
             conn = IMAPClient(host, port=port, use_uid=True, ssl=(port == 993),
                               read_timeout=read_timeout)
