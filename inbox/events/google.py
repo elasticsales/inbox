@@ -11,7 +11,7 @@ from inbox.log import get_logger
 from inbox.models import Calendar, Account
 from inbox.models.event import Event, EVENT_STATUSES
 from inbox.models.session import session_scope
-from inbox.models.backends.oauth import token_manager
+from inbox.models.backends.gmail import g_token_manager
 from inbox.events.util import (google_to_event_time, parse_google_time,
                                parse_datetime, CalendarSyncResponse)
 
@@ -120,12 +120,13 @@ class GoogleEventsProvider(object):
             else:
                 raise
 
-    def _get_access_token(self):
+    def _get_access_token(self, force_refresh=False):
         with session_scope() as db_session:
             acc = db_session.query(Account).get(self.account_id)
             # This will raise OAuthError if OAuth access was revoked. The
             # BaseSyncMonitor loop will catch this, clean up, and exit.
-            return token_manager.get_token(acc)
+            return g_token_manager.get_token_for_calendars(
+                acc, force_refresh=force_refresh)
 
     def _get_resource_list(self, url, **params):
         """Handles response pagination."""
@@ -151,7 +152,7 @@ class GoogleEventsProvider(object):
                     self.log.warning(
                         'Invalid access token; refreshing and retrying',
                         url=r.url, response=r.content, status=r.status_code)
-                    token = self._get_access_token()
+                    token = self._get_access_token(force_refresh=True)
                     continue
                 elif r.status_code in (500, 503):
                     log.warning('Backend error in calendar API; retrying')
@@ -185,25 +186,48 @@ class GoogleEventsProvider(object):
         response = requests.request(method, url, auth=OAuth(token), **kwargs)
         return response
 
-    def create_remote_event(self, event):
+    def create_remote_event(self, event, **kwargs):
         data = _dump_event(event)
+        params = {}
+
+        if kwargs.get('notify_participants') is True:
+            params["sendNotifications"] = "true"
+        else:
+            params["sendNotifications"] = "false"
+
         response = self._make_event_request('post', event.calendar.uid,
-                                            json=data)
+                                            json=data, params=params)
 
         # All non-200 statuses are considered errors
         response.raise_for_status()
         return response.json()
 
-    def update_remote_event(self, event):
+    def update_remote_event(self, event, **kwargs):
         data = _dump_event(event)
+        params = {}
+
+        if kwargs.get('notify_participants') is True:
+            params["sendNotifications"] = "true"
+        else:
+            params["sendNotifications"] = "false"
+
         response = self._make_event_request('put', event.calendar.uid,
-                                            event.uid, json=data)
+                                            event.uid, json=data,
+                                            params=params)
 
         # All non-200 statuses are considered errors
         response.raise_for_status()
 
-    def delete_remote_event(self, calendar_uid, event_uid):
-        response = self._make_event_request('delete', calendar_uid, event_uid)
+    def delete_remote_event(self, calendar_uid, event_uid, **kwargs):
+        params = {}
+
+        if kwargs.get('notify_participants') is True:
+            params["sendNotifications"] = "true"
+        else:
+            params["sendNotifications"] = "false"
+
+        response = self._make_event_request('delete', calendar_uid, event_uid,
+                                            params=params)
 
         if response.status_code == 410:
             # The Google API returns an 'HTTPError: 410 Client Error: Gone'
@@ -277,6 +301,7 @@ def parse_event_response(event, read_only_calendar):
     description = event.get('description')
     location = event.get('location')
     busy = event.get('transparency') != 'transparent'
+    sequence = event.get('sequence', 0)
 
     # We're lucky because event statuses follow the icalendar
     # spec.
@@ -338,7 +363,7 @@ def parse_event_response(event, read_only_calendar):
                  master_event_uid=master_uid,
                  cancelled=cancelled,
                  status=event_status,
-                 # TODO(emfree): remove after data cleanup
+                 sequence_number=sequence,
                  source='local')
 
 

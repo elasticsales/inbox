@@ -25,9 +25,8 @@ from inbox.api.validation import (get_attachments, get_calendar,
                                   bounded_str, view, strict_parse_args,
                                   limit, offset, ValidatableArgument,
                                   strict_bool, validate_draft_recipients,
-                                  validate_search_query,
-                                  validate_search_sort,
-                                  valid_delta_object_types)
+                                  validate_search_query, validate_search_sort,
+                                  valid_delta_object_types, valid_display_name)
 from inbox.contacts.algorithms import (calculate_contact_scores,
                                        calculate_group_scores,
                                        calculate_group_counts, is_stale)
@@ -40,6 +39,7 @@ from inbox.models.session import InboxSession, session_scope
 from inbox.search.adaptor import NamespaceSearchEngine, SearchEngineError
 from inbox.transactions import delta_sync
 from inbox.api.err import (err, APIException, NotFoundError, InputError)
+from inbox.events.ical import (generate_icalendar_invite, send_invite)
 from inbox.ignition import main_engine
 engine = main_engine()
 
@@ -428,8 +428,8 @@ def raw_message_api(public_id):
 @app.route('/folders')
 @app.route('/labels')
 def folders_labels_query_api():
-    categories = g.db_session.query(Category). \
-        filter(Category.namespace_id == g.namespace.id).all()
+    categories = g.db_session.query(Category).filter(
+        Category.namespace_id == g.namespace.id).all()
     return g.encoder.jsonify(categories)
 
 
@@ -446,11 +446,71 @@ def label_api(public_id):
 def folders_labels_api_impl(public_id):
     valid_public_id(public_id)
     try:
-        category = g.db_session.query(Category). \
-            filter(Category.namespace_id == g.namespace.id,
-                   Category.public_id == public_id).all()
+        category = g.db_session.query(Category).filter(
+            Category.namespace_id == g.namespace.id,
+            Category.public_id == public_id).all()
     except NoResultFound:
-        raise NotFoundError("Object not found")
+        raise NotFoundError('Object not found')
+    return g.encoder.jsonify(category)
+
+
+@app.route('/folders', methods=['POST'])
+@app.route('/labels', methods=['POST'])
+def folders_labels_create_api():
+    category_type = g.namespace.account.category_type
+    data = request.get_json(force=True)
+    display_name = data.get('display_name')
+
+    valid_display_name(g.namespace.id, category_type, display_name,
+                       g.db_session)
+
+    category = Category.find_or_create(g.db_session, g.namespace.id,
+                                       name=None, display_name=display_name,
+                                       type_=category_type)
+    g.db_session.flush()
+
+    if category_type == 'folder':
+        schedule_action('create_folder', category, g.namespace.id, g.db_session)
+    else:
+        schedule_action('create_label', category, g.namespace.id, g.db_session)
+
+    return g.encoder.jsonify(category)
+
+
+@app.route('/folders/<public_id>', methods=['PUT'])
+@app.route('/labels/<public_id>', methods=['PUT'])
+def folder_label_update_api(public_id):
+    category_type = g.namespace.account.category_type
+    valid_public_id(public_id)
+    try:
+        category = g.db_session.query(Category).filter(
+            Category.namespace_id == g.namespace.id,
+            Category.public_id == public_id).one()
+    except NoResultFound:
+        raise InputError("Couldn't find {} {}".format(
+            category_type, public_id))
+    if category.name is not None:
+        raise InputError("Cannot modify a standard {}".format(category_type))
+
+    data = request.get_json(force=True)
+    display_name = data.get('display_name')
+    valid_display_name(g.namespace.id, category_type, display_name,
+                       g.db_session)
+
+    current_name = category.display_name
+    category.display_name = display_name
+    g.db_session.flush()
+
+    if category_type == 'folder':
+        schedule_action('update_folder', category, g.namespace.id,
+                        g.db_session, old_name=current_name)
+    else:
+        schedule_action('update_label', category, g.namespace.id,
+                        g.db_session, old_name=current_name)
+
+    # TODO[k]: Update corresponding folder/ label once syncback is successful,
+    # rather than waiting for sync to pick it up?
+
     return g.encoder.jsonify(category)
 
 
@@ -554,6 +614,11 @@ def event_search_api():
 
 @app.route('/events/', methods=['POST'])
 def event_create_api():
+    g.parser.add_argument('notify_participants', type=strict_bool,
+                          location='args')
+    args = strict_parse_args(g.parser, request.args)
+    notify_participants = args['notify_participants']
+
     data = request.get_json(force=True)
     calendar = get_calendar(data.get('calendar_id'),
                             g.namespace, g.db_session)
@@ -594,12 +659,14 @@ def event_create_api():
         read_only=False,
         is_owner=True,
         participants=participants,
+        sequence_number=0,
         source='local')
     g.db_session.add(event)
     g.db_session.flush()
 
     schedule_action('create_event', event, g.namespace.id, g.db_session,
-                    calendar_uid=event.calendar.uid)
+                    calendar_uid=event.calendar.uid,
+                    notify_participants=notify_participants)
     return g.encoder.jsonify(event)
 
 
@@ -618,6 +685,11 @@ def event_read_api(public_id):
 
 @app.route('/events/<public_id>', methods=['PUT'])
 def event_update_api(public_id):
+    g.parser.add_argument('notify_participants', type=strict_bool,
+                          location='args')
+    args = strict_parse_args(g.parser, request.args)
+    notify_participants = args['notify_participants']
+
     valid_public_id(public_id)
     try:
         event = g.db_session.query(Event).filter(
@@ -640,16 +712,23 @@ def event_update_api(public_id):
         if attr in data:
             setattr(event, attr, data[attr])
 
+    event.sequence_number += 1
     g.db_session.commit()
 
     schedule_action('update_event', event, g.namespace.id, g.db_session,
-                    calendar_uid=event.calendar.uid)
+                    calendar_uid=event.calendar.uid,
+                    notify_participants=notify_participants)
 
     return g.encoder.jsonify(event)
 
 
 @app.route('/events/<public_id>', methods=['DELETE'])
 def event_delete_api(public_id):
+    g.parser.add_argument('notify_participants', type=strict_bool,
+                          location='args')
+    args = strict_parse_args(g.parser, request.args)
+    notify_participants = args['notify_participants']
+
     valid_public_id(public_id)
     try:
         event = g.db_session.query(Event).filter_by(
@@ -664,12 +743,25 @@ def event_delete_api(public_id):
     # Set the local event status to 'cancelled' rather than deleting it,
     # in order to be consistent with how we sync deleted events from the
     # remote, and consequently return them through the events, delta sync APIs
+    event.sequence_number += 1
     event.status = 'cancelled'
     g.db_session.commit()
 
+    account = g.namespace.account
+
+    # FIXME @karim: do this in the syncback thread instead.
+    if notify_participants and account.provider != 'gmail':
+        ical_file = generate_icalendar_invite(event,
+                                              invite_type='cancel').to_ical()
+
+        html_body = ''
+        send_invite(ical_file, event, html_body, account,
+                    invite_type='cancel')
+
     schedule_action('delete_event', event, g.namespace.id, g.db_session,
                     event_uid=event.uid, calendar_name=event.calendar.name,
-                    calendar_uid=event.calendar.uid)
+                    calendar_uid=event.calendar.uid,
+                    notify_participants=notify_participants)
 
     return g.encoder.jsonify(None)
 

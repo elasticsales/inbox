@@ -25,7 +25,11 @@ class OAuthAuthHandler(AuthHandler):
             If errors occurred establishing the connection or logging in.
         """
         conn = self.connect_to_imap(account)
+        self._authenticate_IMAP_connection(account, conn)
+        return conn
 
+    def _authenticate_IMAP_connection(self, account, conn):
+        host, port = account.imap_endpoint
         try:
             # Raises ValidationError if the refresh token we have is invalid.
             token = token_manager.get_token(account)
@@ -36,7 +40,6 @@ class OAuthAuthHandler(AuthHandler):
                       email=account.email_address,
                       error=exc)
             raise
-        return conn
 
     def verify_account(self, account):
         """Verifies an IMAP account by logging in."""

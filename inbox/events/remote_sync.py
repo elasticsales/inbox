@@ -35,7 +35,8 @@ class EventSync(BaseSyncMonitor):
                                  EVENT_SYNC_FOLDER_ID,
                                  EVENT_SYNC_FOLDER_NAME,
                                  provider_name,
-                                 poll_frequency=poll_frequency)
+                                 poll_frequency=poll_frequency,
+                                 scope='calendar')
 
     def sync(self):
         """Query a remote provider for updates and persist them to the
@@ -147,7 +148,18 @@ def handle_event_updates(namespace_id, calendar_id, events, log, db_session):
                     local_event.status != 'cancelled':
                     for override in local_event.overrides:
                         override.status = 'cancelled'
+
+            merged_participants = local_event.\
+                _partial_participants_merge(event)
+
             local_event.update(event)
+
+            # We have to do this mumbo-jumbo because MutableList does
+            # not register changes to nested elements.
+            local_event.participants = []
+            for participant in merged_participants:
+                local_event.participants.append(participant)
+
             updated_count += 1
         else:
             local_event = event
