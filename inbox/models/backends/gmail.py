@@ -236,7 +236,7 @@ class GmailAuthCredentials(MailSyncBase):
                               ForeignKey(Secret.id, ondelete='CASCADE'))
 
     _scopes = Column('scopes', String(512))
-    g_id_token = Column(String(1024))
+    g_id_token = Column(String(1024), nullable=True)
     client_id = Column(String(256))
     client_secret = Column(String(256))
     is_valid = Column(Boolean, default=True)
