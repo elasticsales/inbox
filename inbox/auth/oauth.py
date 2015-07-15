@@ -29,7 +29,6 @@ class OAuthAuthHandler(AuthHandler):
         return conn
 
     def _authenticate_IMAP_connection(self, account, conn):
-        host, port = account.imap_endpoint
         try:
             # Raises ValidationError if the refresh token we have is invalid.
             token = token_manager.get_token(account)

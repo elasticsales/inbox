@@ -54,7 +54,6 @@ class GmailAuthHandler(OAuthAuthHandler):
         Overrides the same method in OAuthAuthHandler so that
         we can choose a token w/ the appropriate scope.
         """
-        host, port = account.imap_endpoint
         try:
             token = g_token_manager.get_token_for_email(account)
             conn.oauth2_login(account.email_address, token)
@@ -62,8 +61,6 @@ class GmailAuthHandler(OAuthAuthHandler):
             log.error('Error during IMAP XOAUTH2 login',
                       account_id=account.id,
                       email=account.email_address,
-                      host=host,
-                      port=port,
                       error=exc)
             raise
 
