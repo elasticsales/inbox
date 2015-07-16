@@ -78,7 +78,7 @@ from inbox.basicauth import ValidationError
 from inbox.util.concurrency import retry_and_report_killed
 from inbox.util.debug import bind_context
 from inbox.util.itert import chunk
-from inbox.util.misc import or_none
+from inbox.util.misc import or_none, timed
 from inbox.util.threading import fetch_corresponding_thread, MAX_THREAD_LENGTH
 from inbox.log import get_logger
 log = get_logger()
@@ -447,10 +447,19 @@ class FolderSyncEngine(Greenlet):
             filter(Message.thread_id == thread_id).one()
         return count
 
+    @timed
+    def _timed_fetch_corresponding_thread(self, *args, **kwargs):
+        return fetch_corresponding_thread(*args, **kwargs)
+
     def add_message_attrs(self, db_session, new_uid, msg):
         """ Post-create-message bits."""
         with db_session.no_autoflush:
-            parent_thread = fetch_corresponding_thread(
+            # new_uid/message are not committed yet
+            self.log.debug('fetch_corresponding_thread',
+                    namespace_id=self.namespace_id,
+                    folder_id=new_uid.folder.id,
+                    message_subject=repr(new_uid.message.subject))
+            parent_thread = self._timed_fetch_corresponding_thread(
                 db_session, self.namespace_id, new_uid.message)
             construct_new_thread = True
 
