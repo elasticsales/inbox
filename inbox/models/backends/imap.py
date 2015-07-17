@@ -40,7 +40,8 @@ class ImapAccount(Account):
     @property
     def imap_endpoint(self):
         if self._imap_server_host is not None:
-            return (self._imap_server_host, self._imap_server_port,
+            # imaplib requires the port to be an int (instead of a long)
+            return (self._imap_server_host, int(self._imap_server_port),
                     self._imap_server_is_secure)
         else:
             return self.provider_info['imap']

@@ -92,8 +92,11 @@ def main(prod, enable_tracer, config, process_num):
         print >>sys.stderr, "Feature flags enabled: {}\n".format(
             ' '.join(inbox_config['FEATURE_FLAGS']))
 
-    if enable_tracer:
-        tracer = Tracer(gather_stats=True)
+
+    max_blocking_time = inbox_config.get('MAX_BLOCKING_TIME', 1.)
+
+    if enable_tracer and max_blocking_time:
+        tracer = Tracer(max_blocking_time=max_blocking_time, gather_stats=True)
         tracer.start()
 
     global sync_service
