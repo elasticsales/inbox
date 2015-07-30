@@ -25,7 +25,7 @@ def upgrade():
         sa.Column('gmailaccount_id', sa.Integer(), nullable=False),
         sa.Column('refresh_token_id', sa.Integer(), nullable=False),
         sa.Column('scopes', mysql.VARCHAR(length=512), nullable=False),
-        sa.Column('g_id_token', mysql.VARCHAR(length=1024), nullable=False),
+        sa.Column('g_id_token', mysql.VARCHAR(length=1024), nullable=True),
         sa.Column('client_id', mysql.VARCHAR(length=256), nullable=False),
         sa.Column('client_secret', mysql.VARCHAR(length=256), nullable=False),
         sa.Column('is_valid', sa.Boolean(),

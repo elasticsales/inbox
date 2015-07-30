@@ -331,7 +331,7 @@ class GmailAuthCredentials(MailSyncBase):
                               nullable=False)
 
     _scopes = Column('scopes', String(512), nullable=False)
-    g_id_token = Column(String(1024), nullable=False)
+    g_id_token = Column(String(1024), nullable=True)
     client_id = Column(String(256), nullable=False)
     client_secret = Column(String(256), nullable=False)
     is_valid = Column(Boolean, default=True, nullable=False)
