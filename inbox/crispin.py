@@ -582,10 +582,9 @@ class CrispinClient(object):
             if uid not in uid_set:
                 continue
             msg = raw_messages[uid]
-            if 'BODY[]' not in msg:
-                raise Exception(
-                    'No BODY[] element in IMAP response. Tags given: {}'
-                    .format(msg.keys()))
+            if msg.keys() == ['SEQ']:
+                log.error('No data returned for UID, skipping', uid=uid)
+                continue
 
             messages.append(RawMessage(uid=long(uid),
                                        internaldate=msg['INTERNALDATE'],
@@ -917,7 +916,12 @@ class GmailCrispinClient(CondStoreCrispinClient):
         if '\\All' in flags:
             role = 'all'
         elif display_name.lower() == 'inbox':
+            # Special-case the display name here. In Gmail, the inbox
+            # folder shows up in the folder list as 'INBOX', and in sync as
+            # the label '\\Inbox'. We're just always going to give it the
+            # display name 'Inbox'.
             role = 'inbox'
+            display_name = 'Inbox'
         else:
             for flag in flags:
                 if flag in flag_map:

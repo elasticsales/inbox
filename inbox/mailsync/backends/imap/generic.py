@@ -80,6 +80,7 @@ from inbox.util.debug import bind_context
 from inbox.util.itert import chunk
 from inbox.util.misc import or_none, timed
 from inbox.util.threading import fetch_corresponding_thread, MAX_THREAD_LENGTH
+from inbox.util.stats import statsd_client
 from inbox.log import get_logger
 log = get_logger()
 from inbox.crispin import connection_pool, retry_crispin, FolderMissingError
@@ -150,11 +151,22 @@ class FolderSyncEngine(Greenlet):
         self.state = None
         self.provider_name = provider_name
 
+        # Metric flags for sync performance
+        self.is_initial_sync = False
+        self.is_first_sync = False
+        self.is_first_message = False
+
         with mailsync_session_scope() as db_session:
             account = db_session.query(Account).get(self.account_id)
             self.throttled = account.throttled
             self.namespace_id = account.namespace.id
             assert self.namespace_id is not None, "namespace_id is None"
+
+            folder = db_session.query(Folder).get(self.folder_id)
+            if folder:
+                self.is_initial_sync = folder.initial_sync_end is None
+                self.is_first_sync = folder.initial_sync_start is None
+                self.is_first_message = self.is_first_sync
 
         self.state_handlers = {
             'initial': self.initial_sync,
@@ -258,14 +270,33 @@ class FolderSyncEngine(Greenlet):
         saved_folder_status.stop_sync()
         self.state = saved_folder_status.state
 
+    def _report_initial_sync_start(self):
+        with mailsync_session_scope() as db_session:
+            q = db_session.query(Folder).get(self.folder_id)
+            q.initial_sync_start = datetime.utcnow()
+
+    def _report_initial_sync_end(self):
+        with mailsync_session_scope() as db_session:
+            q = db_session.query(Folder).get(self.folder_id)
+            q.initial_sync_end = datetime.utcnow()
+
     @retry_crispin
     def initial_sync(self):
         log.bind(state='initial')
         log.info('starting initial sync')
 
+        if self.is_first_sync:
+            self._report_initial_sync_start()
+            self.is_first_sync = False
+
         with self.conn_pool.get() as crispin_client:
             crispin_client.select_folder(self.folder_name, uidvalidity_cb)
             self.initial_sync_impl(crispin_client)
+
+        if self.is_initial_sync:
+            self._report_initial_sync_end()
+            self.is_initial_sync = False
+
         return 'poll'
 
     @retry_crispin
@@ -441,6 +472,20 @@ class FolderSyncEngine(Greenlet):
                 import_attached_events(db_session, acct, new_uid.message)
         """
 
+        # If we're in the polling state, then we want to report the metric
+        # for latency when the message was received vs created
+        if self.state == 'poll':
+            latency_millis = (
+                datetime.utcnow() - new_uid.message.received_date) \
+                .total_seconds() * 1000
+            metrics = [
+                '.'.join(['accounts', 'overall', 'message_latency']),
+                '.'.join(['accounts', str(acct.id), 'message_latency']),
+                '.'.join(['providers', self.provider_name, 'message_latency']),
+            ]
+            for metric in metrics:
+                statsd_client.timing(metric, latency_millis)
+
         return new_uid
 
     def _count_thread_messages(self, thread_id, db_session):
@@ -502,6 +547,7 @@ class FolderSyncEngine(Greenlet):
                                    self.folder_id)
 
     def download_and_commit_uids(self, crispin_client, uids):
+        start = datetime.utcnow()
         raw_messages = crispin_client.uids(uids)
         if not raw_messages:
             return 0
@@ -523,7 +569,42 @@ class FolderSyncEngine(Greenlet):
                         new_uids.add(uid)
                 db_session.commit()
 
+        # If we downloaded uids, record message velocity (#uid / latency)
+        if self.state == 'initial' and len(new_uids):
+            self._report_message_velocity(datetime.utcnow() - start,
+                                          len(new_uids))
+        if self.is_first_message:
+            self._report_first_message()
+            self.is_first_message = False
+
         return len(new_uids)
+
+    def _report_first_message(self):
+        now = datetime.utcnow()
+
+        with mailsync_session_scope() as db_session:
+            account = db_session.query(Account).get(self.account_id)
+            account_created = account.created_at
+
+        latency = (now - account_created).total_seconds() * 1000
+        metrics = [
+            '.'.join(['providers', self.provider_name, 'first_message']),
+            '.'.join(['providers', 'overall', 'first_message'])
+        ]
+
+        for metric in metrics:
+            statsd_client.timing(metric, latency)
+
+    def _report_message_velocity(self, timedelta, num_uids):
+        latency = (timedelta).total_seconds() * 1000
+        latency_per_uid = float(latency) / num_uids
+        metrics = [
+            '.'.join(['providers', self.provider_name,
+                      'message_velocity']),
+            '.'.join(['providers', 'overall', 'message_velocity'])
+        ]
+        for metric in metrics:
+            statsd_client.timing(metric, latency_per_uid)
 
     def update_metadata(self, crispin_client, updated):
         """ Update flags (the only metadata that can change). """
@@ -621,3 +702,7 @@ def report_progress(account_id, folder_name, downloaded_uid_count,
 
         saved_status.update_metrics(metrics)
         db_session.commit()
+
+    statsd_client.gauge(
+        ".".join(["accounts", str(account_id), "messages_downloaded"]),
+        metrics.get("num_downloaded_since_timestamp"))

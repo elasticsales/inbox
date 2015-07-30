@@ -1,11 +1,14 @@
 from collections import defaultdict, namedtuple
 from datetime import datetime, timedelta
+from random import shuffle
 
 from sqlalchemy import Boolean, Column, Integer, String, ForeignKey
+from sqlalchemy import DateTime
 from sqlalchemy.orm import relationship, backref
+from sqlalchemy.orm.session import object_session
 from sqlalchemy.ext.hybrid import hybrid_property
 
-from inbox.basicauth import OAuthError
+from inbox.basicauth import ConnectionError, OAuthError
 from inbox.models.backends.imap import ImapAccount
 from inbox.models.backends.oauth import OAuthAccount
 from inbox.models.base import MailSyncBase
@@ -25,7 +28,8 @@ GOOGLE_CONTACTS_SCOPE = 'https://www.google.com/m8/feeds'
 # NOTE: we only keep track of the auth_credentials id because
 # we need it for contacts sync (which is unfortunate). If that ever
 # changes, we should remove auth_creds from GToken.
-GToken = namedtuple('GToken', 'value expiration scopes auth_creds_id')
+GToken = namedtuple('GToken',
+                    'value expiration scopes client_id auth_creds_id')
 
 
 class GTokenManager(object):
@@ -47,7 +51,16 @@ class GTokenManager(object):
             except KeyError:
                 pass
 
-        gtoken = account.new_token(scope)
+        # If we find invalid GmailAuthCredentials while trying to
+        # get a new token, we mark them as invalid. We want to make
+        # sure we commit those changes to the database before we
+        # actually throw an error.
+        try:
+            gtoken = account.new_token(scope)
+        except (ConnectionError, OAuthError):
+            object_session(account).commit()
+            raise
+
         self.cache_token(account, gtoken)
         return gtoken
 
@@ -81,6 +94,32 @@ class GTokenManager(object):
     def clear_cache(self, account):
         self._tokens[account.id] = {}
 
+    def get_token_for_calendars_restrict_ids(self, account, client_ids,
+                                             force_refresh=False):
+        '''
+        For the given account, returns an access token that's associated
+        with a client id from the given list of client_ids.
+        '''
+        scope = GOOGLE_CALENDAR_SCOPE
+        if not force_refresh:
+            try:
+                gtoken = self._tokens[account.id][scope]
+                if gtoken.client_id in client_ids:
+                    return gtoken.value
+            except KeyError:
+                pass
+
+        # Need to get access token for specific client_id/client_secret pair
+        try:
+            gtoken = account.new_token(
+                    scope, client_ids=client_ids)
+        except (ConnectionError, OAuthError):
+            object_session(account).commit()
+            raise
+
+        self.cache_token(account, gtoken)
+        return gtoken.value
+
 
 g_token_manager = GTokenManager()
 
@@ -108,6 +147,11 @@ class GmailAccount(OAuthAccount, ImapAccount):
     picture = Column(String(1024))
     home_domain = Column(String(256))
 
+    # for google push notifications:
+    last_calendar_list_sync = Column(DateTime)
+    gpush_calendar_list_last_ping = Column(DateTime)
+    gpush_calendar_list_expiration = Column(DateTime)
+
     @property
     def provider(self):
         return PROVIDER
@@ -126,7 +170,7 @@ class GmailAccount(OAuthAccount, ImapAccount):
         from inbox.models.action_log import ActionLog
         return ActionLog
 
-    def new_token(self, scope):
+    def new_token(self, scope, client_ids=None):
         """
         Retrieves a new access token w/ access to the given scope.
         Returns a GToken namedtuple.
@@ -135,39 +179,54 @@ class GmailAccount(OAuthAccount, ImapAccount):
         auth_credentials' is_valid flag to False.
 
         If no valid auth tokens are available, throws an OAuthError.
+
+        if client_ids is given, only looks at auth credentials with a client
+        id in client_ids.
         """
 
         non_oauth_error = None
 
-        for auth_creds in self.valid_auth_credentials:
-            if scope in auth_creds.scopes:
-                try:
-                    token, expires_in = self.auth_handler.new_token(
-                        auth_creds.refresh_token,
-                        auth_creds.client_id,
-                        auth_creds.client_secret)
+        possible_credentials = [
+            auth_creds for auth_creds in self.valid_auth_credentials
+            if scope in auth_creds.scopes and (
+                client_ids is None or
+                auth_creds.client_id in client_ids
+            )
+        ]
 
-                    expires_in -= 10
-                    expiration = (datetime.utcnow() +
-                                  timedelta(seconds=expires_in))
+        # If more than one set of credentials is present, we don't want to
+        # just use the same one each time.
+        shuffle(possible_credentials)
 
-                    return GToken(
-                        token, expiration, auth_creds.scopes, auth_creds.id)
+        for auth_creds in possible_credentials:
+            try:
+                token, expires_in = self.auth_handler.new_token(
+                    auth_creds.refresh_token,
+                    auth_creds.client_id,
+                    auth_creds.client_secret)
 
-                except OAuthError as e:
-                    log.error('Error validating',
-                              account_id=self.id,
-                              auth_creds_id=auth_creds.id,
-                              logstash_tag='mark_invalid')
-                    auth_creds.is_valid = False
+                expires_in -= 10
+                expiration = (datetime.utcnow() +
+                              timedelta(seconds=expires_in))
 
-                except Exception as e:
-                    log.error(
-                        'Error while getting access token: {}'.format(e),
-                        account_id=self.id,
-                        auth_creds_id=auth_creds.id,
-                        exc_info=True)
-                    non_oauth_error = e
+                return GToken(
+                    token, expiration, auth_creds.scopes,
+                    auth_creds.client_id, auth_creds.id)
+
+            except OAuthError as e:
+                log.error('Error validating',
+                          account_id=self.id,
+                          auth_creds_id=auth_creds.id,
+                          logstash_tag='mark_invalid')
+                auth_creds.is_valid = False
+
+            except Exception as e:
+                log.error(
+                    'Error while getting access token: {}'.format(e),
+                    account_id=self.id,
+                    auth_creds_id=auth_creds.id,
+                    exc_info=True)
+                non_oauth_error = e
 
         if non_oauth_error:
             # Some auth credential might still be valid!
@@ -213,6 +272,40 @@ class GmailAccount(OAuthAccount, ImapAccount):
                                           force_refresh=True)
         return self.auth_handler.validate_token(token)
 
+    def new_calendar_list_watch(self, expiration):
+        # Google gives us back expiration timestamps in milliseconds
+        expiration = datetime.fromtimestamp(int(expiration) / 1000.)
+        self.gpush_calendar_list_expiration = expiration
+
+    def handle_gpush_notification(self):
+        self.gpush_calendar_list_last_ping = datetime.utcnow()
+
+    def should_update_calendars(self, max_time_between_syncs):
+        """
+        max_time_between_syncs: a timedelta object. The maximum amount of
+        time we should wait until we sync, even if we haven't received
+        any push notifications
+        """
+        return (
+            # Never synced
+            self.last_calendar_list_sync is None or
+            # Too much time has passed to not sync
+            (datetime.utcnow() >
+                self.last_calendar_list_sync + max_time_between_syncs) or
+            # Push notifications channel is stale
+            self.needs_new_calendar_list_watch() or
+            # Our info is stale, according to google's push notifications
+            (
+                self.gpush_calendar_list_last_ping is not None and
+                (self.last_calendar_list_sync <
+                    self.gpush_calendar_list_last_ping)
+            )
+        )
+
+    def needs_new_calendar_list_watch(self):
+        return (self.gpush_calendar_list_expiration is None or
+                self.gpush_calendar_list_expiration < datetime.utcnow())
+
 
 class GmailAuthCredentials(MailSyncBase):
     """
@@ -231,15 +324,17 @@ class GmailAuthCredentials(MailSyncBase):
     """
 
     gmailaccount_id = Column(Integer,
-                             ForeignKey(GmailAccount.id, ondelete='CASCADE'))
+                             ForeignKey(GmailAccount.id, ondelete='CASCADE'),
+                             nullable=False)
     refresh_token_id = Column(Integer,
-                              ForeignKey(Secret.id, ondelete='CASCADE'))
+                              ForeignKey(Secret.id, ondelete='CASCADE'),
+                              nullable=False)
 
-    _scopes = Column('scopes', String(512))
-    g_id_token = Column(String(1024), nullable=True)
-    client_id = Column(String(256))
-    client_secret = Column(String(256))
-    is_valid = Column(Boolean, default=True)
+    _scopes = Column('scopes', String(512), nullable=False)
+    g_id_token = Column(String(1024), nullable=False)
+    client_id = Column(String(256), nullable=False)
+    client_secret = Column(String(256), nullable=False)
+    is_valid = Column(Boolean, default=True, nullable=False)
 
     gmailaccount = relationship(
         GmailAccount,

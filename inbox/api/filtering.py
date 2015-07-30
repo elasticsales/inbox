@@ -9,7 +9,7 @@ from inbox.models.event import RecurringEvent
 def threads(namespace_id, subject, from_addr, to_addr, cc_addr, bcc_addr,
             message_id_header, any_email, thread_public_id, started_before,
             started_after, last_message_before, last_message_after, filename,
-            in_, unread, starred, limit, offset, view, db_session):
+            in_, unread, starred, sort, limit, offset, view, db_session):
 
     if view == 'count':
         query = db_session.query(func.count(Thread.id))
@@ -95,7 +95,8 @@ def threads(namespace_id, subject, from_addr, to_addr, cc_addr, bcc_addr,
         category_query = db_session.query(Message.thread_id). \
             join(MessageCategory).join(Category). \
             filter(Category.namespace_id == namespace_id,
-                   or_(Category.name == in_, Category.display_name == in_)). \
+                   or_(Category.name == in_, Category.display_name == in_,
+                       Category.public_id == in_)). \
             subquery()
         query = query.filter(Thread.id.in_(category_query))
 
@@ -119,22 +120,28 @@ def threads(namespace_id, subject, from_addr, to_addr, cc_addr, bcc_addr,
     # representations faster.
     if view != 'ids':
         if view == 'expanded':
-            query = query.options(
-                subqueryload(Thread.messages).
-                load_only('public_id', 'subject', 'is_draft', 'version',
-                          'from_addr', 'to_addr', 'cc_addr', 'bcc_addr',
-                          'received_date', 'snippet', 'is_read',
-                          'reply_to_message_id', 'reply_to')
-                .joinedload(Message.parts)
-                .joinedload(Part.block))
-
+            load_only_columns = ('public_id', 'subject', 'is_draft', 'version',
+                                 'from_addr', 'to_addr', 'cc_addr', 'bcc_addr',
+                                 'received_date', 'snippet', 'is_read',
+                                 'reply_to_message_id', 'reply_to')
         else:
-            query = query.options(
-                subqueryload(Thread.messages).
-                load_only('public_id', 'is_draft', 'from_addr', 'to_addr',
-                          'cc_addr', 'bcc_addr'))
+            load_only_columns = ('public_id', 'is_draft', 'from_addr',
+                                 'to_addr', 'cc_addr', 'bcc_addr', 'is_read',
+                                 'is_starred')
+        query = query.options(
+            subqueryload(Thread.messages).
+            load_only(*load_only_columns)
+            .joinedload(Message.messagecategories)
+            .joinedload(MessageCategory.category),
+            subqueryload(Thread.messages)
+            .joinedload(Message.parts)
+            .joinedload(Part.block))
 
-    query = query.order_by(desc(Thread.recentdate)).limit(limit)
+    if sort and sort == 'received_recent_date':
+        query = query.order_by(desc(Thread.receivedrecentdate)).limit(limit)
+    else:
+        query = query.order_by(desc(Thread.recentdate)).limit(limit)
+
     if offset:
         query = query.offset(offset)
 
@@ -259,7 +266,11 @@ def messages_or_drafts(namespace_id, drafts, subject, from_addr, to_addr,
 
     # Eager-load related attributes to make constructing API representations
     # faster.
-    query = query.options(subqueryload(Message.parts).joinedload(Part.block))
+    query = query.options(
+                subqueryload(Message.messagecategories).
+                joinedload(MessageCategory.category),
+                subqueryload(Message.parts).joinedload(Part.block),
+                subqueryload(Message.events))
 
     return query.all()
 
@@ -461,21 +472,17 @@ def events(namespace_id, event_public_id, calendar_public_id, title,
         return all_events
 
 
-def messages_for_contact_scores(db_session, namespace_id,
-                                from_email, starts_after=None):
-    query = db_session.query(
-        Message.to_addr, Message.cc_addr, Message.bcc_addr,
-        Message.id, Message.received_date.label('date'))
-    filters = [Message.namespace_id == namespace_id, ~Message.is_draft]
+def messages_for_contact_scores(db_session, namespace_id, starts_after=None):
+    query = (db_session.query(
+                Message.to_addr, Message.cc_addr, Message.bcc_addr,
+                Message.id, Message.received_date.label('date'))
+             .join(MessageCategory)
+             .join(Category)
+             .filter(Message.namespace_id == namespace_id)
+             .filter(Category.name == 'sent')
+             .filter(~Message.is_draft))
+
     if starts_after:
-        filters.append(Message.received_date > starts_after)
+        query = query.filter(Message.received_date > starts_after)
 
-    from_query = db_session.query(MessageContactAssociation.message_id). \
-        join(Contact).filter(
-            MessageContactAssociation.field == 'from_addr',
-            Contact.email_address == from_email,
-            Contact.namespace_id == namespace_id).subquery()
-
-    filters.append(Message.id.in_(from_query))
-    query = query.filter(*filters)
     return query.all()

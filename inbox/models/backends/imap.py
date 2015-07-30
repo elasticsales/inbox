@@ -300,11 +300,16 @@ class ImapThread(Thread):
         if message.g_thrid is not None:
             thread = _choose_existing_thread_for_gmail(message, session)
             if thread is None:
+                received_recent_date = None
+                if all(category.name != "sent" for category in
+                        message.categories):
+                    received_recent_date = message.received_date
                 thread = cls(subject=message.subject, g_thrid=message.g_thrid,
                              recentdate=message.received_date,
                              namespace=namespace,
                              subjectdate=message.received_date,
-                             snippet=message.snippet)
+                             snippet=message.snippet,
+                             receivedrecentdate=received_recent_date)
         return thread
 
     @classmethod
@@ -314,9 +319,14 @@ class ImapThread(Thread):
             # create a new one.
             return message.thread
         clean_subject = cleanup_subject(message.subject)
+        received_recent_date = None
+        if all(category.name != "sent" for category in
+                        message.categories):
+            received_recent_date = message.received_date
         thread = cls(subject=clean_subject, recentdate=message.received_date,
                      namespace=namespace, subjectdate=message.received_date,
-                     snippet=message.snippet)
+                     snippet=message.snippet,
+                     receivedrecentdate=received_recent_date)
         return thread
 
     __mapper_args__ = {'polymorphic_identity': 'imapthread'}
@@ -334,7 +344,7 @@ class ImapFolderSyncStatus(MailSyncBase, HasRunState):
                        nullable=False)
     # We almost always need the folder name too, so eager load by default.
     folder = relationship('Folder', lazy='joined', backref=backref(
-        'imapsyncstatus', passive_deletes=True))
+        'imapsyncstatus', uselist=False, passive_deletes=True))
 
     # see state machine in mailsync/backends/imap/imap.py
     state = Column(Enum('initial', 'initial uidinvalid',

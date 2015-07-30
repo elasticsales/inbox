@@ -21,6 +21,7 @@ user always gets the full thread when they look at mail.
 """
 from __future__ import division
 from collections import namedtuple
+from datetime import datetime
 from gevent import kill, spawn, sleep
 from sqlalchemy.orm import joinedload, load_only
 
@@ -65,7 +66,7 @@ class GmailSyncMonitor(ImapSyncMonitor):
         Notes
         -----
         Gmail uses IMAP folders and labels.
-        Canonical folders ('inbox', 'all') are therefore mapped to both
+        Canonical folders ('all', 'trash', 'spam') are therefore mapped to both
         Folder and Label objects, everything else is created as a Label only.
 
         We don't canonicalize names to lowercase when saving because
@@ -96,8 +97,13 @@ class GmailSyncMonitor(ImapSyncMonitor):
 
         # Create new labels, folders
         for raw_folder in raw_folders:
-            Label.find_or_create(db_session, account, raw_folder.display_name,
-                                 raw_folder.role)
+            if raw_folder.role == 'starred':
+                # The starred state of messages is tracked separately
+                # (we set Message.is_starred from the '\\Flagged' flag)
+                continue
+
+            Label.find_or_create(db_session, account,
+                                 raw_folder.display_name, raw_folder.role)
 
             if raw_folder.role in ('all', 'spam', 'trash'):
                 folder = Folder.find_or_create(db_session, account,
@@ -105,12 +111,18 @@ class GmailSyncMonitor(ImapSyncMonitor):
                                                raw_folder.role)
                 if folder.name != raw_folder.display_name:
                     log.info('Folder name changed on remote',
-                             account_id=account_id,
+                             account_id=self.account_id,
                              role=raw_folder.role,
                              new_name=raw_folder.display_name,
                              name=folder.name)
                     folder.name = raw_folder.display_name
 
+        # Ensure sync_should_run is True for the folders we want to sync (for
+        # Gmail, that's just all folders, since we created them above if
+        # they didn't exist.)
+        for folder in account.folders:
+            if folder.imapsyncstatus:
+                folder.imapsyncstatus.sync_should_run = True
         db_session.commit()
 
 
@@ -314,6 +326,7 @@ class GmailFolderSyncEngine(CondstoreFolderSyncEngine):
         return new_uid
 
     def download_and_commit_uids(self, crispin_client, uids):
+        start = datetime.utcnow()
         raw_messages = crispin_client.uids(uids)
         if not raw_messages:
             return 0
@@ -338,6 +351,15 @@ class GmailFolderSyncEngine(CondstoreFolderSyncEngine):
                         db_session.flush()
                         new_uids.add(uid)
                 db_session.commit()
+
+        # If we downloaded uids, record message velocity (#uid / latency)
+        if self.state == "initial" and len(new_uids):
+            self._report_message_velocity(datetime.utcnow() - start,
+                                          len(new_uids))
+
+        if self.is_first_message:
+            self._report_first_message()
+            self.is_first_message = False
 
         self.saved_uids.update(new_uids)
         return len(new_uids)

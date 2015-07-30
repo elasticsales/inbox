@@ -14,6 +14,8 @@ from metrics_api import app as metrics_api
 from ns_api import app as ns_api
 from ns_api import DEFAULT_LIMIT
 
+from inbox.webhooks.gpush_notifications import app as webhooks_api
+
 app = Flask(__name__)
 # Handle both /endpoint and /endpoint/ without redirecting.
 # Note that we need to set this *before* registering the blueprint.
@@ -175,3 +177,4 @@ def home():
 
 app.register_blueprint(ns_api)  # /n/<namespace_id>/...
 app.register_blueprint(metrics_api)
+app.register_blueprint(webhooks_api)  # /w/...

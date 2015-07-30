@@ -42,7 +42,6 @@ class Message(MailSyncBase, HasRevisions, HasPublicID):
                           index=True, nullable=False)
     namespace = relationship(
         'Namespace',
-        lazy='joined',
         load_on_pending=True)
 
     # Do delete messages if their associated thread is deleted.
@@ -512,20 +511,11 @@ class Message(MailSyncBase, HasRevisions, HasPublicID):
             categories.update(i.categories)
 
         if account.category_type == 'folder':
-            categories = [select_category(categories)]
+            categories = [select_category(categories)] if categories else []
 
         self.categories = categories
 
         # TODO[k]: Update from pending actions here?
-
-    def add_category(self, category):
-        if category not in self.categories:
-            self.categories.add(category)
-
-    def remove_category(self, category):
-        if category not in self.categories:
-            return
-        self.categories.remove(category)
 
 # Need to explicitly specify the index length for table generation with MySQL
 # 5.6 when columns are too long to be fully indexed with utf8mb4 collation.

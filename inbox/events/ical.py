@@ -3,8 +3,8 @@ import pytz
 import arrow
 import traceback
 import icalendar
-from datetime import datetime, date
 from icalendar import Calendar as iCalendar
+from datetime import datetime, date
 
 from flanker import mime
 from html2text import html2text
@@ -126,7 +126,9 @@ def events_from_ics(namespace, calendar, ics_str):
             if summaries != []:
                 title = " - ".join(summaries)
 
-            description = unicode(component.get('description'))
+            description = component.get('description')
+            if description is not None:
+                description = unicode(description)
 
             event_status = component.get('status')
             if event_status is not None:
@@ -154,6 +156,8 @@ def events_from_ics(namespace, calendar, ics_str):
             participants = []
 
             organizer = component.get('organizer')
+            organizer_name = None
+            organizer_email = None
             if organizer:
                 # Here's the problem. Gmail and Exchange define the organizer
                 # field like this:
@@ -165,14 +169,19 @@ def events_from_ics(namespace, calendar, ics_str):
                 # so what we first try to get the EMAIL field, and only if
                 # it's not present we use the MAILTO: link.
                 if 'EMAIL' in organizer.params:
-                    organizer = organizer.params['EMAIL']
+                    organizer_email = organizer.params['EMAIL']
                 else:
-                    organizer = unicode(organizer)
-                    if organizer.startswith('mailto:'):
-                        organizer = organizer[7:]
+                    organizer_email = unicode(organizer)
+                    if organizer_email.lower().startswith('mailto:'):
+                        organizer_email = organizer_email[7:]
+
+                if 'CN' in organizer.params:
+                    organizer_name = organizer.params['CN']
+
+            owner = "{} <{}>".format(organizer_name, organizer_email)
 
             if (namespace.account.email_address ==
-                    canonicalize_address(organizer)):
+                    canonicalize_address(organizer_email)):
                 is_owner = True
             else:
                 is_owner = False
@@ -238,6 +247,7 @@ def events_from_ics(namespace, calendar, ics_str):
                 busy=True,
                 all_day=all_day,
                 read_only=True,
+                owner=owner,
                 is_owner=is_owner,
                 last_modified=last_modified,
                 original_start_tz=original_start_tz,
@@ -277,7 +287,6 @@ def process_invites(db_session, message, account, invites):
             # important because we only want to keep events we haven't seen
             # yet --- updates are merged with the existing events and are
             # dropped immediately afterwards.
-
             # By associating the event to the message we make sure it
             # will be flushed to the db.
             event.calendar = account.emailed_events_calendar
@@ -371,14 +380,21 @@ def import_attached_events(db_session, account, message):
     """Import events from a file into the 'Emailed events' calendar."""
 
     assert account is not None
-    from_addr = message.from_addr[0][1]
-
     # FIXME @karim - Don't import iCalendar events from messages we've sent.
+
     # This is only a stopgap measure -- what we need to have instead is
     # smarter event merging (i.e: looking at whether the sender is the
     # event organizer or not, and if the sequence number got incremented).
-    if from_addr == account.email_address:
-        return
+    if message.from_addr is not None:
+        if len(message.from_addr) == 0 or len(message.from_addr[0]) == 1:
+            # We got a message without a from address --- this is either
+            # a message which hasn't been sent or a bogus message. Don't
+            # process it.
+            return
+
+        from_addr = message.from_addr[0][1]
+        if from_addr == account.email_address or from_addr == '':
+            return
 
     for part in message.attached_event_files:
         try:
@@ -415,7 +431,8 @@ def import_attached_events(db_session, account, message):
         # ourselves.
         # - karim
         if account.provider != 'gmail':
-            process_nylas_rsvps(db_session, message, account, new_events['rsvps'])
+            process_nylas_rsvps(db_session, message, account,
+                                new_events['rsvps'])
 
 
 def generate_icalendar_invite(event, invite_type='request'):
@@ -424,7 +441,12 @@ def generate_icalendar_invite(event, invite_type='request'):
 
     cal = iCalendar()
     cal.add('PRODID', '-//Nylas sync engine//nylas.com//')
-    cal.add('METHOD', invite_type.upper())
+
+    if invite_type in ['request', 'update']:
+        cal.add('METHOD', 'REQUEST')
+    elif invite_type == 'cancel':
+        cal.add('METHOD', 'CANCEL')
+
     cal.add('VERSION', '2.0')
     cal.add('CALSCALE', 'GREGORIAN')
 
@@ -446,15 +468,15 @@ def generate_icalendar_invite(event, invite_type='request'):
         icalendar_event['status'] = 'CONFIRMED'
 
     icalendar_event['uid'] = "{}@nylas.com".format(event.public_id)
+    icalendar_event['description'] = event.description or ''
+    icalendar_event['summary'] = event.title or ''
     icalendar_event['last-modified'] = serialize_datetime(event.updated_at)
     icalendar_event['dtstamp'] = icalendar_event['last-modified']
     icalendar_event['created'] = serialize_datetime(event.created_at)
     icalendar_event['dtstart'] = serialize_datetime(event.start)
     icalendar_event['dtend'] = serialize_datetime(event.end)
     icalendar_event['transp'] = 'OPAQUE' if event.busy else 'TRANSPARENT'
-    icalendar_event['description'] = event.description or ''
     icalendar_event['location'] = event.location or ''
-    icalendar_event['summary'] = event.title or ''
 
     attendees = []
     for participant in event.participants:
@@ -484,12 +506,10 @@ def generate_icalendar_invite(event, invite_type='request'):
     return cal
 
 
-def generate_invite_message(ical_txt, event, html_body, account,
-                            invite_type='request'):
+def generate_invite_message(ical_txt, event, account, invite_type='request'):
+    assert invite_type in ['request', 'update', 'cancel']
 
-    assert invite_type in ['request', 'cancel']
-
-    html_body = ""
+    html_body = event.description
 
     text_body = html2text(html_body)
     msg = mime.create.multipart('mixed')
@@ -503,7 +523,7 @@ def generate_invite_message(ical_txt, event, html_body, account,
     # attachment to make sure it makes it through. Luckily, Gmail is smart
     # enough to cancel the event anyway.
     # - karim
-    if invite_type == 'request':
+    if invite_type in ['request', 'update']:
         body.append(
             mime.create.text('plain', text_body),
             mime.create.text('html', html_body),
@@ -530,13 +550,15 @@ def generate_invite_message(ical_txt, event, html_body, account,
 
     if invite_type == 'request':
         msg.headers['Subject'] = "Invitation: {}".format(event.title)
+    elif invite_type == 'update':
+        msg.headers['Subject'] = "Updated Invitation: {}".format(event.title)
     elif invite_type == 'cancel':
         msg.headers['Subject'] = "Cancelled: {}".format(event.title)
 
     return msg
 
 
-def send_invite(ical_txt, event, html_body, account, invite_type='request'):
+def send_invite(ical_txt, event, account, invite_type='request'):
     from inbox.sendmail.base import get_sendmail_client, SendMailException
 
     for participant in event.participants:
@@ -544,8 +566,7 @@ def send_invite(ical_txt, event, html_body, account, invite_type='request'):
         if email is None:
             continue
 
-        msg = generate_invite_message(ical_txt, event, html_body, account,
-                                      invite_type)
+        msg = generate_invite_message(ical_txt, event, account, invite_type)
         msg.headers['To'] = email
         final_message = msg.to_string()
 
@@ -557,9 +578,120 @@ def send_invite(ical_txt, event, html_body, account, invite_type='request'):
                       event_id=event.id, account_id=account.id,
                       logstash_tag='invite_sending', exception=str(e))
 
-        if account.provider == 'eas' and invite_type == 'request':
+        if account.provider == 'eas' and invite_type in ['request', 'update']:
             # Exchange very surprisingly goes out of the way to send an invite
             # to all participants.
-            # We only do this for invites and not cancelled because of the
-            # Exchange doesn't parse our cancellation messages as invites.
+            # We only do this for invites and not cancelled because Exchange
+            # doesn't parse our cancellation messages as invites.
             break
+
+
+def _generate_rsvp(status, account, event):
+    # It seems that Google Calendar requires us to copy a number of fields
+    # in the RVSP reply. I suppose it's for reconciling the reply with the
+    # invite. - karim
+    cal = iCalendar()
+    cal.add('PRODID', '-//Nylas sync engine//nylas.com//')
+    cal.add('METHOD', 'REPLY')
+    cal.add('VERSION', '2.0')
+    cal.add('CALSCALE', 'GREGORIAN')
+
+    icalevent = icalendar.Event()
+    icalevent['uid'] = event.uid
+
+    # For ahem, 'historic reasons', we're saving the owner field
+    # as "Organizer <organizer@nylas.com>".
+    organizer_name, organizer_email = event.owner.split('<')
+    organizer_email = organizer_email[:-1]
+
+    icalevent['sequence'] = event.sequence_number
+    icalevent['X-MICROSOFT-CDO-APPT-SEQUENCE'] = icalevent['sequence']
+
+    if event.status == 'confirmed':
+        icalevent['status'] = 'CONFIRMED'
+
+    icalevent['dtstamp'] = serialize_datetime(datetime.utcnow())
+
+    if event.start is not None:
+        icalevent['dtstart'] = serialize_datetime(event.start)
+
+    if event.end is not None:
+        icalevent['dtend'] = serialize_datetime(event.end)
+
+    if event.description is not None:
+        icalevent['description'] = event.description
+
+    if event.location is not None:
+        icalevent['location'] = event.location
+
+    if event.title is not None:
+        icalevent['summary'] = event.title
+
+    attendee = icalendar.vCalAddress('MAILTO:{}'.format(account.email_address))
+    attendee.params['cn'] = account.name
+    attendee.params['partstat'] = status
+    icalevent.add('attendee', attendee, encode=0)
+    cal.add_component(icalevent)
+
+    ret = {}
+    ret["cal"] = cal
+    ret["organizer_email"] = organizer_email
+
+    return ret
+
+
+def generate_rsvp(event, participant, account):
+    # Generates an iCalendar file to RSVP to an invite.
+    status = INVERTED_STATUS_MAP.get(participant["status"])
+    return _generate_rsvp(status, account, event)
+
+
+def send_rsvp(ical_data, event, body_text, status, account):
+    from inbox.sendmail.base import get_sendmail_client
+
+    ical_file = ical_data["cal"]
+    rsvp_to = ical_data["organizer_email"]
+    ical_txt = ical_file.to_ical()
+
+    sendmail_client = get_sendmail_client(account)
+
+    msg = mime.create.multipart('mixed')
+
+    body = mime.create.multipart('alternative')
+    body.append(
+        mime.create.text('plain', ''),
+        mime.create.text('calendar;method=REPLY', ical_txt))
+
+    msg.append(body)
+
+    msg.headers['Reply-To'] = account.email_address
+    msg.headers['From'] = account.email_address
+
+    # We actually send the reply to the invite's From:
+    # address, because it works for most providers.
+    # However, iCloud sends invites from noreply@icloud.com so we detect
+    # this and send RSVPs to the organizer's email. Frustratingly, iCloud
+    # doesn't seem to handle RSVPs at all, but at least the reply ends up
+    # in the organizer's mailbox.
+    assert event.message.from_addr is not None
+    assert len(event.message.from_addr) == 1
+    from_addr = event.message.from_addr[0][1]
+    if from_addr != 'noreply@insideicloud.icloud.com':
+        msg.headers['To'] = from_addr
+    else:
+        msg.headers['To'] = rsvp_to
+
+    assert status in ['yes', 'no', 'maybe']
+
+    if status == 'yes':
+         msg.headers['Subject'] = 'Accepted: {}'.format(event.message.subject)
+    elif status == 'maybe':
+        msg.headers['Subject'] = 'Tentatively accepted: {}'.format(
+            event.message.subject)
+    elif status == 'no':
+        msg.headers['Subject'] = 'Declined: {}'.format(event.message.subject)
+
+    final_message = msg.to_string()
+
+    sendmail_client = get_sendmail_client(account)
+    sendmail_client.send_generated_email([rsvp_to], final_message)

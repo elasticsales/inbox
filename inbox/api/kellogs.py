@@ -21,7 +21,8 @@ def format_categories(categories):
     if categories is None:
         return []
     return [{'id': category.public_id, 'name': category.name,
-             'display_name': category.display_name} for category in categories]
+             'display_name': category.api_display_name} for category in
+             categories]
 
 
 def encode_imapuid(imapuid):
@@ -66,7 +67,7 @@ def encode(obj, namespace_public_id=None, expand=False):
         This function returns a dict with only the data we want to make
         public."""
         dct = {}
-        for attribute in ['name', 'status', 'email']:
+        for attribute in ['name', 'status', 'email', 'comment']:
             dct[attribute] = participant.get(attribute)
 
         return dct
@@ -163,10 +164,12 @@ def encode(obj, namespace_public_id=None, expand=False):
             'subject': obj.subject,
             'participants': format_address_list(obj.participants),
             'last_message_timestamp': obj.recentdate,
+            'last_message_received_timestamp': obj.receivedrecentdate,
             'first_message_timestamp': obj.subjectdate,
             'snippet': obj.snippet,
             'unread': obj.unread,
             'starred': obj.starred,
+            'has_attachments': obj.has_attachments,
             'version': obj.version,
             # For backwards-compatibility -- remove after deprecating tags API
             'tags': obj.tags
@@ -325,7 +328,7 @@ def encode(obj, namespace_public_id=None, expand=False):
             'object': obj.type,
             'namespace_id': _get_namespace_public_id(obj),
             'name': obj.name,
-            'display_name': obj.display_name
+            'display_name': obj.api_display_name
         }
         return resp
 

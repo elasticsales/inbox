@@ -185,22 +185,6 @@ class SMTPConnection(object):
 
         # Auth the connection
         self.connection.ehlo()
-        self.auth_connection()
-
-    def auth_connection(self):
-        c = self.connection
-
-        # Auth mechanisms supported by the server
-        if not c.has_extn('auth'):
-            raise SendMailException('Required SMTP AUTH not supported.', 403)
-
-        supported_types = c.esmtp_features['auth'].strip().split()
-
-        # Auth mechanism needed for this account
-        if AUTH_EXTNS.get(self.auth_type) not in supported_types:
-            raise SendMailException(
-                'Required SMTP Auth mechanism not supported.', 403)
-
         auth_handler = self.auth_handlers.get(self.auth_type)
         auth_handler()
 
@@ -251,17 +235,19 @@ class SMTPConnection(object):
         if username is None:
             username = self.email_address
 
-        # Try to auth, but if it fails with the login function, try a manual
-        # AUTH LOGIN (see: http://www.harelmalka.com/?p=94 )
         try:
             c.login(username, password)
-        except smtplib.SMTPAuthenticationError, e:
-            try:
-                c.docmd("AUTH LOGIN", base64.b64encode(username))
-                c.docmd(base64.b64encode(password), "")
-            except smtplib.SMTPAuthenticationError as e:
-                self.log.error('SMTP Auth failed')
-                raise e
+        except smtplib.SMTPAuthenticationError as e:
+            self.log.error('SMTP login refused', exc=e)
+            raise SendMailException(
+                'Could not authenticate with the SMTP server.', 403)
+        except smtplib.SMTPException as e:
+            # Raised by smtplib if the server doesn't support the AUTH
+            # extension or doesn't support any of the implemented mechanisms.
+            # Shouldn't really happen normally.
+            self.log.error('SMTP auth failed due to unsupported mechanism',
+                           exc=e)
+            raise SendMailException(str(e), 403)
 
         self.log.info('SMTP Auth(Password) success')
 

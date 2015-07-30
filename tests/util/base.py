@@ -145,6 +145,23 @@ class TestAPIClient(object):
         return self.client.delete(path, data=json.dumps(data))
 
 
+@yield_fixture
+def webhooks_client(db):
+    from inbox.api.srv import app
+    app.config['TESTING'] = True
+    with app.test_client() as c:
+        yield TestWebhooksClient(c)
+
+
+class TestWebhooksClient(object):
+    def __init__(self, test_client):
+        self.client = test_client
+
+    def post_data(self, path, data, headers=''):
+        path = '/w' + path
+        return self.client.post(path, data=json.dumps(data), headers=headers)
+
+
 class TestDB(object):
     def __init__(self):
         from inbox.ignition import main_engine
@@ -314,6 +331,19 @@ class ContactsProviderStub(object):
         return self._contacts
 
 
+def new_api_client(db, namespace):
+    from inbox.api.srv import app
+    app.config['TESTING'] = True
+    with app.test_client() as c:
+        return TestAPIClient(c, namespace.public_id)
+
+
+def add_fake_folder(db, default_account):
+    from inbox.models.folder import Folder
+    return Folder.find_or_create(db.session, default_account,
+                                 'All Mail', 'all')
+
+
 def add_fake_account(db_session, email_address='test@nilas.com'):
     from inbox.models import Account, Namespace
     namespace = Namespace()
@@ -326,8 +356,8 @@ def add_fake_account(db_session, email_address='test@nilas.com'):
 def add_fake_message(db_session, namespace_id, thread=None, from_addr=None,
                      to_addr=None, cc_addr=None, bcc_addr=None,
                      received_date=None, subject='',
-                     body='', snippet=''):
-    from inbox.models import Message
+                     body='', snippet='', add_sent_category=False):
+    from inbox.models import Message, Category
     from inbox.contacts.process_mail import update_contacts_from_message
     m = Message()
     m.namespace_id = namespace_id
@@ -349,6 +379,14 @@ def add_fake_message(db_session, namespace_id, thread=None, from_addr=None,
 
         db_session.add(m)
         db_session.commit()
+
+    if add_sent_category:
+        category = Category.find_or_create(
+            db_session, namespace_id, 'sent', 'sent', type_='folder')
+        if category not in m.categories:
+            m.categories.add(category)
+        db_session.commit()
+
     return m
 
 
@@ -445,6 +483,25 @@ def folder(db, default_account):
 
 
 @fixture
+def label(db, default_account):
+    from inbox.models import Label
+    return Label.find_or_create(db.session, default_account,
+                                 'Inbox', 'inbox')
+
+
+@fixture
+def contact(db, default_account):
+    from inbox.models import Contact
+    contact = Contact(namespace_id=default_account.namespace.id,
+                      name='Ben Bitdiddle',
+                      email_address='inboxapptest@gmail.com',
+                      uid='22')
+    db.session.add(contact)
+    db.session.commit()
+    return contact
+
+
+@fixture
 def imapuid(db, default_account, message, folder):
     return add_fake_imapuid(db.session, default_account.id, message,
                             folder, 2222)
@@ -458,6 +515,18 @@ def calendar(db, default_account):
 @fixture(scope='function')
 def event(db, default_account):
     return add_fake_event(db.session, default_account.namespace.id)
+
+
+@fixture(scope='function')
+def imported_event(db, default_account, message):
+    ev = add_fake_event(db.session, default_account.namespace.id)
+    ev.message = message
+    message.from_addr = [['Mick Taylor', 'mick@example.com']]
+    ev.owner = 'Mick Taylor <mick@example.com>'
+    ev.participants = [{"email": "inboxapptest@gmail.com",
+                        "name": "Inbox Apptest", "status": "noreply"}]
+    db.session.commit()
+    return ev
 
 
 def full_path(relpath):

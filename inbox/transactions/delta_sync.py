@@ -21,7 +21,9 @@ QUERY_OPTIONS = {
     Thread: (
         subqueryload('messages').load_only(
             'public_id', 'is_draft', 'from_addr', 'to_addr', 'cc_addr',
-            'bcc_addr'),
+            'bcc_addr', 'is_read', 'is_starred').
+        joinedload('messagecategories').joinedload('category'),
+        subqueryload('messages').joinedload('parts').joinedload('block')
     )
 }
 
@@ -89,7 +91,8 @@ def get_transaction_cursor_near_timestamp(namespace_id, timestamp, db_session):
 
 def format_transactions_after_pointer(namespace, pointer, db_session,
                                       result_limit, exclude_types=None,
-                                      include_types=None):
+                                      include_types=None,
+                                      exclude_folders=True):
     """
     Return a pair (deltas, new_pointer), where deltas is a list of change
     events, represented as dictionaries:
@@ -119,6 +122,13 @@ def format_transactions_after_pointer(namespace, pointer, db_session,
         If given, don't include transactions for these types of objects.
 
     """
+    # Begin backwards-compatibility shim -- suppress new object types for now,
+    # because clients may not be able to deal with them.
+    exclude_types = exclude_types or []
+    if exclude_folders is True:
+        exclude_types.extend(('folder', 'label'))
+    # End backwards-compatibility shim.
+
     while True:
         # deleted_at condition included to allow this query to be satisfied via
         # the legacy index on (namespace_id, deleted_at) for performance.
@@ -207,7 +217,7 @@ def format_transactions_after_pointer(namespace, pointer, db_session,
 
 def streaming_change_generator(namespace, poll_interval, timeout,
                                transaction_pointer, exclude_types=None,
-                               include_types=None):
+                               include_types=None, exclude_folders=True):
     """
     Poll the transaction log for the given `namespace_id` until `timeout`
     expires, and yield each time new entries are detected.
@@ -230,7 +240,7 @@ def streaming_change_generator(namespace, poll_interval, timeout,
         with session_scope() as db_session:
             deltas, new_pointer = format_transactions_after_pointer(
                 namespace, transaction_pointer, db_session, 100,
-                exclude_types, include_types)
+                exclude_types, include_types, exclude_folders)
 
         if new_pointer is not None and new_pointer != transaction_pointer:
             transaction_pointer = new_pointer

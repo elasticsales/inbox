@@ -14,7 +14,8 @@ from sqlalchemy.orm.exc import NoResultFound
 
 from inbox.models import (Message, Block, Part, Thread, Namespace,
                           Contact, Calendar, Event, Transaction,
-                          DataProcessingCache, Category)
+                          DataProcessingCache, Category, MessageCategory)
+from inbox.models.event import RecurringEvent, RecurringEventOverride
 from inbox.api.sending import send_draft, send_raw_mime
 from inbox.api.update import update_message, update_thread
 from inbox.api.kellogs import APIEncoder
@@ -26,22 +27,27 @@ from inbox.api.validation import (get_attachments, get_calendar,
                                   limit, offset, ValidatableArgument,
                                   strict_bool, validate_draft_recipients,
                                   validate_search_query, validate_search_sort,
-                                  valid_delta_object_types, valid_display_name)
+                                  valid_delta_object_types, valid_display_name,
+                                  noop_event_update)
 from inbox.contacts.algorithms import (calculate_contact_scores,
                                        calculate_group_scores,
                                        calculate_group_counts, is_stale)
 import inbox.contacts.crud
 from inbox.sendmail.base import (create_draft, update_draft, delete_draft,
-                                 create_draft_from_mime)
+                                 create_draft_from_mime, SendMailException)
 from inbox.log import get_logger
 from inbox.models.action_log import schedule_action
 from inbox.models.session import InboxSession, session_scope
+from inbox.search.base import get_search_client
 from inbox.search.adaptor import NamespaceSearchEngine, SearchEngineError
 from inbox.transactions import delta_sync
-from inbox.api.err import (err, APIException, NotFoundError, InputError)
-from inbox.events.ical import (generate_icalendar_invite, send_invite)
+from inbox.api.err import err, APIException, NotFoundError, InputError
+from inbox.events.ical import (generate_icalendar_invite, send_invite,
+                               generate_rsvp, send_rsvp)
+
 from inbox.ignition import main_engine
 engine = main_engine()
+log = get_logger()
 
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 1000
@@ -77,8 +83,6 @@ def pull_lang_code(endpoint, values):
 @app.before_request
 def start():
     g.db_session = InboxSession(engine)
-
-    g.log = get_logger()
     try:
         valid_public_id(g.namespace_public_id)
         g.namespace = g.db_session.query(Namespace) \
@@ -88,6 +92,9 @@ def start():
     except NoResultFound:
         raise NotFoundError("Couldn't find namespace  `{0}` ".format(
             g.namespace_public_id))
+
+    g.log = log.new(endpoint=request.endpoint,
+                    account_id=g.namespace.account_id)
 
     g.parser = reqparse.RequestParser(argument_class=ValidatableArgument)
     g.parser.add_argument('limit', default=DEFAULT_LIMIT, type=limit,
@@ -170,6 +177,7 @@ def thread_query_api():
     g.parser.add_argument('unread', type=strict_bool, location='args')
     g.parser.add_argument('starred', type=strict_bool, location='args')
     g.parser.add_argument('view', type=view, location='args')
+    g.parser.add_argument('sort', type=bounded_str, location='args')
 
     # For backwards-compatibility -- remove after deprecating tags API.
     g.parser.add_argument('tag', type=bounded_str, location='args')
@@ -177,7 +185,12 @@ def thread_query_api():
     args = strict_parse_args(g.parser, request.args)
 
     # For backwards-compatibility -- remove after deprecating tags API.
-    in_ = args['in'] or args['tag']
+    if args['tag'] == 'unread':
+        unread = True
+        in_ = None
+    else:
+        in_ = args['in'] or args['tag']
+        unread = args['unread']
 
     threads = filtering.threads(
         namespace_id=g.namespace.id,
@@ -194,8 +207,9 @@ def thread_query_api():
         last_message_before=args['last_message_before'],
         last_message_after=args['last_message_after'],
         filename=args['filename'],
-        unread=args['unread'],
+        unread=unread,
         starred=args['starred'],
+        sort=args['sort'],
         in_=in_,
         limit=args['limit'],
         offset=args['offset'],
@@ -207,26 +221,37 @@ def thread_query_api():
     return encoder.jsonify(threads)
 
 
-@app.route('/threads/search', methods=['POST'])
+@app.route('/threads/search', methods=['GET', 'POST'])
 def thread_search_api():
+    g.parser.add_argument('q', type=bounded_str, location='args')
     args = strict_parse_args(g.parser, request.args)
-    data = request.get_json(force=True)
+    if request.method == 'GET':
+        if not args['q']:
+            err_string = ('GET HTTP method must include query'
+                          ' url parameter')
+            g.log.error(err_string)
+            return err(400, err_string)
 
-    query = data.get('query')
-    validate_search_query(query)
+        search_client = get_search_client(g.namespace.account)
+        results = search_client.search_threads(g.db_session, args['q'])
+    else:
+        data = request.get_json(force=True)
 
-    sort = data.get('sort')
-    validate_search_sort(sort)
+        query = data.get('query')
+        validate_search_query(query)
 
-    try:
-        search_engine = NamespaceSearchEngine(g.namespace_public_id)
-        results = search_engine.threads.search(query=query,
-                                               sort=sort,
-                                               max_results=args.limit,
-                                               offset=args.offset)
-    except SearchEngineError as e:
-        g.log.error('Search error: {0}'.format(e))
-        return err(501, 'Search error')
+        sort = data.get('sort')
+        validate_search_sort(sort)
+
+        try:
+            search_engine = NamespaceSearchEngine(g.namespace_public_id)
+            results = search_engine.threads.search(query=query,
+                                                   sort=sort,
+                                                   max_results=args.limit,
+                                                   offset=args.offset)
+        except SearchEngineError as e:
+            g.log.error('Search error: {0}'.format(e))
+            return err(501, 'Search error')
 
     return g.encoder.jsonify(results)
 
@@ -332,26 +357,36 @@ def message_query_api():
     return encoder.jsonify(messages)
 
 
-@app.route('/messages/search', methods=['POST'])
+@app.route('/messages/search', methods=['GET', 'POST'])
 def message_search_api():
+    g.parser.add_argument('q', type=bounded_str, location='args')
     args = strict_parse_args(g.parser, request.args)
-    data = request.get_json(force=True)
-    query = data.get('query')
+    if request.method == 'GET':
+        if not args['q']:
+            err_string = ('GET HTTP method must include query'
+                          ' url parameter')
+            g.log.error(err_string)
+            return err(400, err_string)
 
-    validate_search_query(query)
+        search_client = get_search_client(g.namespace.account)
+        results = search_client.search_messages(g.db_session, args['q'])
+    else:
+        data = request.get_json(force=True)
+        query = data.get('query')
 
-    sort = data.get('sort')
-    validate_search_sort(sort)
+        validate_search_query(query)
 
-    try:
-        search_engine = NamespaceSearchEngine(g.namespace_public_id)
-        results = search_engine.messages.search(query=query,
-                                                sort=sort,
-                                                max_results=args.limit,
-                                                offset=args.offset)
-    except SearchEngineError as e:
-        g.log.error('Search error: {0}'.format(e))
-        return err(501, 'Search error')
+        sort = data.get('sort')
+        validate_search_sort(sort)
+        try:
+            search_engine = NamespaceSearchEngine(g.namespace_public_id)
+            results = search_engine.messages.search(query=query,
+                                                    sort=sort,
+                                                    max_results=args.limit,
+                                                    offset=args.offset)
+        except SearchEngineError as e:
+            g.log.error('Search error: {0}'.format(e))
+            return err(501, 'Search error')
 
     return g.encoder.jsonify(results)
 
@@ -428,9 +463,25 @@ def raw_message_api(public_id):
 @app.route('/folders')
 @app.route('/labels')
 def folders_labels_query_api():
-    categories = g.db_session.query(Category).filter(
-        Category.namespace_id == g.namespace.id).all()
-    return g.encoder.jsonify(categories)
+    g.parser.add_argument('view', type=bounded_str, location='args')
+    args = strict_parse_args(g.parser, request.args)
+    if args['view'] == 'count':
+        results = g.db_session.query(func.count(Category.id))
+    elif args['view'] == 'ids':
+        results = g.db_session.query(Category.public_id)
+    else:
+        results = g.db_session.query(Category)
+
+    results = results.filter(Category.namespace_id == g.namespace.id)
+    results = results.order_by(asc(Category.id))
+
+    if args['view'] == 'count':
+        return g.encoder.jsonify({"count": results.scalar()})
+
+    results = results.limit(args['limit']).offset(args['offset']).all()
+    if args['view'] == 'ids':
+        return g.encoder.jsonify([r for r, in results])
+    return g.encoder.jsonify(results)
 
 
 @app.route('/folders/<public_id>')
@@ -448,7 +499,7 @@ def folders_labels_api_impl(public_id):
     try:
         category = g.db_session.query(Category).filter(
             Category.namespace_id == g.namespace.id,
-            Category.public_id == public_id).all()
+            Category.public_id == public_id).first()
     except NoResultFound:
         raise NotFoundError('Object not found')
     return g.encoder.jsonify(category)
@@ -470,7 +521,8 @@ def folders_labels_create_api():
     g.db_session.flush()
 
     if category_type == 'folder':
-        schedule_action('create_folder', category, g.namespace.id, g.db_session)
+        schedule_action('create_folder', category, g.namespace.id,
+                        g.db_session)
     else:
         schedule_action('create_label', category, g.namespace.id, g.db_session)
 
@@ -514,6 +566,9 @@ def folder_label_update_api(public_id):
     return g.encoder.jsonify(category)
 
 
+# -- Begin tags API shim
+
+
 @app.route('/tags')
 def tag_query_api():
     categories = g.db_session.query(Category). \
@@ -528,11 +583,59 @@ def tag_query_api():
     return g.encoder.jsonify(resp)
 
 
+@app.route('/tags/<public_id>')
+def tag_detail_api(public_id):
+    # Interpret former special public ids for 'canonical' tags.
+    if public_id in ('inbox', 'sent', 'archive', 'important', 'trash', 'spam',
+                     'all'):
+        category = g.db_session.query(Category). \
+            filter(Category.namespace_id == g.namespace.id,
+                   Category.name == public_id).first()
+    else:
+        category = g.db_session.query(Category). \
+            filter(Category.namespace_id == g.namespace.id,
+                   Category.public_id == public_id).first()
+    if category is None:
+        raise NotFoundError('Category {} not found'.format(public_id))
+
+    message_subquery = g.db_session.query(Message.thread_id). \
+        join(MessageCategory). \
+        filter(
+            Message.namespace_id == g.namespace.id,
+            MessageCategory.category_id == category.id).subquery()
+    thread_count = g.db_session.query(func.count(1)). \
+        select_from(Thread).filter(
+            Thread.id.in_(message_subquery)).scalar()
+
+    unread_subquery = g.db_session.query(Message.thread_id). \
+        join(MessageCategory). \
+        filter(
+            Message.namespace_id == g.namespace.id,
+            MessageCategory.category_id == category.id,
+            Message.is_read == False).subquery()
+    unread_count = g.db_session.query(func.count(1)). \
+        select_from(Thread).filter(
+            Thread.id.in_(unread_subquery)).scalar()
+
+    return g.encoder.jsonify({
+        'object': 'tag',
+        'name': category.display_name,
+        'id': category.name or category.public_id,
+        'namespace_id': g.namespace.public_id,
+        'readonly': False,
+        'unread_count': unread_count,
+        'thread_count': thread_count
+    })
+
+
+# -- End tags API shim
+
+
 #
 # Contacts
 ##
 @app.route('/contacts/', methods=['GET'])
-def contact_search_api():
+def contact_api():
     g.parser.add_argument('filter', type=bounded_str, default='',
                           location='args')
     g.parser.add_argument('view', type=bounded_str, location='args')
@@ -541,7 +644,7 @@ def contact_search_api():
     if args['view'] == 'count':
         results = g.db_session.query(func.count(Contact.id))
     elif args['view'] == 'ids':
-        results = g.db_session.query(Contact.id)
+        results = g.db_session.query(Contact.public_id)
     else:
         results = g.db_session.query(Contact)
 
@@ -552,9 +655,12 @@ def contact_search_api():
     results = results.order_by(asc(Contact.id))
 
     if args['view'] == 'count':
-        return g.encoder.jsonify({"count": results.all()})
+        return g.encoder.jsonify({"count": results.scalar()})
 
     results = results.limit(args['limit']).offset(args['offset']).all()
+    if args['view'] == 'ids':
+        return g.encoder.jsonify([r for r, in results])
+
     return g.encoder.jsonify(results)
 
 
@@ -572,7 +678,7 @@ def contact_read_api(public_id):
 # Events
 ##
 @app.route('/events/', methods=['GET'])
-def event_search_api():
+def event_api():
     g.parser.add_argument('event_id', type=valid_public_id, location='args')
     g.parser.add_argument('calendar_id', type=valid_public_id, location='args')
     g.parser.add_argument('title', type=bounded_str, location='args')
@@ -699,14 +805,23 @@ def event_update_api(public_id):
         raise NotFoundError("Couldn't find event {0}".format(public_id))
     if event.read_only:
         raise InputError('Cannot update read_only event.')
+    if (isinstance(event, RecurringEvent) or
+            isinstance(event, RecurringEventOverride)):
+        raise InputError('Cannot update a recurring event yet.')
 
     data = request.get_json(force=True)
+    account = g.namespace.account
+
     valid_event_update(data, g.namespace, g.db_session)
 
     if 'participants' in data:
         for p in data['participants']:
             if 'status' not in p:
                 p['status'] = 'noreply'
+
+    # Don't update an event if we don't need to.
+    if noop_event_update(event, data):
+        return g.encoder.jsonify(event)
 
     for attr in ['title', 'description', 'location', 'when', 'participants']:
         if attr in data:
@@ -715,9 +830,11 @@ def event_update_api(public_id):
     event.sequence_number += 1
     g.db_session.commit()
 
-    schedule_action('update_event', event, g.namespace.id, g.db_session,
-                    calendar_uid=event.calendar.uid,
-                    notify_participants=notify_participants)
+    # Don't sync back updates to autoimported events.
+    if event.calendar != account.emailed_events_calendar:
+        schedule_action('update_event', event, g.namespace.id, g.db_session,
+                        calendar_uid=event.calendar.uid,
+                        notify_participants=notify_participants)
 
     return g.encoder.jsonify(event)
 
@@ -754,9 +871,7 @@ def event_delete_api(public_id):
         ical_file = generate_icalendar_invite(event,
                                               invite_type='cancel').to_ical()
 
-        html_body = ''
-        send_invite(ical_file, event, html_body, account,
-                    invite_type='cancel')
+        send_invite(ical_file, event, account, invite_type='cancel')
 
     schedule_action('delete_event', event, g.namespace.id, g.db_session,
                     event_uid=event.uid, calendar_name=event.calendar.name,
@@ -764,6 +879,80 @@ def event_delete_api(public_id):
                     notify_participants=notify_participants)
 
     return g.encoder.jsonify(None)
+
+
+@app.route('/send-rsvp', methods=['POST'])
+def event_rsvp_api():
+    data = request.get_json(force=True)
+
+    event_id = data.get('event_id')
+    valid_public_id(event_id)
+    try:
+        event = g.db_session.query(Event).filter(
+            Event.public_id == event_id,
+            Event.namespace_id == g.namespace.id).one()
+    except NoResultFound:
+        raise NotFoundError("Couldn't find event {0}".format(event_id))
+
+    if event.message is None:
+        raise InputError('This is not a message imported '
+                         'from an iCalendar invite.')
+
+    status = data.get('status')
+    if not status:
+        raise InputError('You must define a status to RSVP.')
+
+    if status not in ['yes', 'no', 'maybe']:
+        raise InputError('Invalid status %s' % status)
+
+    comment = data.get('comment', '')
+
+    # Note: this assumes that the email invite was directly addressed to us
+    # (i.e: that there's no email alias to redirect ben.bitdiddle@nylas
+    #  to ben@nylas.)
+    participants = {p["email"]: p for p in event.participants}
+
+    account = g.namespace.account
+    email = account.email_address
+
+    if email not in participants:
+        raise InputError('Cannot find %s among the participants' % email)
+
+    participant = {"email": email, "status": status, "comment": comment}
+
+    body_text = comment
+    ical_data = generate_rsvp(event, participant, account)
+
+    if ical_data is None:
+        raise APIException("Couldn't parse the attached iCalendar invite")
+
+    try:
+        send_rsvp(ical_data, event, body_text, status, account)
+    except SendMailException as exc:
+        kwargs = {}
+        if exc.failures:
+            kwargs['failures'] = exc.failures
+        if exc.server_error:
+            kwargs['server_error'] = exc.server_error
+        return err(exc.http_code, exc.message, **kwargs)
+
+    # Update the participants status too.
+    new_participants = []
+    for participant in event.participants:
+        email = participant.get("email")
+        if email is not None and email == account.email_address:
+            participant["status"] = status
+            if comment != "":
+                participant["comment"] = comment
+
+        new_participants.append(participant)
+
+    event.participants = []
+    for participant in new_participants:
+        event.participants.append(participant)
+
+    g.db_session.commit()
+    return g.encoder.jsonify(event)
 
 
 #
@@ -907,26 +1096,26 @@ def file_download_api(public_id):
 # Calendars
 ##
 @app.route('/calendars/', methods=['GET'])
-def calendar_search_api():
+def calendar_api():
     g.parser.add_argument('view', type=view, location='args')
 
     args = strict_parse_args(g.parser, request.args)
-    if view == 'count':
+    if args['view'] == 'count':
         query = g.db_session.query(func.count(Calendar.id))
-    elif view == 'ids':
-        query = g.db_session.query(Calendar.id)
+    elif args['view'] == 'ids':
+        query = g.db_session.query(Calendar.public_id)
     else:
         query = g.db_session.query(Calendar)
 
     results = query.filter(Calendar.namespace_id == g.namespace.id). \
         order_by(asc(Calendar.id))
 
-    if view == 'count':
-        return g.encoder.jsonify({"count": results.one()[0]})
+    if args['view'] == 'count':
+        return g.encoder.jsonify({"count": results.scalar()})
 
-    results = results.limit(args['limit'])
-
-    results = results.offset(args['offset']).all()
+    results = results.limit(args['limit']).offset(args['offset']).all()
+    if args['view'] == 'ids':
+        return g.encoder.jsonify([r for r, in results])
 
     return g.encoder.jsonify(results)
 
@@ -1100,10 +1289,20 @@ def sync_deltas():
                           location='args')
     g.parser.add_argument('timeout', type=int,
                           default=LONG_POLL_REQUEST_TIMEOUT, location='args')
+    # - Begin shim -
+    # Remove after folders and labels exposed in the Delta API for everybody,
+    # right now, only expose for Edgehill.
+    g.parser.add_argument('exclude_folders', type=strict_bool, location='args')
+    # - End shim -
     # TODO(emfree): should support `expand` parameter in delta endpoints.
     args = strict_parse_args(g.parser, request.args)
     exclude_types = args.get('exclude_types')
     include_types = args.get('include_types')
+    # - Begin shim -
+    exclude_folders = args.get('exclude_folders')
+    if exclude_folders is None:
+        exclude_folders = True
+    # - End shim -
     cursor = args['cursor']
     timeout = args['timeout']
 
@@ -1130,7 +1329,7 @@ def sync_deltas():
         with session_scope() as db_session:
             deltas, end_pointer = delta_sync.format_transactions_after_pointer(
                 g.namespace, start_pointer, db_session, args['limit'],
-                exclude_types, include_types)
+                exclude_types, include_types, exclude_folders)
 
         response = {
             'cursor_start': cursor,
@@ -1189,12 +1388,24 @@ def stream_changes():
                           location='args')
     g.parser.add_argument('include_types', type=valid_delta_object_types,
                           location='args')
+    # - Begin shim -
+    # Remove after folders and labels exposed in the Delta API for everybody,
+    # right now, only expose for Edgehill.
+    g.parser.add_argument('exclude_folders', type=strict_bool, location='args')
+    # - End shim -
+
     args = strict_parse_args(g.parser, request.args)
     timeout = args['timeout'] or 1800
     transaction_pointer = None
     cursor = args['cursor']
     exclude_types = args.get('exclude_types')
     include_types = args.get('include_types')
+
+    # Begin shim #
+    exclude_folders = args.get('exclude_folders')
+    if exclude_folders is None:
+        exclude_folders = True
+    # End shim #
 
     if include_types and exclude_types:
         return err(400, "Invalid Request. Cannot specify both include_types"
@@ -1218,7 +1429,7 @@ def stream_changes():
     generator = delta_sync.streaming_change_generator(
         g.namespace, transaction_pointer=transaction_pointer,
         poll_interval=1, timeout=timeout, exclude_types=exclude_types,
-        include_types=include_types)
+        include_types=include_types, exclude_folders=exclude_folders)
     return Response(generator, mimetype='text/event-stream')
 
 
@@ -1230,7 +1441,6 @@ def stream_changes():
 def groups_intrinsic():
     g.parser.add_argument('force_recalculate', type=strict_bool,
                           location='args')
-    g.parser.add_argument('alias', type=bounded_str, location='args')
     args = strict_parse_args(g.parser, request.args)
     try:
         dpcache = g.db_session.query(DataProcessingCache).filter(
@@ -1244,25 +1454,17 @@ def groups_intrinsic():
     use_cached_data = (not (is_stale(last_updated) or cached_data is None) and
                        args['force_recalculate'] is not True)
 
-    # With folders update, how we get these messages should change (?)
-    from_email = g.namespace.email_address
-
     if not use_cached_data:
         last_updated = None
 
     messages = filtering.messages_for_contact_scores(
-        g.db_session, g.namespace.id, from_email, last_updated)
-    if args['alias'] is not None:
-        messages.extend(
-            filtering.messages_for_contact_scores(
-                g.db_session, g.namespace.id, args['alias'], last_updated
-            )
-        )
+        g.db_session, g.namespace.id, last_updated)
+
+    from_email = g.namespace.email_address
 
     if use_cached_data:
         result = cached_data
         new_guys = calculate_group_counts(messages, from_email)
-        # result['use_cached_data'] = -1  # debug
         for k, v in new_guys.items():
             if k in result:
                 result[k] += v
@@ -1275,7 +1477,6 @@ def groups_intrinsic():
         g.db_session.commit()
 
     result = sorted(result.items(), key=lambda x: x[1], reverse=True)
-    # result.append(('total_messages_fetched', len(messages)))  # debug
     return g.encoder.jsonify(result)
 
 
@@ -1283,7 +1484,6 @@ def groups_intrinsic():
 def contact_rankings():
     g.parser.add_argument('force_recalculate', type=strict_bool,
                           location='args')
-    g.parser.add_argument('alias', type=bounded_str, location='args')
     args = strict_parse_args(g.parser, request.args)
     try:
         dpcache = g.db_session.query(DataProcessingCache).filter(
@@ -1297,25 +1497,15 @@ def contact_rankings():
     use_cached_data = (not (is_stale(last_updated) or cached_data is None) and
                        args['force_recalculate'] is not True)
 
-    # With folders update, how we get these messages should change (?)
-    from_email = g.namespace.email_address
-
     if not use_cached_data:
         last_updated = None
 
     messages = filtering.messages_for_contact_scores(
-        g.db_session, g.namespace.id, from_email, last_updated)
-    if args['alias'] is not None:
-        messages.extend(
-            filtering.messages_for_contact_scores(
-                g.db_session, g.namespace.id, args['alias'], last_updated
-            )
-        )
+        g.db_session, g.namespace.id, last_updated)
 
     if use_cached_data:
         new_guys = calculate_contact_scores(messages, time_dependent=False)
         result = cached_data
-        # result['use_cached_data'] = -1  # debug
         for k, v in new_guys.items():
             if k in result:
                 result[k] += v
@@ -1328,5 +1518,4 @@ def contact_rankings():
         g.db_session.commit()
 
     result = sorted(result.items(), key=lambda x: x[1], reverse=True)
-    # result.append(('total messages fetched', len(messages)))  # debug
     return g.encoder.jsonify(result)
