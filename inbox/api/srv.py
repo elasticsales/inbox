@@ -97,6 +97,8 @@ def create_namespace():
 
     namespace = Namespace()
 
+    auth_creds = None
+
     if data['type'] == 'generic':
         from inbox.models.backends.generic import GenericAccount
         account = GenericAccount(namespace=namespace)
@@ -108,14 +110,31 @@ def create_namespace():
         account.provider = data.get('provider', 'custom')
     elif data['type'] == 'gmail':
         from inbox.models.backends.gmail import GmailAccount
+        from inbox.models.backends.gmail import GmailAuthCredentials
+        from inbox.config import config
+
+        OAUTH_CLIENT_ID = config.get_required('GOOGLE_OAUTH_CLIENT_ID')
+        OAUTH_CLIENT_SECRET = config.get_required('GOOGLE_OAUTH_CLIENT_SECRET')
+
         account = GmailAccount(namespace=namespace)
         account.refresh_token = data['refresh_token']
+
+        auth_creds = GmailAuthCredentials()
+        auth_creds.gmailaccount = account
+        auth_creds.scopes = 'https://mail.google.com/'
+        auth_creds.client_id = OAUTH_CLIENT_ID
+        auth_creds.client_secret = OAUTH_CLIENT_SECRET
+        auth_creds.refresh_token = data['refresh_token']
+        auth_creds.is_valid = True
+
     else:
         raise ValueError('Account type not supported.')
 
     account.email_address = data['email_address']
 
     with session_scope() as db_session:
+        if auth_creds:
+            db_session.add(auth_creds)
         db_session.add(account)
         db_session.commit()
 
