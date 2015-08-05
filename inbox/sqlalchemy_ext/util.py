@@ -15,6 +15,7 @@ from sqlalchemy import String, Text, event
 from sqlalchemy.types import TypeDecorator, BINARY
 from sqlalchemy.interfaces import PoolListener
 from sqlalchemy.engine import Engine
+from sqlalchemy.ext import baked
 from sqlalchemy.ext.mutable import Mutable
 from sqlalchemy.ext.declarative import DeclarativeMeta
 
@@ -26,6 +27,9 @@ log = get_logger()
 
 MAX_SANE_QUERIES_PER_SESSION = 100
 MAX_TEXT_LENGTH = 65535
+
+
+bakery = baked.bakery()
 
 
 query_counts = weakref.WeakKeyDictionary()

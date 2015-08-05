@@ -29,6 +29,7 @@ from inbox.api.validation import (get_attachments, get_calendar,
                                   validate_search_query, validate_search_sort,
                                   valid_delta_object_types, valid_display_name,
                                   noop_event_update)
+from inbox.config import config
 from inbox.contacts.algorithms import (calculate_contact_scores,
                                        calculate_group_scores,
                                        calculate_group_counts, is_stale)
@@ -44,6 +45,7 @@ from inbox.transactions import delta_sync
 from inbox.api.err import err, APIException, NotFoundError, InputError
 from inbox.events.ical import (generate_icalendar_invite, send_invite,
                                generate_rsvp, send_rsvp)
+
 
 from inbox.ignition import main_engine
 engine = main_engine()
@@ -75,6 +77,11 @@ with open(mt_path, 'r') as f:
         common_extensions[mime_type.lower()] = extensions[0]
 
 
+if config.get('DEBUG_PROFILING_ON'):
+    from inbox.util.debug import attach_profiler
+    attach_profiler()
+
+
 @app.url_value_preprocessor
 def pull_lang_code(endpoint, values):
     g.namespace_public_id = values.pop('namespace_public_id')
@@ -85,8 +92,8 @@ def start():
     g.db_session = InboxSession(engine)
     try:
         valid_public_id(g.namespace_public_id)
-        g.namespace = g.db_session.query(Namespace) \
-            .filter(Namespace.public_id == g.namespace_public_id).one()
+        g.namespace = Namespace.from_public_id(g.namespace_public_id,
+                                               g.db_session)
 
         g.encoder = APIEncoder(g.namespace.public_id)
     except NoResultFound:
@@ -177,7 +184,6 @@ def thread_query_api():
     g.parser.add_argument('unread', type=strict_bool, location='args')
     g.parser.add_argument('starred', type=strict_bool, location='args')
     g.parser.add_argument('view', type=view, location='args')
-    g.parser.add_argument('sort', type=bounded_str, location='args')
 
     # For backwards-compatibility -- remove after deprecating tags API.
     g.parser.add_argument('tag', type=bounded_str, location='args')
@@ -209,7 +215,6 @@ def thread_query_api():
         filename=args['filename'],
         unread=unread,
         starred=args['starred'],
-        sort=args['sort'],
         in_=in_,
         limit=args['limit'],
         offset=args['offset'],
@@ -399,9 +404,8 @@ def message_read_api(public_id):
 
     try:
         valid_public_id(public_id)
-        message = g.db_session.query(Message).filter(
-            Message.public_id == public_id,
-            Message.namespace_id == g.namespace.id).one()
+        message = Message.from_public_id(public_id, g.namespace.id,
+                                         g.db_session)
     except NoResultFound:
         raise NotFoundError("Couldn't find message {0} ".format(public_id))
 
