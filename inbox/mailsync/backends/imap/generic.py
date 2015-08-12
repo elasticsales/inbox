@@ -81,7 +81,7 @@ from inbox.util.itert import chunk
 from inbox.util.misc import or_none, timed
 from inbox.util.threading import fetch_corresponding_thread, MAX_THREAD_LENGTH
 from inbox.util.stats import statsd_client
-from inbox.log import get_logger
+from nylas.logging import get_logger
 log = get_logger()
 from inbox.crispin import connection_pool, retry_crispin, FolderMissingError
 from inbox.models import Folder, Account, Message
@@ -224,13 +224,19 @@ class FolderSyncEngine(Greenlet):
             except FolderMissingError:
                 # Folder was deleted by monitor while its sync was running.
                 # TODO: Monitor should handle shutting down the folder engine.
-                log.info('Folder disappeared: {}. Stopping sync.'.format(
-                    self.folder_name), account_id=self.account_id,
-                    folder_id=self.folder_id)
+                log.info('Folder disappeared. Stopping sync.',
+                          account_id=self.account_id,
+                          folder_name=self.folder_name,
+                          folder_id=self.folder_id)
                 raise MailsyncDone()
-            except ValidationError:
+            except ValidationError as exc:
                 log.error('Error authenticating; stopping sync', exc_info=True,
-                          account_id=self.account_id, folder_id=self.folder_id)
+                          account_id=self.account_id, folder_id=self.folder_id,
+                          logstash_tag='mark_invalid')
+                with mailsync_session_scope() as db_session:
+                    account = db_session.query(Account).get(self.account_id)
+                    account.mark_invalid()
+                    account.update_sync_error(str(exc))
                 raise MailsyncDone()
 
             # State handlers are idempotent, so it's okay if we're
@@ -364,6 +370,7 @@ class FolderSyncEngine(Greenlet):
         # download messages, if necessary - in case a message has changed UID -
         # update UIDs, and discard orphaned messages. -siro
         with mailsync_session_scope() as db_session:
+            account = db_session.query(Account).get(self.account_id)
             folder_info = db_session.query(ImapFolderInfo). \
                 filter_by(account_id=self.account_id,
                           folder_id=self.folder_id).one()
@@ -403,7 +410,8 @@ class FolderSyncEngine(Greenlet):
                         db_session.add(uid)
 
                         # Update the existing message's metadata too
-                        uid.message.update_metadata(uid.is_draft)
+                        common.update_message_metadata(db_session, account,
+                                                       message, uid.is_draft)
 
                         del data_sha256_message[data_sha256]
                     else:

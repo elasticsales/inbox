@@ -1,3 +1,4 @@
+nylas-production-python>=0.2.0
 coverage==3.7.1
 httplib2==0.8
 pytest==2.5.2
@@ -13,7 +14,7 @@ Flask==0.10.1
 gevent==1.0.1
 gevent-socketio==0.3.5-rc2
 gunicorn==19.0.0
-colorlog==1.8
+mysqlclient==1.3.6
 requests==2.4.3
 chardet==2.1.1
 setproctitle==1.1.8
@@ -33,8 +34,6 @@ greenlet==0.4.2
 click==2.4
 faulthandler==2.3
 pyinstrument==0.12
-structlog==0.4.1
-raven==5.0.0
 simplejson==3.6.0
 Flask-RESTful==0.3.2
 uritemplate==0.6
@@ -44,7 +43,6 @@ pyaml==14.05.7
 enum34==1.0.4
 msgpack-python==0.4.2
 guppy==0.1.10
-elasticsearch==1.2.0
 redis==2.10.3
 hiredis==0.1.5
 mock==1.0.1
@@ -53,5 +51,4 @@ vobject==0.8.1c
 lxml==3.4.2
 arrow==0.5.4
 hypothesis==1.4.1
-mysqlclient==1.3.6
 statsd==3.1

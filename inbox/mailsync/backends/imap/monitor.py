@@ -2,7 +2,8 @@ from gevent import sleep
 from gevent.pool import Group
 from gevent.coros import BoundedSemaphore
 from sqlalchemy.orm.exc import NoResultFound
-from inbox.log import get_logger
+from inbox.basicauth import ValidationError
+from nylas.logging import get_logger
 from inbox.crispin import retry_crispin, connection_pool
 from inbox.models import Account, Folder
 from inbox.models.constants import MAX_FOLDER_NAME_LENGTH
@@ -42,6 +43,7 @@ class ImapSyncMonitor(BaseMailSyncMonitor):
         self.poll_frequency = poll_frequency
         self.syncmanager_lock = BoundedSemaphore(1)
         self.refresh_flags_max = refresh_flags_max
+        self.saved_remote_folders = None
 
         self.folder_monitors = Group()
 
@@ -70,7 +72,9 @@ class ImapSyncMonitor(BaseMailSyncMonitor):
                                             crispin_client)
                 # Get a fresh list of the folder names from the remote
                 remote_folders = crispin_client.folders()
-                self.save_folder_names(db_session, remote_folders)
+                if self.saved_remote_folders != remote_folders:
+                    self.save_folder_names(db_session, remote_folders)
+                    self.saved_remote_folders = remote_folders
                 # The folders we should be syncing
                 sync_folders = crispin_client.sync_folders()
 
@@ -194,9 +198,18 @@ class ImapSyncMonitor(BaseMailSyncMonitor):
         self.delete_handler.start()
 
     def sync(self):
-        self.start_delete_handler()
-        folders = set()
-        self.start_new_folder_sync_engines(folders)
-        while True:
-            sleep(self.refresh_frequency)
+        try:
+            self.start_delete_handler()
+            folders = set()
             self.start_new_folder_sync_engines(folders)
+            while True:
+                sleep(self.refresh_frequency)
+                self.start_new_folder_sync_engines(folders)
+        except ValidationError as exc:
+            log.error(
+                'Error authenticating; stopping sync', exc_info=True,
+                account_id=self.account_id, logstash_tag='mark_invalid')
+            with mailsync_session_scope() as db_session:
+                account = db_session.query(Account).get(self.account_id)
+                account.mark_invalid()
+                account.update_sync_error(str(exc))

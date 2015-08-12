@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 from gevent import monkey
 monkey.patch_all()
+import gevent
 
 import os
 import socket
@@ -21,8 +22,8 @@ except ImportError:
              "Try running sudo ./setup.sh")
 
 from inbox.util.startup import preflight
-from inbox.util.debug import Tracer
-from inbox.log import get_logger, configure_logging
+from nylas.util.debug import Tracer
+from nylas.logging import get_logger, configure_logging
 from inbox.mailsync.service import SyncService
 
 sync_service = None
@@ -50,8 +51,8 @@ def signal_handler(signum, frame):
               help="This process's number in the process group: a unique "
                    "number satisfying 0 <= process_num < total_processes.")
 def main(prod, enable_tracer, config, process_num):
-    """ Launch the Inbox sync service. """
-    configure_logging()
+    """ Launch the Nylas sync service. """
+    configure_logging(log_level=inbox_config.get('LOGLEVEL'))
 
     if config is not None:
         from inbox.util.startup import load_overrides
@@ -98,6 +99,11 @@ def main(prod, enable_tracer, config, process_num):
     if enable_tracer and max_blocking_time:
         tracer = Tracer(max_blocking_time=max_blocking_time, gather_stats=True)
         tracer.start()
+
+    if inbox_config.get('DEBUG_PROFILING_ON'):
+        from inbox.util.profiling import run_profiler
+        port = 16384 + process_num
+        gevent.spawn(run_profiler, '0.0.0.0', port)
 
     global sync_service
     sync_service = SyncService(process_num, total_processes)

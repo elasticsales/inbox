@@ -4,7 +4,7 @@ from collections import defaultdict
 from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Index
 from sqlalchemy.orm import relationship, backref, validates, object_session
 
-from inbox.log import get_logger
+from nylas.logging import get_logger
 log = get_logger()
 from inbox.models.mixins import HasPublicID, HasRevisions
 from inbox.models.base import MailSyncBase
@@ -47,7 +47,7 @@ class Thread(MailSyncBase, HasPublicID, HasRevisions):
         return value
 
     @validates('messages')
-    def update_from_message(self, k, message, sent=False):
+    def update_from_message(self, k, message):
         with object_session(self).no_autoflush:
             if message.is_draft:
                 # Don't change subjectdate, recentdate, or unread/unseen based
@@ -69,7 +69,7 @@ class Thread(MailSyncBase, HasPublicID, HasRevisions):
         received_recent_date = None
         for m in self.messages:
             if all(category.name != "sent" for category in m.categories) and \
-                    not m.is_draft:
+                    not m.is_draft and not m.is_sent:
                 if not received_recent_date or \
                         m.received_date > received_recent_date:
                     received_recent_date = m.received_date
@@ -77,6 +77,10 @@ class Thread(MailSyncBase, HasPublicID, HasRevisions):
         if not received_recent_date:
             sorted_messages = sorted(self.messages,
                                      key=lambda m: m.received_date)
+            if not sorted_messages:
+                log.warning('Thread does not have associated messages',
+                            thread_id=self.id)
+                return None
             received_recent_date = sorted_messages[-1].received_date
 
         return received_recent_date

@@ -2,7 +2,7 @@ from gevent import Greenlet, joinall, sleep, spawn, GreenletExit, event
 from sqlalchemy.exc import DataError
 import traceback
 
-from inbox.log import get_logger
+from nylas.logging import get_logger
 log = get_logger()
 from inbox.util.debug import bind_context
 from inbox.util.concurrency import retry_and_report_killed

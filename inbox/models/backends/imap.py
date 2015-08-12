@@ -9,7 +9,7 @@ from inbox.sqlalchemy_ext.util import (LittleJSON, JSON, MutableDict)
 from sqlalchemy.ext.associationproxy import association_proxy
 from sqlalchemy.orm import object_session
 
-from inbox.log import get_logger
+from nylas.logging import get_logger
 log = get_logger()
 from inbox.models.base import MailSyncBase
 from inbox.models.account import Account
@@ -40,11 +40,18 @@ class ImapAccount(Account):
     @property
     def imap_endpoint(self):
         if self._imap_server_host is not None:
-            # imaplib requires the port to be an int (instead of a long)
+            # We have to take care to coerce to int here and below, because
+            # mysqlclient returns Integer columns as type long, and
+            # socket.getaddrinfo in older versions of Python 2.7 fails to
+            # handle ports of type long. Yay. http://bugs.python.org/issue8853.
             return (self._imap_server_host, int(self._imap_server_port),
                     self._imap_server_is_secure)
         else:
-            return self.provider_info['imap']
+            endpoint = self.provider_info['imap']
+            if len(endpoint) == 2:
+                return (endpoint[0], endpoint[1], True)
+            else:
+                return endpoint
 
     @imap_endpoint.setter
     def imap_endpoint(self, endpoint):
@@ -56,10 +63,14 @@ class ImapAccount(Account):
     @property
     def smtp_endpoint(self):
         if self._smtp_server_host is not None:
-            return (self._smtp_server_host, self._smtp_server_port,
+            return (self._smtp_server_host, int(self._smtp_server_port),
                     self._smtp_server_is_secure)
         else:
-            return self.provider_info['smtp']
+            endpoint = self.provider_info['smtp']
+            if len(endpoint) == 2:
+                return (endpoint[0], endpoint[1], True)
+            else:
+                return endpoint
 
     @smtp_endpoint.setter
     def smtp_endpoint(self, endpoint):

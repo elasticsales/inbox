@@ -9,7 +9,7 @@ from sqlalchemy.exc import OperationalError
 from inbox.config import config
 from inbox.ignition import main_engine
 from inbox.util.stats import statsd_client
-from inbox.log import get_logger, _find_first_app_frame_and_name
+from nylas.logging import get_logger, find_first_app_frame_and_name
 log = get_logger()
 
 
@@ -40,8 +40,8 @@ def new_session(engine, versioned=True):
 
         # Make statsd calls for transaction times
         transaction_start_map = {}
-        frame, modname = _find_first_app_frame_and_name(
-                ignores=['sqlalchemy', 'inbox.models.session', 'inbox.log',
+        frame, modname = find_first_app_frame_and_name(
+                ignores=['sqlalchemy', 'inbox.models.session', 'nylas.logging',
                          'contextlib'])
         funcname = frame.f_code.co_name
         modname = modname.replace(".", "-")
@@ -63,9 +63,6 @@ def new_session(engine, versioned=True):
             statsd_client.incr(metric_name)
 
     return session
-
-# Old name for legacy code.
-InboxSession = new_session
 
 
 @contextmanager

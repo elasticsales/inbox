@@ -7,13 +7,11 @@ from inbox.providers import providers
 from inbox.config import config
 from inbox.contacts.remote_sync import ContactSync
 from inbox.events.remote_sync import EventSync, GoogleEventSync
-from inbox.log import get_logger
+from nylas.logging import get_logger
 from inbox.models.session import session_scope
 from inbox.models import Account
 from inbox.util.concurrency import retry_with_logging
-from inbox.util.debug import attach_profiler
 from inbox.util.rdb import break_to_interpreter
-from inbox.heartbeat.status import clear_heartbeat_status
 
 from inbox.mailsync.backends import module_registry
 
@@ -57,13 +55,6 @@ class SyncService(object):
         self.poll_interval = poll_interval
 
     def run(self):
-        if config.get('DEBUG_PROFILING_ON'):
-            # If config flag is set, get live top-level profiling output on
-            # stdout by doing kill -SIGTRAP <sync_process>.
-            # This slows things down so you probably don't want to do it
-            # normally.
-            attach_profiler()
-
         if config.get('DEBUG_CONSOLE_ON'):
             # Enable the debugging console if this flag is set. Connect to
             # localhost on the port shown in the logs to get access to a REPL
@@ -151,21 +142,6 @@ class SyncService(object):
                                account_id=account_id)
 
             elif acc.id not in self.monitors:
-                # Before starting the sync, clear the heartbeat and individual
-                # folder should_run bits. These bits will be flipped to the
-                # correct state by the mailsync monitor.
-                try:
-                    for status in acc.foldersyncstatuses:
-                        status.sync_should_run = False
-                except Exception as e:
-                    self.log.error('Error resetting folder run status',
-                                   message=str(e.message), account_id=acc.id)
-                try:
-                    clear_heartbeat_status(acc.id)
-                except Exception as e:
-                    self.log.error('Error clearing heartbeat on sync start',
-                                   message=str(e.message), account_id=acc.id)
-
                 try:
                     if acc.is_sync_locked and acc.is_killed:
                         acc.sync_unlock()

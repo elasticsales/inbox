@@ -8,7 +8,7 @@ from inbox.models import Calendar, Thread, Block, Message, Category, Event
 from inbox.models.when import parse_as_when
 from inbox.models.constants import MAX_INDEXABLE_LENGTH
 from inbox.api.err import InputError, NotFoundError, ConflictError
-from inbox.search.query import MessageQuery, ThreadQuery
+from inbox.api.kellogs import encode
 
 MAX_LIMIT = 1000
 
@@ -255,22 +255,23 @@ def noop_event_update(event, data):
     # about the multiple values of the `when` field.
     e = Event()
     e.update(event)
+    e.namespace = event.namespace
 
-    for attr in ['title', 'description', 'location', 'when', 'participants']:
+    for attr in Event.API_MODIFIABLE_FIELDS:
         if attr in data:
             setattr(e, attr, data[attr])
 
-    for attr in ['title', 'description', 'location']:
-        event_value = getattr(event, attr)
-        e_value = getattr(e, attr)
-        if event_value != e_value:
-            return False
+    e1 = encode(event)
+    e2 = encode(e)
 
-    for attr in ['start', 'end']:
-        # This code can get datetimes and Arrow datetimes
-        # so we convert everything to Arrow datetimes.
-        event_value = arrow.get(getattr(event, attr))
-        e_value = arrow.get(getattr(e, attr))
+    for attr in Event.API_MODIFIABLE_FIELDS:
+        # We have to handle participants a bit differently because
+        # it's a list which can be permuted.
+        if attr == 'participants':
+            continue
+
+        event_value = e1.get(attr)
+        e_value = e2.get(attr)
         if event_value != e_value:
             return False
 
@@ -350,41 +351,3 @@ def valid_display_name(namespace_id, category_type, display_name, db_session):
                          category_type, display_name))
 
     return display_name
-
-
-def validate_search_query(query):
-    if query is None:
-        # No query defaults to 'all'
-        return
-
-    if not isinstance(query, list):
-        raise InputError('Search query must be a list')
-
-    queried_fields = []
-    query_values = []
-    for subquery in query:
-        queried_fields.extend(subquery.keys())
-        query_values.extend(subquery.values())
-
-    if len(query) > 1:
-        # We can't OR together 'all' queries, so check they are not supplied
-        if not all([k != 'all' for k in queried_fields]):
-            raise InputError("Cannot perform OR search with 'all' subquery")
-
-    # valid search attributes - we search across children/parents if the
-    # attribute isn't present on the type being queried.
-    attrs = [a for a in MessageQuery.attrs]
-    attrs.extend(ThreadQuery.attrs)
-    attrs.append('all')
-    attrs.append('weights')
-
-    if not all([k in attrs for k in queried_fields]):
-        raise InputError('Invalid search fields specified')
-
-    if any([isinstance(v, list) for v in query_values]):
-        raise InputError('Search query value cannot be a list')
-
-
-def validate_search_sort(sort):
-    if sort not in ('datetime', 'relevance', None):
-        raise InputError("Sort order must be 'datetime' or 'relevance'")

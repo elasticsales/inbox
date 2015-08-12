@@ -2,7 +2,7 @@ import datetime
 
 import sqlalchemy.orm.exc
 
-from inbox.log import get_logger
+from nylas.logging import get_logger
 log = get_logger()
 
 from inbox.auth.oauth import OAuthAuthHandler
@@ -13,8 +13,8 @@ from inbox.models.backends.outlook import OutlookAccount
 from inbox.models.backends.oauth import token_manager
 from inbox.util.url import url_concat
 
-PROVIDER = 'outlook'
-AUTH_HANDLER_CLS = 'OutlookAuthHandler'
+PROVIDER = '_outlook'
+AUTH_HANDLER_CLS = '_OutlookAuthHandler'
 
 # Outlook OAuth app credentials
 OAUTH_CLIENT_ID = config.get_required('MS_LIVE_OAUTH_CLIENT_ID')
@@ -33,7 +33,7 @@ OAUTH_SCOPE = ' '.join([
     'wl.imap'])            # R/W access to user's email using IMAP / SMTP
 
 
-class OutlookAuthHandler(OAuthAuthHandler):
+class _OutlookAuthHandler(OAuthAuthHandler):
     OAUTH_CLIENT_ID = OAUTH_CLIENT_ID
     OAUTH_CLIENT_SECRET = OAUTH_CLIENT_SECRET
     OAUTH_REDIRECT_URI = OAUTH_REDIRECT_URI
