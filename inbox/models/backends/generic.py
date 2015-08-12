@@ -50,7 +50,10 @@ class GenericAccount(ImapAccount):
 
     @property
     def category_type(self):
-        return 'folder'
+        if self.provider == 'gmail':
+            return 'label'
+        else:
+            return 'folder'
 
     @property
     def thread_cls(self):
