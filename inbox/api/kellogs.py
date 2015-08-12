@@ -202,14 +202,7 @@ def _encode(obj, namespace_public_id=None, expand=False):
             base['draft_ids'] = [m.public_id for m in obj.drafts]
             return base
 
-        # Strip duplicates (e.g. when a message is moved) but preserve order
-        seen = set()
-        messages = []
-        for message in obj.messages:
-            if message.public_id in seen:
-                continue
-            seen.add(message.public_id)
-            messages.append(message)
+        messages = obj.messages
 
         imap_uid_info_by_msg = defaultdict(list)
         imapuids = g.db_session.query(ImapUid).filter( \
@@ -222,6 +215,11 @@ def _encode(obj, namespace_public_id=None, expand=False):
         all_expanded_messages = []
         all_expanded_drafts = []
         for msg in messages:
+
+            # Skip duplicates (e.g. when a message is moved)
+            if msg.id not in imap_uid_info_by_msg:
+                continue
+
             resp = {
                 'id': msg.public_id,
                 'object': 'message',
