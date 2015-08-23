@@ -65,13 +65,15 @@ def index():
                 for folder_status in account_heartbeat.folders:
                     folder_status_id = int(folder_status.id)
                     if folder_status_id in account_folder_data:
-                        alive = alive and folder_status.alive
                         if 0 in folder_status.devices:
+                            alive = alive and folder_status.alive
                             device = folder_status.devices[0]
                             account_folder_data[folder_status_id].update({
                                 'alive': folder_status.alive,
                                 'heartbeat_at': device.heartbeat_at,
                             })
+                        else:
+                            alive = False
 
                 initial_sync = account_heartbeat.initial_sync or \
                         any(f['state'] == 'initial' for f in account_folder_data.values())
