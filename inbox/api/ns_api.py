@@ -16,6 +16,7 @@ from inbox.models import (Message, Block, Part, Thread, Namespace,
                           Contact, Calendar, Event, Transaction,
                           DataProcessingCache, Category, MessageCategory)
 from inbox.models.event import RecurringEvent, RecurringEventOverride
+from inbox.models.backends.generic import GenericAccount
 from inbox.api.sending import send_draft, send_raw_mime
 from inbox.api.update import update_message, update_thread
 from inbox.api.kellogs import APIEncoder
@@ -57,7 +58,7 @@ LONG_POLL_REQUEST_TIMEOUT = 120
 app = Blueprint(
     'namespace_api',
     __name__,
-    url_prefix='/n/<namespace_public_id>')
+    url_prefix='')
 
 # Configure mimetype -> extension map
 # TODO perhaps expand to encompass non-standard mimetypes too
@@ -83,7 +84,11 @@ if config.get('DEBUG_PROFILING_ON'):
 
 @app.url_value_preprocessor
 def pull_lang_code(endpoint, values):
-    g.namespace_public_id = values.pop('namespace_public_id')
+    if 'namespace_public_id' in values:
+        g.namespace_public_id = values.pop('namespace_public_id')
+        g.legacy_nsid = True
+    else:
+        g.legacy_nsid = False
 
 
 @app.before_request
@@ -94,7 +99,8 @@ def start():
         g.namespace = Namespace.from_public_id(g.namespace_public_id,
                                                g.db_session)
 
-        g.encoder = APIEncoder(g.namespace.public_id)
+        g.encoder = APIEncoder(g.namespace.public_id,
+                               legacy_nsid=g.legacy_nsid)
     except NoResultFound:
         raise NotFoundError("Couldn't find namespace  `{0}` ".format(
             g.namespace_public_id))
@@ -107,12 +113,17 @@ def start():
                           location='args')
     g.parser.add_argument('offset', default=0, type=offset, location='args')
 
+    if hasattr(g, 'namespace_public_id') and \
+            not g.namespace_public_id == g.namespace.public_id:
+        return err(404, "Unknown namespace ID")
+
 
 @app.after_request
 def finish(response):
-    if response.status_code == 200:
+    if response.status_code == 200 and hasattr(g, 'db_session'):  # be cautions
         g.db_session.commit()
-    g.db_session.close()
+    if hasattr(g, 'db_session'):
+        g.db_session.close()
     return response
 
 
@@ -132,11 +143,24 @@ def handle_input_error(error):
     return response
 
 
-#
-# General namespace info
-#
-@app.route('/')
-def index():
+# TODO remove legacy_nsid
+@app.route('/n/<namespace_id>')
+def single_namespace(namespace_id):
+    if not namespace_id == g.namespace.public_id:
+        return err(404, "Unknown namespace ID")
+    valid_public_id(namespace_id)
+
+    try:
+        f = g.db_session.query(Namespace).filter(
+            Namespace.public_id == namespace_id).one()
+        return APIEncoder(namespace_id, legacy_nsid=True).jsonify(f)
+    except NoResultFound:
+        raise NotFoundError("Couldn't find namespace {0} "
+                            .format(namespace_id))
+
+
+@app.route('/account')
+def one_account():
     return g.encoder.jsonify(g.namespace)
 
 #
@@ -221,7 +245,9 @@ def thread_query_api():
         db_session=g.db_session)
 
     # Use a new encoder object with the expand parameter set.
-    encoder = APIEncoder(g.namespace.public_id, args['view'] == 'expanded')
+    encoder = APIEncoder(g.namespace.public_id,
+                         args['view'] == 'expanded',
+                         legacy_nsid=g.legacy_nsid)
     return encoder.jsonify(threads)
 
 
@@ -248,7 +274,8 @@ def thread_api(public_id):
     g.parser.add_argument('view', type=view, location='args')
     args = strict_parse_args(g.parser, request.args)
     # Use a new encoder object with the expand parameter set.
-    encoder = APIEncoder(g.namespace.public_id, args['view'] == 'expanded')
+    encoder = APIEncoder(g.namespace.public_id, args['view'] == 'expanded',
+                         legacy_nsid=g.legacy_nsid)
     try:
         valid_public_id(public_id)
         thread = g.db_session.query(Thread).filter(
@@ -348,7 +375,8 @@ def message_query_api():
         db_session=g.db_session)
 
     # Use a new encoder object with the expand parameter set.
-    encoder = APIEncoder(g.namespace.public_id, args['view'] == 'expanded')
+    encoder = APIEncoder(g.namespace.public_id, args['view'] == 'expanded',
+                         legacy_nsid=g.legacy_nsid)
     return encoder.jsonify(messages)
 
 
@@ -374,7 +402,8 @@ def message_search_api():
 def message_read_api(public_id):
     g.parser.add_argument('view', type=view, location='args')
     args = strict_parse_args(g.parser, request.args)
-    encoder = APIEncoder(g.namespace.public_id, args['view'] == 'expanded')
+    encoder = APIEncoder(g.namespace.public_id, args['view'] == 'expanded',
+                         legacy_nsid=g.legacy_nsid)
 
     try:
         valid_public_id(public_id)
@@ -556,9 +585,13 @@ def tag_query_api():
         {'object': 'tag',
          'name': obj.display_name,
          'id': obj.name or obj.public_id,
-         'namespace_id': g.namespace.public_id,
          'readonly': False} for obj in categories
     ]
+    for item in resp:
+        if g.legacy_nsid:
+            item['namespace_id'] = g.namespace.public_id
+        else:
+            item['account_id'] = g.namespace.public_id
     return g.encoder.jsonify(resp)
 
 
@@ -591,20 +624,25 @@ def tag_detail_api(public_id):
         filter(
             Message.namespace_id == g.namespace.id,
             MessageCategory.category_id == category.id,
-            Message.is_read == False).subquery()
+            Message.is_read == False).subquery()  # noqa
     unread_count = g.db_session.query(func.count(1)). \
         select_from(Thread).filter(
             Thread.id.in_(unread_subquery)).scalar()
 
-    return g.encoder.jsonify({
+    to_ret = {
         'object': 'tag',
         'name': category.display_name,
         'id': category.name or category.public_id,
-        'namespace_id': g.namespace.public_id,
         'readonly': False,
         'unread_count': unread_count,
         'thread_count': thread_count
-    })
+    }
+
+    if g.legacy_nsid:
+        to_ret['namespace_id'] = g.namespace.public_id
+    else:
+        to_ret['account_id'] = g.namespace.public_id
+    return g.encoder.jsonify(to_ret)
 
 
 # -- End tags API shim
@@ -1238,11 +1276,12 @@ def draft_delete_api(public_id):
 
 @app.route('/send', methods=['POST'])
 def draft_send_api():
+    account = g.namespace.account
+
     if request.content_type == "message/rfc822":
-        msg = create_draft_from_mime(g.namespace.account, request.data,
-                                     g.db_session)
+        msg = create_draft_from_mime(account, request.data, g.db_session)
         validate_draft_recipients(msg)
-        resp = send_raw_mime(g.namespace.account, g.db_session, msg)
+        resp = send_raw_mime(account, g.db_session, msg)
         return resp
 
     data = request.get_json(force=True)
@@ -1258,7 +1297,12 @@ def draft_send_api():
                                          is_draft=False)
 
     validate_draft_recipients(draft)
-    resp = send_draft(g.namespace.account, draft, g.db_session)
+    resp = send_draft(account, draft, g.db_session)
+
+    if isinstance(account, GenericAccount):
+        schedule_action('save_sent_email', draft, draft.namespace.id,
+                        g.db_session)
+
     return resp
 
 
@@ -1316,7 +1360,8 @@ def sync_deltas():
         with session_scope() as db_session:
             deltas, end_pointer = delta_sync.format_transactions_after_pointer(
                 g.namespace, start_pointer, db_session, args['limit'],
-                exclude_types, include_types, exclude_folders)
+                exclude_types, include_types, exclude_folders,
+                legacy_nsid=g.legacy_nsid)
 
         response = {
             'cursor_start': cursor,
@@ -1341,6 +1386,7 @@ def sync_deltas():
     return g.encoder.jsonify(response)
 
 
+# TODO Deprecate this
 @app.route('/delta/generate_cursor', methods=['POST'])
 def generate_cursor():
     data = request.get_json(force=True)
@@ -1359,6 +1405,15 @@ def generate_cursor():
 
     cursor = delta_sync.get_transaction_cursor_near_timestamp(
         g.namespace.id, timestamp, g.db_session)
+    return g.encoder.jsonify({'cursor': cursor})
+
+
+@app.route('/delta/latest_cursor', methods=['POST'])
+def latest_cursor():
+    cursor = delta_sync.get_transaction_cursor_near_timestamp(
+        g.namespace.id,
+        int(time.time()),
+        g.db_session)
     return g.encoder.jsonify({'cursor': cursor})
 
 
@@ -1416,7 +1471,8 @@ def stream_changes():
     generator = delta_sync.streaming_change_generator(
         g.namespace, transaction_pointer=transaction_pointer,
         poll_interval=1, timeout=timeout, exclude_types=exclude_types,
-        include_types=include_types, exclude_folders=exclude_folders)
+        include_types=include_types, exclude_folders=exclude_folders,
+        legacy_nsid=g.legacy_nsid)
     return Response(generator, mimetype='text/event-stream')
 
 

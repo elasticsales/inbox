@@ -1,4 +1,4 @@
-nylas-production-python>=0.2.0
+nylas-production-python==0.2.3
 coverage==3.7.1
 httplib2==0.8
 pytest==2.5.2
@@ -50,5 +50,5 @@ mockredispy==2.9.0.10
 vobject==0.8.1c
 lxml==3.4.2
 arrow==0.5.4
-hypothesis==1.4.1
+hypothesis==1.10.3
 statsd==3.1

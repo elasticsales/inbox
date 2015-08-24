@@ -2,8 +2,10 @@ import pytest
 import json
 
 from tests.util.base import calendar
+from tests.api.base import api_client
 
-__all__ = ['calendar']
+
+__all__ = ['calendar', 'api_client']
 
 
 # TODO(emfree) WTF is all this crap anyways?
@@ -16,7 +18,7 @@ def test_api_create(db, api_client, calendar):
         'participants': [{
             'name': 'alyssa p. hacker',
             'email': 'alyssa@example.com'
-            }]
+        }]
     }
 
     e_resp = api_client.post_data('/events', e_data)
@@ -45,7 +47,7 @@ def test_api_create_status_yes(db, api_client, calendar):
         'participants': [{
             'email': 'alyssa@example.com',
             'status': 'yes'
-            }]
+        }]
     }
 
     e_resp = api_client.post_data('/events', e_data)
@@ -95,7 +97,7 @@ def test_api_create_status_no(db, api_client, calendar):
         'participants': [{
             'email': 'alyssa@example.com',
             'status': 'no'
-            }]
+        }]
     }
 
     e_resp = api_client.post_data('/events', e_data)
@@ -116,7 +118,7 @@ def test_api_create_status_maybe(db, api_client, calendar):
         'participants': [{
             'email': 'alyssa@example.com',
             'status': 'maybe'
-            }]
+        }]
     }
 
     e_resp = api_client.post_data('/events', e_data)
@@ -137,7 +139,7 @@ def test_api_create_status_noreply(db, api_client, calendar):
         'participants': [{
             'email': 'alyssa@example.com',
             'status': 'noreply'
-            }]
+        }]
     }
 
     e_resp = api_client.post_data('/events', e_data)
@@ -157,7 +159,7 @@ def test_api_create_no_name(db, api_client, calendar):
         'calendar_id': calendar.public_id,
         'participants': [{
             'email': 'alyssa@example.com'
-            }]
+        }]
     }
 
     e_resp = api_client.post_data('/events', e_data)
@@ -177,7 +179,7 @@ def test_api_create_no_email(db, api_client, calendar):
         'calendar_id': calendar.public_id,
         'participants': [{
             'name': 'alyssa p. hacker',
-            }]
+        }]
     }
 
     e_resp = api_client.post_data('/events', e_data)
@@ -195,7 +197,7 @@ def test_api_create_bad_status(db, api_client, calendar):
             'name': 'alyssa p. hacker',
             'email': 'alyssa@example.com',
             'status': 'bad'
-            }]
+        }]
     }
 
     e_resp = api_client.post_data('/events', e_data)
@@ -319,7 +321,6 @@ def test_api_update_participant_status(db, api_client, calendar):
         assert p['name'] is None
 
 
-
 @pytest.mark.parametrize('rsvp', ['yes', 'no', 'maybe'])
 def test_api_participant_reply(db, api_client, rsvp, calendar):
 
@@ -338,21 +339,8 @@ def test_api_participant_reply(db, api_client, rsvp, calendar):
     e_resp_data = json.loads(e_resp.data)
     assert len(e_resp_data['participants']) == 5
 
-    event_id = e_resp_data['id']
-    participants = e_resp_data['participants']
-
-    url = '/events/{}?'.format(event_id)
-    #url += 'action=rsvp&participant_id={}&rsvp={}'.format(participant_id, rsvp)
-
-    #e_resp_data = api_client.get_data(url, ns_id)
-    #participants = e_resp_data['participants']
-    #assert len(participants) == 5
-    #assert participants[0]['status'] == rsvp
-
-    #e_resp_data = api_client.get_data('/events/' + e_resp_data['id'], ns_id)
-    #participants = e_resp_data['participants']
-    #assert len(participants) == 5
-    #assert participants[0]['status'] == rsvp
+    assert e_resp_data['id']
+    assert e_resp_data['participants']
 
 
 def test_api_participant_reply_invalid_rsvp(db, api_client, calendar):
@@ -371,16 +359,8 @@ def test_api_participant_reply_invalid_rsvp(db, api_client, calendar):
     e_resp_data = json.loads(e_resp.data)
     assert len(e_resp_data['participants']) == 5
 
-    event_id = e_resp_data['id']
-    participants = e_resp_data['participants']
-    #participant_id = participants[0]['id']
-
-    #url = '/events/{}?'.format(event_id)
-    #url += 'action=rsvp&participant_id={}&rsvp={}'.format(participant_id,
-    #                                                      'bad')
-
-    #e_resp_data = api_client.get_data(url, ns_id)
-    #assert e_resp_data['type'] == 'api_error'
+    assert e_resp_data['id']
+    assert e_resp_data['participants']
 
 
 def test_api_participant_reply_invalid_participant(db, api_client, calendar):
@@ -400,13 +380,7 @@ def test_api_participant_reply_invalid_participant(db, api_client, calendar):
     e_resp_data = json.loads(e_resp.data)
     assert len(e_resp_data['participants']) == 5
 
-    event_id = e_resp_data['id']
-
-    #url = '/events/{}?'.format(event_id)
-    #url += 'action=rsvp&participant_id={}&rsvp={}'.format('bad', 'yes')
-
-    #e_resp_data = api_client.get_data(url, ns_id)
-    #assert e_resp_data['type'] == 'invalid_request_error'
+    assert e_resp_data['id']
 
 
 def test_api_participant_reply_invalid_event(db, api_client, calendar):
@@ -425,15 +399,7 @@ def test_api_participant_reply_invalid_event(db, api_client, calendar):
     e_resp_data = json.loads(e_resp.data)
     assert len(e_resp_data['participants']) == 5
 
-    participants = e_resp_data['participants']
-    #participant_id = participants[0]['id']
-
-    #url = '/events/{}?'.format(participant_id)
-    #url += 'action=rsvp&participant_id={}&rsvp={}'.format(participant_id,
-    #                                                      'yes')
-
-    #e_resp_data = api_client.get_data(url, ns_id)
-    #assert e_resp_data['type'] == 'invalid_request_error'
+    assert e_resp_data['participants']
 
 
 def test_api_participant_reply_invalid_event2(db, api_client, calendar):
@@ -452,7 +418,6 @@ def test_api_participant_reply_invalid_event2(db, api_client, calendar):
     e_resp_data = json.loads(e_resp.data)
     assert len(e_resp_data['participants']) == 5
 
-    participants = e_resp_data['participants']
 
 def test_api_participant_reply_invalid_action(db, api_client, calendar):
     e_data = {
@@ -469,6 +434,4 @@ def test_api_participant_reply_invalid_action(db, api_client, calendar):
     e_resp = api_client.post_data('/events', e_data)
     e_resp_data = json.loads(e_resp.data)
     assert len(e_resp_data['participants']) == 5
-
-    event_id = e_resp_data['id']
-    participants = e_resp_data['participants']
+    assert e_resp_data['id']

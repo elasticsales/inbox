@@ -1,7 +1,10 @@
 import json
 import datetime
-from tests.util.base import (api_client, add_fake_message, default_account,
-                             add_fake_thread)
+from tests.util.base import (add_fake_message, default_account,
+                             add_fake_thread, db)
+from tests.api.base import api_client
+
+__all__ = ['db', 'api_client', 'default_account']
 
 
 def test_thread_received_recent_date(db, api_client, default_account):
@@ -27,7 +30,7 @@ def test_thread_received_recent_date(db, api_client, default_account):
 
     date_dict["Test Thread 2"] = date1
 
-    resp = api_client.client.get(api_client.full_path('/threads/'))
+    resp = api_client.get_raw('/threads/')
     assert resp.status_code == 200
     threads = json.loads(resp.data)
 

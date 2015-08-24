@@ -7,8 +7,10 @@ from flanker import mime
 from inbox.basicauth import OAuthError
 from inbox.models import Message
 from tests.util.base import thread, message, imported_event
+from tests.api.base import api_client
 
-__all__ = ['thread', 'message']
+
+__all__ = ['thread', 'message', 'api_client', 'imported_event']
 
 
 class MockTokenManager(object):

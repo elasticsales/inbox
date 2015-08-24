@@ -5,10 +5,14 @@ from gevent import Greenlet
 import pytest
 from tests.util.base import add_fake_message
 from inbox.models import Namespace
+from inbox.models.backends.generic import GenericAccount
 from inbox.util.url import url_concat
+from tests.api.base import api_client
 
-GEVENT_EPSILON = .2  # Greenlet switching time
-LONGPOLL_EPSILON = 1 + GEVENT_EPSILON  # API implementation polls every second
+GEVENT_EPSILON = .5  # Greenlet switching time. VMs on Macs suck :()
+LONGPOLL_EPSILON = 2 + GEVENT_EPSILON  # API implementation polls every second
+
+__all__ = ['api_client']
 
 
 @pytest.yield_fixture
@@ -19,20 +23,10 @@ def streaming_test_client(db):
         yield c
 
 
-@pytest.fixture
-def api_prefix(default_namespace):
-    return '/n/{}/delta/streaming'.format(default_namespace.public_id)
-
-
-@pytest.fixture
-def longpoll_prefix(default_namespace):
-    return '/n/{}/delta/longpoll'.format(default_namespace.public_id)
-
-
 def get_cursor(api_client, timestamp, namespace):
-    cursor_response = api_client.post(
-        '/n/{}/delta/generate_cursor'.format(namespace.public_id),
-        data=json.dumps({'start': timestamp}))
+    cursor_response = api_client.post_data(
+        '/delta/generate_cursor',
+        data={'start': timestamp})
     return json.loads(cursor_response.data)['cursor']
 
 
@@ -45,11 +39,11 @@ def validate_response_format(response_string):
     assert 'event' in response
 
 
-def test_response_when_old_cursor_given(db, api_prefix, streaming_test_client,
+def test_response_when_old_cursor_given(db, api_client,
                                         default_namespace):
-    url = url_concat(api_prefix, {'timeout': .1,
-                                  'cursor': '0'})
-    r = streaming_test_client.get(url)
+    url = url_concat('/delta/streaming', {'timeout': .1,
+                                          'cursor': '0'})
+    r = api_client.get_raw(url)
     assert r.status_code == 200
     responses = r.data.split('\n')
     for response_string in responses:
@@ -57,40 +51,44 @@ def test_response_when_old_cursor_given(db, api_prefix, streaming_test_client,
             validate_response_format(response_string)
 
 
-def test_empty_response_when_latest_cursor_given(db, api_prefix,
-                                                 streaming_test_client,
+def test_empty_response_when_latest_cursor_given(db,
+                                                 api_client,
                                                  default_namespace):
-    cursor = get_cursor(streaming_test_client, int(time.time() + 22),
+    cursor = get_cursor(api_client, int(time.time() + 22),
                         default_namespace)
-    url = url_concat(api_prefix, {'timeout': .1,
-                                  'cursor': cursor})
-    r = streaming_test_client.get(url)
+    url = url_concat('/delta/streaming', {'timeout': .1,
+                                          'cursor': cursor})
+    r = api_client.get_raw(url)
     assert r.status_code == 200
     assert r.data.strip() == ''
 
 
-def test_gracefully_handle_new_namespace(db, streaming_test_client):
+def test_gracefully_handle_new_namespace(db, api_client):
     new_namespace = Namespace()
+    new_account = GenericAccount()
+    new_account.password = 'hunter2'
+    new_namespace.account = new_account
     db.session.add(new_namespace)
+    db.session.add(new_account)
     db.session.commit()
-    cursor = get_cursor(streaming_test_client, int(time.time()),
+    cursor = get_cursor(api_client, int(time.time()),
                         new_namespace)
     url = url_concat('/n/{}/delta/streaming'.format(new_namespace.public_id),
                      {'timeout': .1, 'cursor': cursor})
-    r = streaming_test_client.get(url)
+    r = api_client.get_raw(url)
     assert r.status_code == 200
 
 
-def test_exclude_and_include_object_types(db, api_prefix,
-                                          streaming_test_client, thread,
+def test_exclude_and_include_object_types(db,
+                                          api_client, thread,
                                           default_namespace):
 
     add_fake_message(db.session, default_namespace.id, thread,
                      from_addr=[('Bob', 'bob@foocorp.com')])
     # Check that we do get message and contact changes by default.
-    url = url_concat(api_prefix, {'timeout': .1,
-                                  'cursor': '0'})
-    r = streaming_test_client.get(url)
+    url = url_concat('/delta/streaming', {'timeout': .1,
+                                          'cursor': '0'})
+    r = api_client.get_raw(url)
     assert r.status_code == 200
     responses = r.data.split('\n')
     parsed_responses = [json.loads(resp) for resp in responses if resp != '']
@@ -98,10 +96,10 @@ def test_exclude_and_include_object_types(db, api_prefix,
     assert any(resp['object'] == 'contact' for resp in parsed_responses)
 
     # And check that we don't get message/contact changes if we exclude them.
-    url = url_concat(api_prefix, {'timeout': .1,
-                                  'cursor': '0',
-                                  'exclude_types': 'message,contact'})
-    r = streaming_test_client.get(url)
+    url = url_concat('/delta/streaming', {'timeout': .1,
+                                          'cursor': '0',
+                                          'exclude_types': 'message,contact'})
+    r = api_client.get_raw(url)
     assert r.status_code == 200
     responses = r.data.split('\n')
     parsed_responses = [json.loads(resp) for resp in responses if resp != '']
@@ -109,38 +107,38 @@ def test_exclude_and_include_object_types(db, api_prefix,
     assert not any(resp['object'] == 'contact' for resp in parsed_responses)
 
     # And check we only get message objects if we use include_types
-    url = url_concat(api_prefix, {'timeout': .1,
-                                  'cursor': '0',
-                                  'include_types': 'message'})
-    r = streaming_test_client.get(url)
+    url = url_concat('/delta/streaming', {'timeout': .1,
+                                          'cursor': '0',
+                                          'include_types': 'message'})
+    r = api_client.get_raw(url)
     assert r.status_code == 200
     responses = r.data.split('\n')
     parsed_responses = [json.loads(resp) for resp in responses if resp != '']
     assert all(resp['object'] == 'message' for resp in parsed_responses)
 
 
-def test_invalid_timestamp(streaming_test_client, default_namespace):
+def test_invalid_timestamp(api_client, default_namespace):
     # Valid UNIX timestamp
-    response = streaming_test_client.post(
-        '/n/{}/delta/generate_cursor'.format(default_namespace.public_id),
-        data=json.dumps({'start': int(time.time())}))
+    response = api_client.post_data(
+        '/delta/generate_cursor',
+        data={'start': int(time.time())})
     assert response.status_code == 200
 
     # Invalid timestamp
-    response = streaming_test_client.post(
-        '/n/{}/delta/generate_cursor'.format(default_namespace.public_id),
-        data=json.dumps({'start': 1434591487647}))
+    response = api_client.post_data(
+        '/delta/generate_cursor',
+        data={'start': 1434591487647})
     assert response.status_code == 400
 
 
-def test_longpoll_delta_newitem(db, longpoll_prefix, streaming_test_client,
+def test_longpoll_delta_newitem(db, api_client,
                                 default_namespace, thread):
-    cursor = get_cursor(streaming_test_client, int(time.time() + 22),
+    cursor = get_cursor(api_client, int(time.time() + 22),
                         default_namespace)
-    url = url_concat(longpoll_prefix, {'cursor': cursor})
+    url = url_concat('/delta/longpoll', {'cursor': cursor})
     start_time = time.time()
     # Spawn the request in background greenlet
-    longpoll_greenlet = Greenlet.spawn(streaming_test_client.get, url)
+    longpoll_greenlet = Greenlet.spawn(api_client.get_raw, url)
     # This should make it return immediately
     add_fake_message(db.session, default_namespace.id, thread,
                      from_addr=[('Bob', 'bob@foocorp.com')])
@@ -153,15 +151,15 @@ def test_longpoll_delta_newitem(db, longpoll_prefix, streaming_test_client,
            set([u'message', u'contact', u'thread'])
 
 
-def test_longpoll_delta_timeout(db, longpoll_prefix, streaming_test_client,
+def test_longpoll_delta_timeout(db, api_client,
                                 default_namespace):
     test_timeout = 2
-    cursor = get_cursor(streaming_test_client, int(time.time() + 22),
+    cursor = get_cursor(api_client, int(time.time() + 22),
                         default_namespace)
-    url = url_concat(longpoll_prefix, {'timeout': test_timeout,
-                                       'cursor': cursor})
+    url = url_concat('/delta/longpoll', {'timeout': test_timeout,
+                                         'cursor': cursor})
     start_time = time.time()
-    resp = streaming_test_client.get(url)
+    resp = api_client.get_raw(url)
     end_time = time.time()
     assert resp.status_code == 200
 

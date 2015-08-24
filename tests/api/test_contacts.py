@@ -1,6 +1,6 @@
 from inbox.models import Contact
-from tests.util.base import (contact_sync, contacts_provider,
-                             api_client)
+from tests.util.base import contact_sync, contacts_provider
+from tests.api.base import api_client
 
 __all__ = ['contacts_provider', 'contact_sync', 'api_client']
 
@@ -14,9 +14,8 @@ def test_api_list(contacts_provider, contact_sync, db, api_client,
 
     contact_sync.provider = contacts_provider
     contact_sync.sync()
-    ns_id = default_namespace.public_id
 
-    contact_list = api_client.get_data('/contacts', ns_id)
+    contact_list = api_client.get_data('/contacts')
     contact_names = [contact['name'] for contact in contact_list]
     assert 'Contact One' in contact_names
     assert 'Contact Two' in contact_names
@@ -39,16 +38,15 @@ def test_api_get(contacts_provider, contact_sync, db, api_client,
 
     contact_sync.provider = contacts_provider
     contact_sync.sync()
-    ns_id = default_namespace.public_id
 
-    contact_list = api_client.get_data('/contacts', ns_id)
+    contact_list = api_client.get_data('/contacts')
 
     contact_ids = [contact['id'] for contact in contact_list]
 
     c1found = False
     c2found = False
     for c_id in contact_ids:
-        contact = api_client.get_data('/contacts/' + c_id, ns_id)
+        contact = api_client.get_data('/contacts/' + c_id)
 
         if contact['name'] == 'Contact One':
             c1found = True

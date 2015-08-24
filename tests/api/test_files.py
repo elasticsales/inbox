@@ -6,6 +6,9 @@ import json
 from datetime import datetime
 
 import pytest
+from tests.api.base import api_client
+
+__all__ = ['api_client']
 
 
 FILENAMES = ['muir.jpg', 'LetMeSendYouEmail.wav', 'piece-jointe.jpg',
@@ -36,7 +39,7 @@ def files(db):
 @pytest.fixture(scope='function')
 def uploaded_file_ids(api_client, files):
     file_ids = []
-    upload_path = api_client.full_path('/files')
+    upload_path = '/files'
     for filename, path in files:
         # Mac and linux fight over filesystem encodings if we store this
         # filename on the fs. Work around by changing the filename we upload
@@ -46,7 +49,7 @@ def uploaded_file_ids(api_client, files):
         elif filename == 'andra-moi-ennepe.txt':
             filename = u'ἄνδρα μοι ἔννεπε'
         data = {'file': (open(path, 'rb'), filename)}
-        r = api_client.client.post(upload_path, data=data)
+        r = api_client.post_raw(upload_path, data=data)
         assert r.status_code == 200
         file_id = json.loads(r.data)[0]['id']
         file_ids.append(file_id)
@@ -87,7 +90,8 @@ def test_file_filtering(api_client, uploaded_file_ids, draft):
     results = api_client.get_data('/files?content_type=image%2Fjpeg')
     assert len(results) == 2
 
-    results = api_client.get_data('/files?content_type=image%2Fjpeg&view=count')
+    results = api_client.get_data(
+        '/files?content_type=image%2Fjpeg&view=count')
     assert results["count"] == 2
 
     results = api_client.get_data('/files?content_type=image%2Fjpeg&view=ids')

@@ -1,6 +1,7 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, make_response, g
 from flask.ext.restful import reqparse
 from werkzeug.exceptions import default_exceptions, HTTPException
+from sqlalchemy.orm.exc import NoResultFound
 
 from inbox.api.kellogs import APIEncoder
 from nylas.logging import get_logger
@@ -8,7 +9,11 @@ from inbox.models import Namespace, Account
 from inbox.models.session import session_scope
 from inbox.api.validation import (bounded_str, ValidatableArgument,
                                   strict_parse_args, limit)
-from inbox.api.err import APIException, InputError
+from inbox.api.validation import valid_public_id
+from inbox.api.err import err, APIException, InputError
+
+from inbox.ignition import main_engine
+engine = main_engine()
 
 from metrics_api import app as metrics_api
 from ns_api import app as ns_api
@@ -45,7 +50,43 @@ for code in default_exceptions.iterkeys():
 
 @app.before_request
 def auth():
-    pass  # no auth in dev VM
+    """ Check for account ID on all non-root URLS """
+    if request.path in ('/accounts', '/accounts/', '/', '/n', '/n/') \
+                       or request.path.startswith('/w/'):
+        return
+
+    if request.path.startswith('/n/'):
+        ns_parts = filter(None, request.path.split('/'))
+        namespace_public_id = ns_parts[1]
+        valid_public_id(namespace_public_id)
+
+        with session_scope() as db_session:
+            try:
+                namespace = db_session.query(Namespace) \
+                    .filter(Namespace.public_id == namespace_public_id).one()
+                g.namespace_public_id = namespace.public_id
+            except NoResultFound:
+                return err(404, "Unknown namespace ID")
+
+    else:
+        if not request.authorization or not request.authorization.username:
+            return make_response((
+                "Could not verify access credential.", 401,
+                {'WWW-Authenticate': 'Basic realm="API '
+                 'Access Token Required"'}))
+
+        g.namespace_public_id = request.authorization.username
+
+        with session_scope() as db_session:
+            try:
+                valid_public_id(g.namespace_public_id)
+                namespace = db_session.query(Namespace) \
+                    .filter(Namespace.public_id == g.namespace_public_id).one()
+            except NoResultFound:
+                return make_response((
+                    "Could not verify access credential.", 401,
+                    {'WWW-Authenticate': 'Basic realm="API '
+                     'Access Token Required"'}))
 
 
 @app.after_request
@@ -61,6 +102,7 @@ def finish(response):
 
 
 @app.route('/n/')
+@app.route('/accounts/')
 def ns_all():
     """ Return all namespaces """
     # We do this outside the blueprint to support the case of an empty
@@ -84,7 +126,7 @@ def ns_all():
             query = query.offset(args['offset'])
 
         namespaces = query.all()
-        encoder = APIEncoder()
+        encoder = APIEncoder(legacy_nsid=request.path.startswith('/n'))
         return encoder.jsonify(namespaces)
 
 
@@ -185,15 +227,18 @@ def modify_namespace(namespace_public_id):
         encoder = APIEncoder()
         return encoder.jsonify(namespace)
 
-@app.route('/')
-def home():
-    return """
-<html><body>
-    Check out the <strong><pre style="display:inline;">docs</pre></strong>
-    folder for how to use this API.
-</body></html>
-"""
+@app.route('/logout')
+def logout():
+    """ Utility function used to force browsers to reset cached HTTP Basic Auth
+        credentials """
+    return make_response((
+        "<meta http-equiv='refresh' content='0; url=/''>.",
+        401,
+        {'WWW-Authenticate': 'Basic realm="API Access Token Required"'}))
 
-app.register_blueprint(ns_api)  # /n/<namespace_id>/...
-app.register_blueprint(metrics_api)
+
+app.register_blueprint(ns_api)
+# legacy_nsid
+app.register_blueprint(ns_api, url_prefix='/n/<namespace_public_id>')
 app.register_blueprint(webhooks_api)  # /w/...
+app.register_blueprint(metrics_api)

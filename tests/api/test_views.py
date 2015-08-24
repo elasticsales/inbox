@@ -1,4 +1,7 @@
 import pytest
+from tests.api.base import api_client
+
+__all__ = ['api_client']
 
 
 @pytest.mark.parametrize('resource_name',
@@ -17,5 +20,6 @@ def test_resource_views(resource_name, db, api_client,
     ids = api_client.get_data('/{}?view=ids'.format(resource_name))
 
     for i, elem in enumerate(elements):
-        assert isinstance(ids[i], basestring), "&views=ids should return string"
+        assert isinstance(ids[i], basestring), \
+            "&views=ids should return string"
         assert elem["id"] == ids[i], "view=ids should preserve order"
