@@ -408,7 +408,7 @@ class FolderSyncEngine(Greenlet):
                 with mailsync_session_scope() as db_session:
                     acc = db_session.query(Account).get(self.account_id)
                     self.throttled = acc.throttled
-                if self.throttled:
+                if True:
                     log.debug('throttled; sleeping')
                     sleep(THROTTLE_WAIT)
 
