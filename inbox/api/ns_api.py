@@ -442,31 +442,6 @@ def message_update_api(public_id):
     return g.encoder.jsonify(message)
 
 
-# TODO Deprecate this endpoint once API usage falls off
-@app.route('/messages/<public_id>/rfc2822', methods=['GET'])
-def raw_message_api(public_id):
-    try:
-        valid_public_id(public_id)
-        message = g.db_session.query(Message).filter(
-            Message.public_id == public_id,
-            Message.namespace_id == g.namespace.id).one()
-    except NoResultFound:
-        raise NotFoundError("Couldn't find message {0}".format(public_id))
-
-    if message.full_body is None:
-        raise NotFoundError("Couldn't find message {0}".format(public_id))
-
-    if message.full_body is not None:
-        b64_contents = base64.b64encode(message.full_body.data)
-    else:
-        g.log.error("Message without full_body attribute: id='{0}'"
-                    .format(message.id))
-        raise NotFoundError(
-                    "Couldn't find raw contents for message `{0}` "
-                    .format(public_id))
-    return g.encoder.jsonify({"rfc2822": b64_contents})
-
-
 # Folders / Labels
 @app.route('/folders')
 @app.route('/labels')
@@ -480,7 +455,8 @@ def folders_labels_query_api():
     else:
         results = g.db_session.query(Category)
 
-    results = results.filter(Category.namespace_id == g.namespace.id)
+    results = results.filter(Category.namespace_id == g.namespace.id,
+                             Category.deleted_at == None)
     results = results.order_by(asc(Category.id))
 
     if args['view'] == 'count':
@@ -507,7 +483,8 @@ def folders_labels_api_impl(public_id):
     try:
         category = g.db_session.query(Category).filter(
             Category.namespace_id == g.namespace.id,
-            Category.public_id == public_id).first()
+            Category.public_id == public_id,
+            Category.deleted_at == None).one()
     except NoResultFound:
         raise NotFoundError('Object not found')
     return g.encoder.jsonify(category)
@@ -526,6 +503,10 @@ def folders_labels_create_api():
     category = Category.find_or_create(g.db_session, g.namespace.id,
                                        name=None, display_name=display_name,
                                        type_=category_type)
+    if category.deleted_at:
+        category = Category(namespace_id=g.namespace.id, name=None,
+                            display_name=display_name, type_=category_type)
+        g.db_session.add(category)
     g.db_session.flush()
 
     if category_type == 'folder':
@@ -545,7 +526,8 @@ def folder_label_update_api(public_id):
     try:
         category = g.db_session.query(Category).filter(
             Category.namespace_id == g.namespace.id,
-            Category.public_id == public_id).one()
+            Category.public_id == public_id,
+            Category.deleted_at == None).one()
     except NoResultFound:
         raise InputError("Couldn't find {} {}".format(
             category_type, public_id))
@@ -572,6 +554,53 @@ def folder_label_update_api(public_id):
     # rather than waiting for sync to pick it up?
 
     return g.encoder.jsonify(category)
+
+
+@app.route('/folders/<public_id>', methods=['DELETE'])
+@app.route('/labels/<public_id>', methods=['DELETE'])
+def folder_label_delete_api(public_id):
+    category_type = g.namespace.account.category_type
+    valid_public_id(public_id)
+    try:
+        category = g.db_session.query(Category).filter(
+            Category.namespace_id == g.namespace.id,
+            Category.public_id == public_id,
+            Category.deleted_at == None).one()
+    except NoResultFound:
+        raise InputError("Couldn't find {} {}".format(
+            category_type, public_id))
+    if category.name is not None:
+        raise InputError("Cannot modify a standard {}".format(category_type))
+
+    if category.type_ == 'folder':
+        messages_with_category = g.db_session.query(MessageCategory).filter(
+            MessageCategory.category_id == category.id).exists()
+        messages_exist = g.db_session.query(messages_with_category).scalar()
+        if messages_exist:
+            return err(403, "Folder {} cannot be deleted because it contains "
+                            "messages.".format(public_id))
+
+        deleted_at = datetime.utcnow()
+        category.deleted_at = deleted_at
+        folders = category.folders if g.namespace.account.discriminator != 'easaccount' \
+            else category.easfolders
+        for folder in folders:
+            folder.deleted_at = deleted_at
+
+        schedule_action('delete_folder', category, g.namespace.id,
+                        g.db_session)
+    else:
+        deleted_at = datetime.utcnow()
+        category.deleted_at = deleted_at
+        for label in category.labels:
+            label.deleted_at = deleted_at
+
+        schedule_action('delete_label', category, g.namespace.id,
+                        g.db_session)
+
+    g.db_session.commit()
+
+    return g.encoder.jsonify(None)
 
 
 # -- Begin tags API shim
@@ -1320,15 +1349,16 @@ def sync_deltas():
                           location='args')
     g.parser.add_argument('timeout', type=int,
                           default=LONG_POLL_REQUEST_TIMEOUT, location='args')
+    g.parser.add_argument('view', type=view, location='args')
     # - Begin shim -
     # Remove after folders and labels exposed in the Delta API for everybody,
     # right now, only expose for Edgehill.
     g.parser.add_argument('exclude_folders', type=strict_bool, location='args')
     # - End shim -
-    # TODO(emfree): should support `expand` parameter in delta endpoints.
     args = strict_parse_args(g.parser, request.args)
     exclude_types = args.get('exclude_types')
     include_types = args.get('include_types')
+    expand = args.get('view') == 'expanded'
     # - Begin shim -
     exclude_folders = args.get('exclude_folders')
     if exclude_folders is None:
@@ -1361,7 +1391,7 @@ def sync_deltas():
             deltas, end_pointer = delta_sync.format_transactions_after_pointer(
                 g.namespace, start_pointer, db_session, args['limit'],
                 exclude_types, include_types, exclude_folders,
-                legacy_nsid=g.legacy_nsid)
+                legacy_nsid=g.legacy_nsid, expand=expand)
 
         response = {
             'cursor_start': cursor,
@@ -1430,6 +1460,7 @@ def stream_changes():
                           location='args')
     g.parser.add_argument('include_types', type=valid_delta_object_types,
                           location='args')
+    g.parser.add_argument('view', type=view, location='args')
     # - Begin shim -
     # Remove after folders and labels exposed in the Delta API for everybody,
     # right now, only expose for Edgehill.
@@ -1442,6 +1473,7 @@ def stream_changes():
     cursor = args['cursor']
     exclude_types = args.get('exclude_types')
     include_types = args.get('include_types')
+    expand = args.get('view') == 'expanded'
 
     # Begin shim #
     exclude_folders = args.get('exclude_folders')
@@ -1472,7 +1504,7 @@ def stream_changes():
         g.namespace, transaction_pointer=transaction_pointer,
         poll_interval=1, timeout=timeout, exclude_types=exclude_types,
         include_types=include_types, exclude_folders=exclude_folders,
-        legacy_nsid=g.legacy_nsid)
+        legacy_nsid=g.legacy_nsid, expand=expand)
     return Response(generator, mimetype='text/event-stream')
 
 

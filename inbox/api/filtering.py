@@ -126,23 +126,8 @@ def threads(namespace_id, subject, from_addr, to_addr, cc_addr, bcc_addr,
     # Eager-load some objects in order to make constructing API
     # representations faster.
     if view != 'ids':
-        if view == 'expanded':
-            load_only_columns = ('public_id', 'subject', 'is_draft', 'version',
-                                 'from_addr', 'to_addr', 'cc_addr', 'bcc_addr',
-                                 'received_date', 'snippet', 'is_read',
-                                 'reply_to_message_id', 'reply_to')
-        else:
-            load_only_columns = ('public_id', 'is_draft', 'from_addr',
-                                 'to_addr', 'cc_addr', 'bcc_addr', 'is_read',
-                                 'is_starred')
-        query = query.options(
-            subqueryload(Thread.messages).
-            load_only(*load_only_columns)
-            .joinedload(Message.messagecategories)
-            .joinedload(MessageCategory.category),
-            subqueryload(Thread.messages)
-            .joinedload(Message.parts)
-            .joinedload(Part.block))
+        expand = (view == 'expanded')
+        query = query.options(*Thread.api_loading_options(expand))
 
     query = query.order_by(desc(Thread.recentdate)).limit(limit)
 
@@ -336,7 +321,9 @@ def messages_or_drafts(namespace_id, drafts, subject, from_addr, to_addr,
         return [x[0] for x in res]
 
     # Eager-load related attributes to make constructing API representations
-    # faster.
+    # faster. Note that we don't use the options defined by
+    # Message.api_loading_options() here because we already have a join to the
+    # thread table. We should eventually try to simplify this.
     query += lambda q: q.options(
                 contains_eager(Message.thread),
                 subqueryload(Message.messagecategories).joinedload('category'),
@@ -452,6 +439,7 @@ def recurring_events(filters, starts_before, starts_after, ends_before,
     recur_query = recur_query.filter(and_(*after_criteria))
 
     recur_instances = []
+
     for r in recur_query:
         # the occurrences check only checks starting timestamps
         if ends_before and not starts_before:

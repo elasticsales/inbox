@@ -1,4 +1,4 @@
-nylas-production-python==0.2.3
+nylas-production-python==0.2.5
 coverage==3.7.1
 httplib2==0.8
 pytest==2.5.2
@@ -20,7 +20,7 @@ chardet==2.1.1
 setproctitle==1.1.8
 gdata==2.0.18
 git+https://github.com/nylas/dateutil.git#egg=python-dateutil
-flanker==0.4.28
+git+https://github.com/khamidou/flanker.git#egg=flanker
 -e git+https://github.com/elasticsales/imapclient.git#egg=imapclient
 alembic==0.6.4
 iconv==1.0

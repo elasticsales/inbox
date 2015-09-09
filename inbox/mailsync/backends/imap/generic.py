@@ -64,14 +64,14 @@ from __future__ import division
 
 from datetime import datetime, timedelta
 from gevent import Greenlet, kill, spawn, sleep
-from hashlib import sha256
+import imaplib
 from sqlalchemy import func
 from sqlalchemy.orm import load_only
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm.exc import NoResultFound
 
 from inbox.basicauth import ValidationError
-from inbox.util.concurrency import retry_and_report_killed
+from inbox.util.concurrency import retry_with_logging
 from inbox.util.debug import bind_context
 from inbox.util.misc import or_none
 from inbox.util.threading import fetch_corresponding_thread, MAX_THREAD_LENGTH
@@ -157,10 +157,8 @@ class FolderSyncEngine(Greenlet):
         self.log = log.new(account_id=self.account_id, folder=self.folder_name)
         # eagerly signal the sync status
         self.heartbeat_status.publish()
-        return retry_and_report_killed(self._run_impl,
-                                       account_id=self.account_id,
-                                       folder_name=self.folder_name,
-                                       logger=log)
+        return retry_with_logging(self._run_impl, account_id=self.account_id,
+                                  logger=log)
 
     def _run_impl(self):
         try:
@@ -292,7 +290,7 @@ class FolderSyncEngine(Greenlet):
     @retry_crispin
     def resync_uids(self):
         log.bind(state=self.state)
-        log.info('UIDVALIDITY changed')
+        log.warning('UIDVALIDITY changed; initiating resync')
         self.resync_uids_impl()
         return 'initial'
 
@@ -336,8 +334,12 @@ class FolderSyncEngine(Greenlet):
                 kill(change_poller)
 
     def should_idle(self, crispin_client):
-        return (crispin_client.idle_supported() and
-                self.folder_name in crispin_client.folder_names()['inbox'])
+        if not hasattr(self, '_should_idle'):
+            self._should_idle = (
+                crispin_client.idle_supported() and self.folder_name in
+                crispin_client.folder_names()['inbox']
+            )
+        return self._should_idle
 
     def poll_impl(self):
         with self.conn_pool.get() as crispin_client:
@@ -346,7 +348,24 @@ class FolderSyncEngine(Greenlet):
                 crispin_client.select_folder(self.folder_name,
                                              self.uidvalidity_cb)
                 idling = True
-                crispin_client.idle(IDLE_WAIT)
+                try:
+                    crispin_client.idle(IDLE_WAIT)
+                except Exception as exc:
+                    # With some servers we get e.g.
+                    # 'Unexpected IDLE response: * FLAGS  (...)'
+                    if isinstance(exc, imaplib.IMAP4.error) and \
+                            exc.message.startswith('Unexpected IDLE response'):
+                        log.info('Error initiating IDLE, not idling',
+                                 error=exc)
+                        try:
+                            # Still have to take the connection out of IDLE
+                            # mode to reuse it though.
+                            crispin_client.conn.idle_done()
+                        except AttributeError:
+                            pass
+                        idling = False
+                    else:
+                        raise
             else:
                 idling = False
         # Close IMAP connection before sleeping
@@ -354,66 +373,31 @@ class FolderSyncEngine(Greenlet):
             sleep(self.poll_frequency)
 
     def resync_uids_impl(self):
-        # NOTE: first, let's check if the UIVDALIDITY change was spurious, if
-        # it is, just discard it and go on, if it isn't, drop the relevant
-        # entries (filtering by account and folder IDs) from the imapuid table,
-        # download messages, if necessary - in case a message has changed UID -
-        # update UIDs, and discard orphaned messages. -siro
+        # First, let's check if the UIVDALIDITY change was spurious, if
+        # it is, just discard it and go on.
+        with self.conn_pool.get() as crispin_client:
+            crispin_client.select_folder(self.folder_name, lambda *args: True)
+            remote_uidvalidity = crispin_client.selected_uidvalidity
+            remote_uidnext = crispin_client.selected_uidnext
+            if remote_uidvalidity <= self.uidvalidity:
+                log.debug('UIDVALIDITY unchanged')
+                return
+        # Otherwise, if the UIDVALIDITY really has changed, discard all saved
+        # UIDs for the folder, mark associated messages for garbage-collection,
+        # and return to the 'initial' state to resync.
+        # This will cause message and threads to be deleted and recreated, but
+        # uidinvalidity is sufficiently rare that this tradeoff is acceptable.
         with session_scope() as db_session:
-            account = db_session.query(Account).get(self.account_id)
-            folder_info = db_session.query(ImapFolderInfo). \
+            invalid_uids = {
+                uid for uid, in db_session.query(ImapUid.msg_uid).
                 filter_by(account_id=self.account_id,
-                          folder_id=self.folder_id).one()
-            cached_uidvalidity = folder_info.uidvalidity
-            with self.conn_pool.get() as crispin_client:
-                crispin_client.select_folder(self.folder_name,
-                                             lambda *args: True)
-                uidvalidity = crispin_client.selected_uidvalidity
-                uidnext = crispin_client.selected_uidnext
-                if uidvalidity <= cached_uidvalidity:
-                    log.debug('UIDVALIDITY unchanged')
-                    return
-                invalid_uids = db_session.query(ImapUid). \
-                    filter_by(account_id=self.account_id,
-                              folder_id=self.folder_id)
-                data_sha256_message = {uid.message.data_sha256: uid.message
-                                       for uid in invalid_uids}
-                for uid in invalid_uids:
-                    db_session.delete(uid)
-                # NOTE: this is necessary (and OK since it doesn't persist any
-                # data) to maintain the order between UIDs deletion and
-                # insertion. Without this, I was seeing constraints violation
-                # on the imapuid table. -siro
-                db_session.flush()
-                remote_uids = crispin_client.all_uids()
-                for remote_uid in remote_uids:
-                    raw_message = crispin_client.uids([remote_uid])[0]
-                    data_sha256 = sha256(raw_message.body).hexdigest()
-                    if data_sha256 in data_sha256_message:
-                        message = data_sha256_message[data_sha256]
-
-                        # Create a new imapuid
-                        uid = ImapUid(msg_uid=raw_message.uid,
-                                      message=message,
-                                      account_id=self.account_id,
-                                      folder_id=self.folder_id)
-                        uid.update_flags(raw_message.flags)
-                        db_session.add(uid)
-
-                        # Update the existing message's metadata too
-                        common.update_message_metadata(db_session, account,
-                                                       message, uid.is_draft)
-
-                        del data_sha256_message[data_sha256]
-                    else:
-                        self.download_and_commit_uids(crispin_client,
-                                                      [remote_uid])
-                    self.heartbeat_status.publish()
-            for message in data_sha256_message.itervalues():
-                db_session.delete(message)
-            folder_info.uidvalidity = uidvalidity
-            folder_info.highestmodseq = None
-            folder_info.uidnext = uidnext
+                          folder_id=self.folder_id)
+            }
+            common.remove_deleted_uids(self.account_id, self.folder_id,
+                                       invalid_uids, db_session)
+        self.uidvalidity = remote_uidvalidity
+        self.highestmodseq = None
+        self.uidnext = remote_uidnext
 
     @retry_crispin
     def poll_for_changes(self):
@@ -504,9 +488,6 @@ class FolderSyncEngine(Greenlet):
 
         new_uids = set()
         with self.syncmanager_lock:
-            # there is the possibility that another green thread has already
-            # downloaded some message(s) from this batch... check within the
-            # lock
             with session_scope() as db_session:
                 account = Account.get(self.account_id, db_session)
                 folder = Folder.get(self.folder_id, db_session)
@@ -519,6 +500,8 @@ class FolderSyncEngine(Greenlet):
                         new_uids.add(uid)
                 db_session.commit()
 
+        log.info('Committed new UIDs',
+                 new_committed_message_count=len(new_uids))
         # If we downloaded uids, record message velocity (#uid / latency)
         if self.state == 'initial' and len(new_uids):
             self._report_message_velocity(datetime.utcnow() - start,
@@ -570,27 +553,29 @@ class FolderSyncEngine(Greenlet):
             saved_status.update_metrics(metrics)
 
     def get_new_uids(self, crispin_client):
-        remote_uidnext = crispin_client.conn.folder_status(
-            self.folder_name, ['UIDNEXT']).get('UIDNEXT')
+        try:
+            remote_uidnext = crispin_client.conn.folder_status(
+                self.folder_name, ['UIDNEXT']).get('UIDNEXT')
+        except ValueError:
+            # Work around issue where ValueError is raised on parsing STATUS
+            # response.
+            log.warning('Error getting UIDNEXT', exc_info=True)
+            remote_uidnext = None
         if remote_uidnext is not None and remote_uidnext == self.uidnext:
             return
+        log.info('UIDNEXT changed, checking for new UIDs',
+                 remote_uidnext=remote_uidnext, saved_uidnext=self.uidnext)
 
         crispin_client.select_folder(self.folder_name, self.uidvalidity_cb)
-        # Some servers don't return a UIDNEXT, so we have to actually get the
-        # last UID.
-        if remote_uidnext is None:
-            max_uid = crispin_client.conn.fetch('*', ['UID'])
-            if not max_uid:
-                # No UIDs in folder
-                return
-            remote_uidnext = max(max_uid.keys()) + 1
         with session_scope() as db_session:
             lastseenuid = common.lastseenuid(self.account_id, db_session,
                                              self.folder_id)
-        new_uids = range(lastseenuid + 1, remote_uidnext)
-        for uid in new_uids:
-            self.download_and_commit_uids(crispin_client, [uid])
-        log.info('Saved new UIDs', count=len(new_uids))
+        latest_uids = crispin_client.conn.fetch('{}:*'.format(lastseenuid + 1),
+                                                ['UID']).keys()
+        new_uids = set(latest_uids) - {lastseenuid}
+        if new_uids:
+            for uid in sorted(new_uids):
+                self.download_and_commit_uids(crispin_client, [uid])
         self.uidnext = remote_uidnext
 
     def condstore_refresh_flags(self, crispin_client):
@@ -674,6 +659,11 @@ class FolderSyncEngine(Greenlet):
         if not hasattr(self, '_uidvalidity'):
             self._uidvalidity = self._load_imap_folder_info().uidvalidity
         return self._uidvalidity
+
+    @uidvalidity.setter
+    def uidvalidity(self, value):
+        self._update_imap_folder_info('uidvalidity', value)
+        self._uidvalidity = value
 
     @property
     def uidnext(self):

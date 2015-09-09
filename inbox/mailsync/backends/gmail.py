@@ -180,20 +180,15 @@ class GmailFolderSyncEngine(FolderSyncEngine):
                     ordered_uids_to_sync = [u for u in sorted(unknown_uids) if u not
                                             in inbox_uid_set] + sorted(inbox_uid_set - local_uids)
                 else:
-                    ordered_uids_to_sync = sorted(unknown_uids)
-
-                for uids in chunk(reversed(ordered_uids_to_sync), CHUNK_SIZE):
-                    remote_g_metadata = crispin_client.g_metadata(uids)
-                    for uid in reversed(uids):
-                        if uid in remote_g_metadata:
-                            metadata = GMetadata(remote_g_metadata[uid].msgid,
-                                                 remote_g_metadata[uid].thrid,
-                                                 self.throttled)
-                            download_stack.put(uid, metadata)
-                    if remote_uid_count < SEARCH_THRESHOLD:
-                        self.__download_queued_threads(crispin_client, download_stack)
-                    else:
-                        self.download_uids(crispin_client, download_stack)
+                    # The search above is really slow (times out) on really
+                    # large mailboxes, so bound the search to messages within
+                    # the past month in order to get anywhere.
+                    since = (datetime.utcnow() - timedelta(days=30)). \
+                        strftime('%d-%b-%Y')
+                    inbox_uids = set(crispin_client.search_uids(
+                        ['X-GM-LABELS inbox', 'SINCE {}'.format(since)]))
+                uids_to_download = (sorted(unknown_uids - inbox_uids) +
+                                    sorted(unknown_uids & inbox_uids))
             else:
                 for uids in chunk(unknown_uids, CHUNK_SIZE):
                     remote_g_metadata = crispin_client.g_metadata(uids)

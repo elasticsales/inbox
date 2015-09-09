@@ -211,13 +211,8 @@ def _exc_callback():
     gevent.sleep(5)
 
 
-def _fail_callback():
-    log.error('Max retries reached. Aborting', exc_info=True)
-
-
 retry_crispin = functools.partial(
-    retry, retry_classes=CONN_DISCARD_EXC_CLASSES, exc_callback=_exc_callback,
-    fail_callback=_fail_callback, max_count=10, reset_interval=150)
+    retry, retry_classes=CONN_DISCARD_EXC_CLASSES, exc_callback=_exc_callback)
 
 
 class CrispinClient(object):
@@ -337,7 +332,7 @@ class CrispinClient(object):
 
     @property
     def selected_uidnext(self):
-        return or_none(self.selected_folder_info, lambda i: i['UIDNEXT'])
+        return or_none(self.selected_folder_info, lambda i: i.get('UIDNEXT'))
 
     def sync_folders(self):
         """
@@ -567,7 +562,14 @@ class CrispinClient(object):
         return messages
 
     def flags(self, uids):
-        data = self.conn.fetch(uids, ['FLAGS'])
+        if len(uids) > 100:
+            # Some backends abort the connection if you give them a really
+            # long sequence set of individual UIDs, so instead fetch flags for
+            # all UIDs greater than or equal to min(uids).
+            seqset = '{}:*'.format(min(uids))
+        else:
+            seqset = uids
+        data = self.conn.fetch(seqset, ['FLAGS'])
         uid_set = set(uids)
         return {uid: Flags(ret['FLAGS'])
                 for uid, ret in data.items() if uid in uid_set}
@@ -696,12 +698,25 @@ class CrispinClient(object):
         log.info('Idling', timeout=timeout)
         self.conn.idle()
         try:
-            r = self.conn.idle_check(timeout)
+            with self._restore_timeout():
+                r = self.conn.idle_check(timeout)
         except:
             self.conn.idle_done()
             raise
         self.conn.idle_done()
         return r
+
+    @contextlib.contextmanager
+    def _restore_timeout(self):
+        # IMAPClient.idle_check() calls setblocking(1) on the underlying
+        # socket, erasing any previously set timeout. So make sure to restore
+        # the timeout.
+        sock = getattr(self.conn._imap, 'sslobj', self.conn._imap.sock)
+        timeout = sock.gettimeout()
+        try:
+            yield
+        finally:
+            sock.settimeout(timeout)
 
     def condstore_changed_flags(self, modseq):
         data = self.conn.fetch('1:*', ['FLAGS'],
@@ -772,8 +787,20 @@ class GmailCrispinClient(CrispinClient):
     def condstore_changed_flags(self, modseq):
         data = self.conn.fetch('1:*', ['FLAGS', 'X-GM-LABELS'],
                                modifiers=['CHANGEDSINCE {}'.format(modseq)])
-        return {uid: GmailFlags(ret['FLAGS'], ret['X-GM-LABELS'])
-                for uid, ret in data.items()}
+        results = {}
+        for uid, ret in data.items():
+            if 'FLAGS' not in ret or 'X-GM-LABELS' not in ret:
+                # We might have gotten an unsolicited fetch response that
+                # doesn't have all the data we asked for -- if so, explicitly
+                # fetch flags and labels for that UID.
+                log.info('Got incomplete response in flags fetch', uid=uid,
+                         ret=str(ret))
+                data_for_uid = self.conn.fetch(uid, ['FLAGS', 'X-GM-LABELS'])
+                if not data_for_uid:
+                    continue
+                ret = data_for_uid[uid]
+            results[uid] = GmailFlags(ret['FLAGS'], ret['X-GM-LABELS'])
+        return results
 
     def g_msgids(self, uids):
         """
