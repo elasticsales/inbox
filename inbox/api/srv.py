@@ -180,7 +180,7 @@ def create_namespace():
         db_session.add(account)
         db_session.commit()
 
-        encoder = APIEncoder()
+        encoder = APIEncoder(legacy_nsid=True)
         return encoder.jsonify(namespace)
 
 #
@@ -224,7 +224,7 @@ def modify_namespace(namespace_public_id):
         db_session.add(account)
         db_session.commit()
 
-        encoder = APIEncoder()
+        encoder = APIEncoder(legacy_nsid=True)
         return encoder.jsonify(namespace)
 
 @app.route('/logout')
