@@ -157,28 +157,15 @@ class GmailFolderSyncEngine(FolderSyncEngine):
                         db_session, remote_uid_count=len(remote_uids),
                         download_uid_count=len(unknown_uids))
 
-            download_stack = UIDStack()
-            change_poller = spawn(self.poll_for_changes, download_stack)
+            change_poller = spawn(self.poll_for_changes)
             bind_context(change_poller, 'changepoller', self.account_id,
                          self.folder_id)
 
-            # It takes around 1 minute to fetch flags for 10K messages.
-            CHUNK_SIZE = 10000
-
-            # Only use search commands on smaller mailboxes
-            SEARCH_THRESHOLD = 1e6
-
             if self.is_all_mail(crispin_client):
-                if remote_uid_count < SEARCH_THRESHOLD:
-                    # Put UIDs on the stack such that UIDs for messages in the
-                    # inbox get downloaded first, and such that higher (i.e., more
-                    # recent) UIDs get downloaded before lower ones.
-                    inbox_uids = crispin_client.search_uids(['X-GM-LABELS inbox'])
-                    inbox_uid_set = set(inbox_uids)
-                    # Note that we have to be checking membership in a /set/ for
-                    # performance.
-                    ordered_uids_to_sync = [u for u in sorted(unknown_uids) if u not
-                                            in inbox_uid_set] + sorted(inbox_uid_set - local_uids)
+                # Prioritize UIDs for messages in the inbox folder.
+                if len(remote_uids) < 1e6:
+                    inbox_uids = set(
+                        crispin_client.search_uids(['X-GM-LABELS inbox']))
                 else:
                     # The search above is really slow (times out) on really
                     # large mailboxes, so bound the search to messages within
@@ -190,14 +177,17 @@ class GmailFolderSyncEngine(FolderSyncEngine):
                 uids_to_download = (sorted(unknown_uids - inbox_uids) +
                                     sorted(unknown_uids & inbox_uids))
             else:
-                for uids in chunk(unknown_uids, CHUNK_SIZE):
-                    remote_g_metadata = crispin_client.g_metadata(uids)
-                    full_download = self.__deduplicate_message_download(
-                        crispin_client, remote_g_metadata, uids)
-                    for uid in sorted(full_download):
-                        download_stack.put(uid, None)
-                    self.download_uids(crispin_client, download_stack)
+                uids_to_download = sorted(unknown_uids)
 
+            for uids in chunk(reversed(uids_to_download), 1024):
+                g_metadata = crispin_client.g_metadata(uids)
+                # UIDs might have been expunged since sync started, in which
+                # case the g_metadata call above will return nothing.
+                # They may also have been preemptively downloaded by thread
+                # expansion. We can omit such UIDs.
+                uids = [u for u in uids if u in g_metadata and u not in
+                        self.saved_uids]
+                self.batch_download_uids(crispin_client, uids, g_metadata)
         finally:
             if change_poller is not None:
                 # schedule change_poller to die
