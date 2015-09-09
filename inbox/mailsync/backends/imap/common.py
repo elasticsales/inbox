@@ -65,12 +65,18 @@ def update_message_metadata(session, account, message, is_draft):
     if account.category_type == 'folder':
         categories = [_select_category(categories)] if categories else []
 
+    # XXX: This will overwrite local state if syncback actions are scheduled,
+    # but the eventual state is correct.
+    message.categories = categories
+
+    """
     if not message.categories_changes:
         # No syncback actions scheduled, so there is no danger of
         # overwriting modified local state.
         message.categories = categories
     else:
         _update_categories(session, message, categories)
+    """
 
 
 def update_metadata(account_id, folder_id, new_flags, session):
