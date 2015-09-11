@@ -19,8 +19,10 @@ class GenericAccount(ImapAccount):
     smtp_username = Column(String(255), nullable=True)
 
     # Secret
-    password_id = Column(Integer, ForeignKey(Secret.id), nullable=False)
-    secret = relationship('Secret', cascade='all', uselist=False)
+    password_id = Column(Integer, ForeignKey(Secret.id, ondelete='CASCADE'),
+                         nullable=False)
+    secret = relationship('Secret', cascade='all, delete-orphan',
+                          single_parent=True, uselist=False)
 
     __mapper_args__ = {'polymorphic_identity': 'genericaccount'}
 
