@@ -19,7 +19,7 @@ def upgrade():
     conn.execute(text("set @@lock_wait_timeout = 20;"))
     conn.execute(text("SET FOREIGN_KEY_CHECKS=0;"))
 
-    conn.execute(text("ALTER TABLE folder DROP FOREIGN KEY folder_ibfk_1"))
+    #conn.execute(text("ALTER TABLE folder DROP FOREIGN KEY folder_ibfk_1"))
     conn.execute(text("ALTER TABLE folder ADD CONSTRAINT folder_ibfk_1 FOREIGN KEY "
                       "(`category_id`) REFERENCES `category` (`id`) ON DELETE CASCADE"))
 
