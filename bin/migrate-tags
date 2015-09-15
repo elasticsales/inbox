@@ -14,6 +14,31 @@ configure_logging()
 log = get_logger()
 
 
+def select_category(categories):
+    # TODO[k]: Implement proper ranking function
+    return list(categories)[0]
+
+def update_metadata(message):
+    account = message.namespace.account
+    if account.discriminator == 'easaccount':
+        uids = message.easuids
+    else:
+        uids = message.imapuids
+
+    message.is_read = any(i.is_seen for i in uids)
+    message.is_starred = any(i.is_flagged for i in uids)
+
+    categories = set()
+    for i in uids:
+        categories.update(i.categories)
+
+    if account.category_type == 'folder':
+        categories = [select_category(categories)] if categories else []
+
+    message.categories = categories
+
+
+
 def populate_labels(uid, account, db_session):
     if uid.g_labels is None:
         return
@@ -142,7 +167,7 @@ def migrate_messages(account_id, updated_since):
                               Message.is_draft, Message.updated_at),
                     joinedload(Message.namespace).load_only('id'),
                     subqueryload(Message.imapuids),
-                    subqueryload(Message.easuids),
+                    #subqueryload(Message.easuids),
                     subqueryload(Message.messagecategories)). \
                     with_hint(Message,
                               'USE INDEX (ix_message_namespace_id_deleted_at)'). \
@@ -156,7 +181,7 @@ def migrate_messages(account_id, updated_since):
                                  message_id=message_id)
                         continue
                     try:
-                        message.update_metadata(message.is_draft)
+                        update_metadata(message)
                     except IndexError:
                         # Can happen for messages without a folder.
                         pass
