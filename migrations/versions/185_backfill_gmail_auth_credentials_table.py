@@ -17,6 +17,7 @@ def upgrade():
     from sqlalchemy.orm import relationship
     from inbox.config import config
     from inbox.models.session import session_scope
+    from inbox.models.backends.gmail import GOOGLE_EMAIL_SCOPE
     from inbox.ignition import main_engine
     engine = main_engine()
 
@@ -37,9 +38,7 @@ def upgrade():
     with session_scope(versioned=False) as db_session:
 
         for acc, sec in db_session.query(GmailAccount, Secret) \
-                        .filter(GmailAccount.refresh_token_id == Secret.id,
-                                GmailAccount.scope != None,
-                                GmailAccount.g_id_token != None) \
+                        .filter(GmailAccount.refresh_token_id == Secret.id) \
                         .all():
 
             # Create a new GmailAuthCredentials entry if
@@ -60,7 +59,7 @@ def upgrade():
                 # Create a new GmailAuthCredentials entry
                 auth_creds = GmailAuthCredentials()
                 auth_creds.gmailaccount_id = acc.id
-                auth_creds.scopes = acc.scope
+                auth_creds.scopes = acc.scope or GOOGLE_EMAIL_SCOPE
                 auth_creds.g_id_token = acc.g_id_token
                 auth_creds.created_at = now
                 auth_creds.updated_at = now
