@@ -141,6 +141,8 @@ def migrate_account(account_id):
 
 
 def upgrade():
+    # Do this separately
+    """
     from inbox.models.session import session_scope
     from inbox.models import Account
     with session_scope() as db_session:
@@ -148,6 +150,7 @@ def upgrade():
 
     for id_ in account_ids:
         migrate_account(id_)
+    """
 
 
 def downgrade():
