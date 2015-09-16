@@ -16,7 +16,8 @@ from sqlalchemy.dialects import mysql
 
 
 def upgrade():
-    op.drop_column('account', 'save_raw_messages')
+    #op.drop_column('account', 'save_raw_messages')
+    pass
 
 
 def downgrade():
