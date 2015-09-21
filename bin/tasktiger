@@ -1,0 +1,16 @@
+#!/usr/bin/env python
+import logging
+import sys
+import tasktiger
+from inbox.heartbeat.config import get_redis_client
+from nylas.logging import configure_logging, get_logger
+
+TASKTIGER_DATABASE = 10
+
+configure_logging()
+
+tiger = tasktiger.TaskTiger(connection=get_redis_client(db=TASKTIGER_DATABASE))
+logger = logging.getLogger(tiger.config['LOGGER_NAME'])
+logger.setLevel(logging.DEBUG)
+
+tiger.run_worker_with_args(sys.argv[1:])
