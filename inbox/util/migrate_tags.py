@@ -268,6 +268,10 @@ def migrate_account_messages(account_id):
 
                 log.info('Queueing messages', account_id=account_id,
                                               updated_since=updated_since_ts)
+
+                if not messages:
+                    break
+
                 migrate_messages.delay(account_id, [message.id for message in messages])
 
                 new_updated_since = max(message.updated_at for message in messages)
