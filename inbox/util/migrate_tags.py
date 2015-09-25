@@ -4,7 +4,7 @@ from inbox.heartbeat.config import get_redis_client
 import dateutil.parser
 from datetime import datetime, timedelta
 from sqlalchemy.orm import subqueryload, load_only, joinedload
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError, InvalidRequestError
 from sqlalchemy.orm.exc import ObjectDeletedError, StaleDataError
 from sqlalchemy import asc, func
 from inbox.config import config
@@ -119,7 +119,7 @@ def set_labels_for_imapuids(account, db_session):
                 # categories.
                 uid.message.updated_at = datetime.utcnow()
             log.info('Updated UID labels', account_id=account.id, uid=uid.id)
-            if not count % 1000:
+            if not count % 500:
                 db_session.commit()
 
                 new_updated_since = uid.updated_at
@@ -198,7 +198,7 @@ def migrate_account_metadata(account_id):
         db_session.commit()
 
 
-@tiger.task()
+@tiger.task(retry_on=[OperationalError, InvalidRequestError])
 def migrate_messages(account_id, message_ids):
     with session_scope(versioned=False) as db_session:
         namespace = db_session.query(Namespace).filter_by(
@@ -272,7 +272,9 @@ def migrate_account_messages(account_id):
                 if not messages:
                     break
 
-                migrate_messages.delay(account_id, [message.id for message in messages])
+                tiger.delay(migrate_messages,
+                            args=(account_id, [message.id for message in messages]),
+                            queue='migrate_messages.%s' % account_id)
 
                 new_updated_since = max(message.updated_at for message in messages)
 
