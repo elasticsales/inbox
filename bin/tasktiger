@@ -9,7 +9,7 @@ TASKTIGER_DATABASE = 10
 
 configure_logging()
 
-tiger = tasktiger.TaskTiger(connection=get_redis_client(db=TASKTIGER_DATABASE))
+tiger = tasktiger.TaskTiger(connection=get_redis_client(db=TASKTIGER_DATABASE, strict=False))
 logger = logging.getLogger(tiger.config['LOGGER_NAME'])
 logger.setLevel(logging.DEBUG)
 
