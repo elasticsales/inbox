@@ -408,9 +408,8 @@ class FolderSyncEngine(Greenlet):
                 with mailsync_session_scope() as db_session:
                     acc = db_session.query(Account).get(self.account_id)
                     self.throttled = acc.throttled
-                if self.throttled:
-                    log.debug('throttled; sleeping')
-                    sleep(THROTTLE_WAIT)
+            log.debug('throttled; sleeping')
+            sleep(THROTTLE_WAIT)
 
     def create_message(self, db_session, acct, folder, msg):
         assert acct is not None and acct.namespace is not None

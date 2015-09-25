@@ -13,7 +13,7 @@ from inbox.models.session import session_scope
 from inbox.mailsync.exc import SyncException
 from inbox.heartbeat.status import clear_heartbeat_status
 
-THROTTLE_WAIT = 60
+THROTTLE_WAIT = 180
 
 # How often to log a stacktrace of all the running greenlets (e.g. to debug
 # issues of greenlets being stuck)
