@@ -127,11 +127,13 @@ def set_labels_for_imapuids(account, db_session):
                     log.info('imapuids: updated date did not increase at %s' % \
                              updated_since, account_id=account_id)
 
+                can_requeue = new_updated_since != updated_since
+
                 updated_since = new_updated_since
                 updated_since_ts = calendar.timegm(updated_since.timetuple())
                 redis.set('l:%s' % account_id, updated_since_ts)
 
-                if new_updated_since != updated_since and time.time() - timer > REQUEUE_TIME:
+                if can_requeue and time.time() - timer > REQUEUE_TIME:
                     log.info('Soft time limit exceeded in migrate_account_metadata, requeuing', account_id=account_id)
                     migrate_account.delay(account_id)
                     return
