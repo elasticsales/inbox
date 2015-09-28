@@ -124,14 +124,14 @@ def set_labels_for_imapuids(account, db_session):
 
                 new_updated_since = uid.updated_at
                 if new_updated_since == updated_since:
-                    raise RuntimeError('imapuids: updated date did not increase for account %s: %s' %
-                                       (account_id, updated_since))
+                    log.info('imapuids: updated date did not increase at %s' % \
+                             updated_since, account_id=account_id)
 
                 updated_since = new_updated_since
                 updated_since_ts = calendar.timegm(updated_since.timetuple())
                 redis.set('l:%s' % account_id, updated_since_ts)
 
-                if time.time() - timer > REQUEUE_TIME:
+                if new_updated_since != updated_since and time.time() - timer > REQUEUE_TIME:
                     log.info('Soft time limit exceeded in migrate_account_metadata, requeuing', account_id=account_id)
                     migrate_account.delay(account_id)
                     return
@@ -187,14 +187,11 @@ def create_categories_for_easfoldersyncstatuses(account, db_session):
 def migrate_account_metadata(account_id):
     with session_scope(versioned=False) as db_session:
         account = db_session.query(Account).get(account_id)
-        if account.discriminator == 'easaccount':
-            create_categories_for_easfoldersyncstatuses(account, db_session)
-        elif account.discriminator == 'gmailaccount':
+        if account.provider == 'gmail':
             create_categories_for_gmail_folders(account, db_session)
+            set_labels_for_imapuids(account, db_session)
         else:
             create_categories_for_imap_folders(account, db_session)
-        if account.discriminator == 'gmailaccount':
-            set_labels_for_imapuids(account, db_session)
         db_session.commit()
 
 
@@ -242,7 +239,7 @@ def migrate_account_messages(account_id):
 
     redis = get_redis_client(db=MIGRATION_DATABASE)
 
-    LIMIT = 1000
+    LIMIT = 500
 
     updated_since_ts = redis.get('u:%s' % account_id)
     if updated_since_ts:
@@ -300,7 +297,7 @@ def migrate_account_messages(account_id):
                 raise
 
 
-@tiger.task(unique=True, lock=True)
+@tiger.task(unique=True, lock=True, retry_on=[InvalidRequestError])
 def migrate_account(account_id):
     log.info('Migrating account', account_id=account_id)
     migrate_account_metadata(account_id)
