@@ -119,7 +119,7 @@ def set_labels_for_imapuids(account, db_session):
                 # categories.
                 uid.message.updated_at = datetime.utcnow()
             log.info('Updated UID labels', account_id=account.id, uid=uid.id)
-            if not count % 500:
+            if not count % 200:
                 db_session.commit()
 
                 new_updated_since = uid.updated_at
