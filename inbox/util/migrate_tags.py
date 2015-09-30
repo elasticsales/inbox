@@ -258,7 +258,9 @@ def migrate_account_messages(account_id):
 
     redis = get_redis_client(db=MIGRATION_DATABASE)
 
-    LIMIT = 500
+    INITIAL_LIMIT = 500
+
+    limit = INITIAL_LIMIT
 
     updated_since_ts = redis.get('u:%s' % account_id)
     if updated_since_ts:
@@ -280,7 +282,7 @@ def migrate_account_messages(account_id):
                     load_only(Message.id, Message.updated_at)). \
                     with_hint(Message,
                               'USE INDEX (ix_message_namespace_id_deleted_at)'). \
-                    order_by(asc(Message.updated_at)).limit(LIMIT).all()
+                    order_by(asc(Message.updated_at)).limit(limit).all()
 
                 log.info('Queueing messages', account_id=account_id,
                                               updated_since=updated_since_ts)
@@ -294,15 +296,23 @@ def migrate_account_messages(account_id):
 
                 new_updated_since = max(message.updated_at for message in messages)
 
-                if new_updated_since == updated_since and len(messages) >= LIMIT:
-                    raise RuntimeError('updated date did not increase for account %s: %s' %
-                                       (account_id, updated_since))
+                if new_updated_since == updated_since and len(messages) >= limit:
+                    log.info('updated date did not increase at %s' % \
+                             updated_since, account_id=account_id)
+                    limit *= 2
+                    if limit > INITIAL_LIMIT * 8:
+                        raise RuntimeError('updated date did not increase for account %s: %s' %
+                                           (account_id, updated_since))
+                    continue
+                else:
+                    if limit > INITIAL_LIMIT:
+                        limit = INITIAL_LIMIT
 
                 updated_since = new_updated_since
                 updated_since_ts = calendar.timegm(updated_since.timetuple())
                 redis.set('u:%s' % account_id, updated_since_ts)
 
-                if len(messages) < LIMIT:
+                if len(messages) < limit:
                     break
 
                 if time.time() - timer > REQUEUE_TIME:
