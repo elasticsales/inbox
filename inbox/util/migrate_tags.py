@@ -134,9 +134,9 @@ def set_labels_for_imapuids(account, db_session):
                 redis.set('l:%s' % account_id, updated_since_ts)
 
                 if can_requeue and time.time() - timer > REQUEUE_TIME:
-                    log.info('Soft time limit exceeded in migrate_account_metadata, requeuing', account_id=account_id)
+                    log.info('Soft time limit exceeded in migrate_account_metadata, requeueing', account_id=account_id)
                     migrate_account.delay(account_id)
-                    return
+                    return False
 
         except (IntegrityError, ObjectDeletedError) as exc:
             log.error('Error updating uid', uid=uid_id, account_id=account_id,
@@ -148,6 +148,8 @@ def set_labels_for_imapuids(account, db_session):
         updated_since = uid.updated_at
         updated_since_ts = calendar.timegm(updated_since.timetuple())
         redis.set('l:%s' % account_id, updated_since_ts)
+
+    return True
 
 
 def create_categories_for_imap_folders(account, db_session):
@@ -162,12 +164,18 @@ def create_categories_for_imap_folders(account, db_session):
 
 
 def create_categories_for_gmail_folders(account, db_session):
+    default_folder_name = {
+        'all': '[Gmail]/All Mail',
+        'spam': '[Gmail]/Spam',
+        'trash': '[Gmail]/Trash',
+    }
     for folder in db_session.query(Folder).filter(
             Folder.account_id == account.id):
         if folder.canonical_name in ('all', 'spam', 'trash'):
             cat = Category.find_or_create(
                 db_session, namespace_id=account.namespace.id,
-                name=folder.canonical_name, display_name=folder.name,
+                name=folder.canonical_name,
+                display_name=folder.name or default_folder_name[folder.canonical_name],
                 type_='folder')
             folder.category = cat
         if folder.name is not None:
@@ -189,12 +197,21 @@ def create_categories_for_easfoldersyncstatuses(account, db_session):
 def migrate_account_metadata(account_id):
     with session_scope(versioned=False) as db_session:
         account = db_session.query(Account).get(account_id)
-        if account.provider == 'gmail':
+        try:
+            provider = account.provider
+        except ObjectDeletedError:
+            log.error('Account has no namespace', account_id=account_id)
+            return False
+
+        if provider == 'gmail':
             create_categories_for_gmail_folders(account, db_session)
-            set_labels_for_imapuids(account, db_session)
+            if not set_labels_for_imapuids(account, db_session):
+                return False # requeueing
         else:
             create_categories_for_imap_folders(account, db_session)
         db_session.commit()
+
+    return True
 
 
 @tiger.task(retry_on=[OperationalError, InvalidRequestError])
@@ -289,7 +306,7 @@ def migrate_account_messages(account_id):
                     break
 
                 if time.time() - timer > REQUEUE_TIME:
-                    log.info('Soft time limit exceeded in migrate_account_messages, requeuing', account_id=account_id)
+                    log.info('Soft time limit exceeded in migrate_account_messages, requeueing', account_id=account_id)
                     migrate_account.delay(account_id)
                     return
 
@@ -302,9 +319,9 @@ def migrate_account_messages(account_id):
 @tiger.task(unique=True, lock=True, retry_on=[InvalidRequestError])
 def migrate_account(account_id):
     log.info('Migrating account', account_id=account_id)
-    migrate_account_metadata(account_id)
-    migrate_account_messages(account_id)
-    log.info('Migrated account', account_id=account_id)
+    if migrate_account_metadata(account_id):
+        migrate_account_messages(account_id)
+        log.info('Migrated account', account_id=account_id)
 
 def migrate_accounts():
     with session_scope() as db_session:
