@@ -15,6 +15,7 @@ from inbox.models.session import session_scope
 from nylas.logging import configure_logging, get_logger
 from redis import Redis
 import tasktiger
+from tasktiger import retry
 import time
 
 configure_logging()
@@ -214,7 +215,9 @@ def migrate_account_metadata(account_id):
     return True
 
 
-@tiger.task(retry_on=[OperationalError, InvalidRequestError])
+@tiger.task(retry_on=[OperationalError, InvalidRequestError],
+            retry_method=retry.fixed(60, 100),
+            hard_timeout=1200)
 def migrate_messages(account_id, message_ids):
     with session_scope(versioned=False) as db_session:
         namespace = db_session.query(Namespace).filter_by(
@@ -326,7 +329,11 @@ def migrate_account_messages(account_id):
                 raise
 
 
-@tiger.task(unique=True, lock=True, retry_on=[InvalidRequestError])
+@tiger.task(unique=True,
+            lock=True,
+            retry_on=[InvalidRequestError],
+            retry_method=retry.fixed(60, 100),
+            hard_timeout=1200)
 def migrate_account(account_id):
     log.info('Migrating account', account_id=account_id)
     if migrate_account_metadata(account_id):
