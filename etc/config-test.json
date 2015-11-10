@@ -3,6 +3,25 @@
 "MYSQL_HOSTNAME": "localhost",
 "MYSQL_PORT": 3306,
 
+"DATABASE_HOSTS": [
+    {
+        "HOSTNAME": "localhost",
+        "PORT": 3306,
+        "SHARDS": [
+            {
+                "ID": 0,
+                "SCHEMA_NAME": "test",
+                "OPEN": true
+            },
+            {
+                "ID": 1,
+                "SCHEMA_NAME": "test_1",
+                "OPEN": false
+            }
+        ]
+    }
+],
+
 "SYNC_STEAL_ACCOUNTS": true,
 
 "DB_POOL_SIZE": 25,

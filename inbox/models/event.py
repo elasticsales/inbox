@@ -280,8 +280,9 @@ class Event(MailSyncBase, HasRevisions, HasPublicID):
                 if isinstance(r, str):
                     r = [r]
                 return r
-            except ValueError:
-                log.warn('Invalid RRULE entry for event', event_id=self.id)
+            except (ValueError, SyntaxError):
+                log.warn('Invalid RRULE entry for event', event_id=self.id,
+                         raw_rrule=self.recurrence)
                 return []
         return []
 
@@ -334,7 +335,7 @@ class RecurringEvent(Event):
     __mapper_args__ = {'polymorphic_identity': 'recurringevent'}
     __table_args__ = None
 
-    id = Column(Integer, ForeignKey('event.id', ondelete='CASCADE'),
+    id = Column(ForeignKey('event.id', ondelete='CASCADE'),
                 primary_key=True)
     rrule = Column(String(RECURRENCE_MAX_LEN))
     exdate = Column(Text)  # There can be a lot of exception dates
@@ -424,7 +425,7 @@ class RecurringEventOverride(Event):
     """ Represents an individual one-off instance of a recurring event,
         including cancelled events.
     """
-    id = Column(Integer, ForeignKey('event.id', ondelete='CASCADE'),
+    id = Column(ForeignKey('event.id', ondelete='CASCADE'),
                 primary_key=True)
     __mapper_args__ = {'polymorphic_identity': 'recurringeventoverride',
                        'inherit_condition': (id == Event.id)}
@@ -477,6 +478,17 @@ class InflatedEvent(Event):
         super(InflatedEvent, self).update(master)
         self.namespace_id = master.namespace_id
         self.calendar_id = master.calendar_id
+
+        # Our calendar autoimport code sometimes creates recurring events.
+        # When expanding those events, their inflated events are associated
+        # with an existing message. Because of this, SQLAlchemy tries
+        # to flush them, which we forbid.
+        # There's no real good way to prevent this, so we set to None
+        # the reference to message. API users can still look up
+        # the master event if they want to know the message associated with
+        # this recurring event.
+        self.message_id = None
+        self.message = None
 
 
 def insert_warning(mapper, connection, target):

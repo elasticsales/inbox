@@ -1,12 +1,13 @@
 #!/usr/bin/env python
 from gevent import monkey
 monkey.patch_all()
-import gevent
+
+import gevent_openssl
+gevent_openssl.monkey_patch()
 
 import os
 import socket
 import platform
-import signal
 import sys
 
 import click
@@ -22,21 +23,13 @@ except ImportError:
              "Try running sudo ./setup.sh")
 
 from inbox.util.startup import preflight
-from nylas.util.debug import Tracer
+from inbox.instrumentation import MetricsRunner
 from nylas.logging import get_logger, configure_logging
 from inbox.mailsync.service import SyncService
-
-sync_service = None
 
 # Set a default timeout for sockets.
 SOCKET_TIMEOUT = 2 * 60
 socket.setdefaulttimeout(SOCKET_TIMEOUT)
-
-
-def signal_handler(signum, frame):
-    print 'Signal handler called with signal', signum
-    sync_service.stop()
-    sys.stdout.flush()
 
 
 @click.command()
@@ -72,9 +65,6 @@ def main(prod, enable_tracer, config, process_num):
              total_processes=total_processes,
              recursion_limit=sys.getrecursionlimit())
 
-    # Catch SIGTERM so that we can gracefully exit
-    signal.signal(signal.SIGTERM, signal_handler)
-
     print >>sys.stderr, """\033[1;95m
       _   _       _
      | \ | |     | |
@@ -94,19 +84,11 @@ def main(prod, enable_tracer, config, process_num):
         print >>sys.stderr, "Feature flags enabled: {}\n".format(
             ' '.join(inbox_config['FEATURE_FLAGS']))
 
+    port = 16384 + process_num
+    enable_profiler = inbox_config.get('DEBUG_PROFILING_ON')
+    metrics_runner = MetricsRunner(port, enable_tracer, enable_profiler)
+    metrics_runner.start()
 
-    max_blocking_time = inbox_config.get('MAX_BLOCKING_TIME', 1.)
-
-    if enable_tracer and max_blocking_time:
-        tracer = Tracer(max_blocking_time=max_blocking_time, gather_stats=True)
-        tracer.start()
-
-    if inbox_config.get('DEBUG_PROFILING_ON'):
-        from inbox.util.profiling import run_profiler
-        port = 16384 + process_num
-        gevent.spawn(run_profiler, '0.0.0.0', port)
-
-    global sync_service
     sync_service = SyncService(process_num, total_processes)
     sync_service.run()
 

@@ -64,8 +64,8 @@ def patch_remote_save_draft(monkeypatch):
 
     saved_drafts = []
 
-    def mock_remote_save_draft(account, fname, message, db_sess, date=None):
-        saved_drafts.append((message, date))
+    def mock_remote_save_draft(account, message, db_sess):
+        saved_drafts.append(message)
 
     # Patch both, just in case
     monkeypatch.setattr('inbox.actions.backends.generic.remote_save_draft',
@@ -453,3 +453,12 @@ def test_contacts_updated(api_client):
 
     r = api_client.get_data('/threads?to=joe@example.com')
     assert len(r) == 1
+
+    # Check that contacts aren't created for garbage recipients.
+    r = api_client.post_data('/drafts',
+                             {'to': [{'name': 'who', 'email': 'nope'}]})
+    assert r.status_code == 200
+    r = api_client.get_data('/threads?to=nope')
+    assert len(r) == 0
+    r = api_client.get_data('/contacts?filter=nope')
+    assert len(r) == 0

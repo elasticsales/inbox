@@ -30,9 +30,8 @@ setup(
         "simplejson>=3.6.0",
         "icalendar>=3.8.2",
         "simplejson>=3.6.0",
-        "imapclient>=0.13",
+        "imapclient==1.0a0",
         "Flask>=0.10.1",
-        "futures>=2.1.3",
         "Flask-RESTful==0.3.2",
         "pynacl>=0.2.3",
         "flanker>=0.4.26",
@@ -41,9 +40,14 @@ setup(
         "vobject>=0.8.1c",
         "lxml>=3.4.2",
         "arrow==0.5.4",
-        "statsd>=3.1"
+        "statsd>=3.1",
+        "boto3>=1.1.4",
+        "Pympler==0.4.2"
     ],
-    dependency_links=[],
+    dependency_links=[
+        # TODO: remove this when IMAPClient 1.0 is out
+        "hg+https://bitbucket.org/mjs0/imapclient@d8ea261f28ee29#egg=imapclient-1.0a0",
+    ],
 
     include_package_data=True,
     package_data={
@@ -62,7 +66,6 @@ setup(
 
     scripts=['bin/inbox-start',
              'bin/inbox-console',
-             'bin/migrate-bodies',
              'bin/migrate-account',
              'bin/migrate-account-bulk',
              'bin/summary-stats',
@@ -71,13 +74,18 @@ setup(
              'bin/delete-account-data',
              'bin/alive-dead-metrics',
              'bin/create-db',
-             'bin/check-db',
+             'bin/create-test-db',
+             'bin/verify-db',
+             'bin/migrate-db',
              'bin/inbox-api',
              'bin/get-id',
              'bin/get-object',
+             'bin/set-throttled',
              'bin/syncback-service',
-             'bin/test_contact_groups',
-             'bin/migrate-tags'],
+             'bin/contact-search-service',
+             'bin/contact-search-backfill',
+             'bin/contact-search-delete-index',
+             ],
 
     # See:
     # https://pythonhosted.org/setuptools/setuptools.html#dynamic-discovery-of-services-and-plugins

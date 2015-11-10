@@ -6,8 +6,6 @@ also starts up the syncback service.)
 
 """
 import os
-import sys
-import signal
 from setproctitle import setproctitle
 setproctitle('inbox_syncback_service')
 
@@ -15,19 +13,14 @@ import click
 from gevent import monkey
 monkey.patch_all()
 
+import gevent_openssl
+gevent_openssl.monkey_patch()
+
 from nylas.logging import configure_logging
 
 from inbox.config import config as inbox_config
 from inbox.transactions.actions import SyncbackService
 from inbox.util.startup import preflight, load_overrides
-
-syncback = None
-
-
-def signal_handler(signum, frame):
-    print 'Signal handler called with signal', signum
-    syncback.stop()
-    sys.stdout.flush()
 
 
 @click.command()
@@ -42,6 +35,7 @@ def main(prod, config):
         config_path = os.path.abspath(config)
         load_overrides(config_path)
     configure_logging(log_level=inbox_config.get('LOGLEVEL'))
+    os.environ["SENTRY_DSN"] = inbox_config.get("SENTRY_DSN", "")
     if prod:
         start()
     else:
@@ -51,11 +45,6 @@ def main(prod, config):
 
 
 def start():
-    global syncback
-
-    # Catch SIGTERM so that we can gracefully exit
-    signal.signal(signal.SIGTERM, signal_handler)
-
     # Start the syncback service, and just hang out forever
     syncback = SyncbackService()
     syncback.start()

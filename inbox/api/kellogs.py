@@ -8,7 +8,8 @@ from flask import Response, g
 from inbox.models import (Message, Contact, Calendar, Event, When,
                           Thread, Namespace, Block, Category, Account)
 from inbox.models.backends.imap import ImapUid
-from inbox.models.event import RecurringEvent, RecurringEventOverride
+from inbox.models.event import (RecurringEvent, RecurringEventOverride,
+                                InflatedEvent)
 from nylas.logging import get_logger
 log = get_logger()
 
@@ -40,6 +41,15 @@ def encode_imapuid(imapuid):
         'extra_flags': imapuid.extra_flags,
         'g_labels': imapuid.g_labels,
     }
+
+def format_phone_numbers(phone_numbers):
+    formatted_phone_numbers = []
+    for number in phone_numbers:
+        formatted_phone_numbers.append({
+            'type': number.type,
+            'number': number.number,
+        })
+    return formatted_phone_numbers
 
 
 def encode(obj, namespace_public_id=None, expand=False, legacy_nsid=False):
@@ -130,7 +140,8 @@ def _encode(obj, namespace_public_id=None, expand=False, legacy_nsid=False):
             'email_address': obj.account.email_address,
             'name': obj.account.name,
             'provider': obj.account.provider,
-            'organization_unit': obj.account.category_type
+            'organization_unit': obj.account.category_type,
+            'sync_state': obj.account.sync_state
         }
 
     elif isinstance(obj, Account) and not legacy_nsid:
@@ -146,11 +157,7 @@ def _encode(obj, namespace_public_id=None, expand=False, legacy_nsid=False):
             'organization_unit': obj.category_type,
 
             'provider': obj.provider,
-
-            # TODO add capabilities/scope (i.e. mail, contacts, cal, etc.)
-
-            # 'status':  'syncing',  # TODO what are values here
-            # 'last_sync':  1398790077,  # tuesday 4/29
+            'sync_state': obj.sync_state
         }
 
     elif isinstance(obj, Message):
@@ -302,7 +309,8 @@ def _encode(obj, namespace_public_id=None, expand=False, legacy_nsid=False):
             'object': 'contact',
             public_id_key_name: _get_namespace_public_id(obj),
             'name': obj.name,
-            'email': obj.email_address
+            'email': obj.email_address,
+            'phone_numbers': format_phone_numbers(obj.phone_numbers)
         }
 
     elif isinstance(obj, Event):
@@ -333,6 +341,11 @@ def _encode(obj, namespace_public_id=None, expand=False, legacy_nsid=False):
                                                  legacy_nsid=legacy_nsid)
             if obj.master:
                 resp['master_event_id'] = obj.master.public_id
+        if isinstance(obj, InflatedEvent):
+            del resp['message_id']
+            if obj.master:
+                resp['master_event_id'] = obj.master.public_id
+
         return resp
 
     elif isinstance(obj, Calendar):
@@ -366,8 +379,15 @@ def _encode(obj, namespace_public_id=None, expand=False, legacy_nsid=False):
             # if obj is actually a message attachment (and not merely an
             # uploaded file), set additional properties
             resp.update({
-                'message_ids': [p.message.public_id for p in obj.parts]
-            })
+                'message_ids': [p.message.public_id for p in obj.parts]})
+
+            content_ids = list({p.content_id for p in obj.parts
+                                if p.content_id is not None})
+            content_id = None
+            if len(content_ids) > 0:
+                content_id = content_ids[0]
+
+            resp.update({'content_id': content_id})
 
         return resp
 

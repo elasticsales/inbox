@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, Boolean
+from sqlalchemy import Column, String, ForeignKey, Boolean
 from sqlalchemy.orm import relationship
 
 from inbox.models.backends.imap import ImapAccount
@@ -8,7 +8,7 @@ PROVIDER = 'generic'
 
 
 class GenericAccount(ImapAccount):
-    id = Column(Integer, ForeignKey(ImapAccount.id, ondelete='CASCADE'),
+    id = Column(ForeignKey(ImapAccount.id, ondelete='CASCADE'),
                 primary_key=True)
 
     provider = Column(String(64))
@@ -19,10 +19,11 @@ class GenericAccount(ImapAccount):
     smtp_username = Column(String(255), nullable=True)
 
     # Secret
-    password_id = Column(Integer, ForeignKey(Secret.id, ondelete='CASCADE'),
+    password_id = Column(ForeignKey(Secret.id, ondelete='CASCADE'),
                          nullable=False)
     secret = relationship('Secret', cascade='all, delete-orphan',
-                          single_parent=True, uselist=False)
+                          single_parent=True, uselist=False,
+                          lazy='joined')
 
     __mapper_args__ = {'polymorphic_identity': 'genericaccount'}
 

@@ -16,7 +16,7 @@ TEST_YAHOO_EMAIL = "inboxapptest1@yahoo.com"
 @pytest.fixture
 def yahoo_account(db):
     account = GenericAuthHandler('yahoo').create_account(
-        db.session, TEST_YAHOO_EMAIL,
+        TEST_YAHOO_EMAIL,
         {"email": TEST_YAHOO_EMAIL, "password": "BLAH"})
     db.session.add(account)
     db.session.commit()
@@ -29,9 +29,8 @@ def raise_folder_error(*args, **kwargs):
 
 @pytest.fixture
 def sync_engine_stub(db, yahoo_account):
-    engine = FolderSyncEngine(yahoo_account.id, "Inbox", 0,
-                              TEST_YAHOO_EMAIL, "yahoo",
-                              None)
+    engine = FolderSyncEngine(yahoo_account.id, yahoo_account.namespace.id,
+                              "Inbox", 0, TEST_YAHOO_EMAIL, "yahoo", None)
 
     return engine
 
@@ -67,7 +66,7 @@ def test_folder_monitor_handles_mailsync_done(yahoo_account, monkeypatch):
     folders = [('missing_folder', 0)]
     monitor.prepare_sync = lambda: folders
     # Try to start a sync engine for this folder. It should exit.
-    monitor.start_new_folder_sync_engines(set())
+    monitor.start_new_folder_sync_engines()
     assert len(monitor.folder_monitors) == 0
 
     # Note: it currently looks like ImapFolderMonitor doesn't have a good

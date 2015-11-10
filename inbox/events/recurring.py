@@ -4,6 +4,7 @@ from dateutil.rrule import (rrulestr, rrule, rruleset,
 
 from inbox.models.event import RecurringEvent, RecurringEventOverride
 from inbox.events.util import parse_rrule_datetime
+from timezones import timezones_table
 
 from nylas.logging import get_logger
 log = get_logger()
@@ -59,10 +60,10 @@ def parse_rrule(event):
         else:
             start = event.start.datetime
         try:
-            rrule = rrulestr(event.rrule, dtstart=start,
+            rule = rrulestr(event.rrule, dtstart=start,
                              compatible=True)
 
-            return rrule
+            return rule
         except Exception as e:
             log.error("Error parsing RRULE entry", event_id=event.id,
                       error=e, exc_info=True)
@@ -96,7 +97,14 @@ def get_start_times(event, start=None, end=None):
     if isinstance(event, RecurringEvent):
         # Localize first so that expansion covers DST
         if event.start_timezone:
-            event.start = event.start.to(event.start_timezone)
+            # FIXME @karim: This hotfix was added because of
+            # https://phab.nylas.com/T3612. Remove it after
+            # running the timezones migration.
+            tz = event.start_timezone
+            if tz in timezones_table:
+                tz = timezones_table[tz]
+
+            event.start = event.start.to(tz)
 
         if not start:
             start = event.start

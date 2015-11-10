@@ -24,7 +24,6 @@ class Contact(MailSyncBase, HasRevisions, HasPublicID, HasEmailAddress):
     provider_name = Column(String(64))
 
     name = Column(Text)
-    # phone_number = Column(String(64))
 
     raw_data = Column(Text)
 
@@ -46,12 +45,28 @@ class Contact(MailSyncBase, HasRevisions, HasPublicID, HasEmailAddress):
     def validate_length(self, key, value):
         return value if value is None else value[:MAX_TEXT_LENGTH]
 
+    @property
+    def versioned_relationships(self):
+        return ['phone_numbers']
+
     def merge_from(self, new_contact):
         # This must be updated when new fields are added to the class.
         merge_attrs = ['name', 'email_address', 'raw_data']
         for attr in merge_attrs:
             if getattr(self, attr) != getattr(new_contact, attr):
                 setattr(self, attr, getattr(new_contact, attr))
+
+
+class PhoneNumber(MailSyncBase):
+    STRING_LENGTH = 64
+
+    contact_id = Column(ForeignKey(Contact.id, ondelete='CASCADE'), index=True)
+    contact = relationship(Contact,
+                           backref=backref('phone_numbers',
+                                           cascade='all, delete-orphan'))
+
+    type = Column(String(STRING_LENGTH), nullable=True)
+    number = Column(String(STRING_LENGTH), nullable=False)
 
 
 class MessageContactAssociation(MailSyncBase):
@@ -66,9 +81,9 @@ class MessageContactAssociation(MailSyncBase):
     [assoc.message for assoc in c.message_associations if assoc.field ==
     ...  'to_addr']
     """
-    contact_id = Column(Integer, ForeignKey(Contact.id, ondelete='CASCADE'),
+    contact_id = Column(ForeignKey(Contact.id, ondelete='CASCADE'),
                         primary_key=True)
-    message_id = Column(Integer, ForeignKey(Message.id, ondelete='CASCADE'),
+    message_id = Column(ForeignKey(Message.id, ondelete='CASCADE'),
                         primary_key=True)
     field = Column(Enum('from_addr', 'to_addr', 'cc_addr', 'bcc_addr', 'reply_to'))
     # Note: The `cascade` properties need to be a parameter of the backref

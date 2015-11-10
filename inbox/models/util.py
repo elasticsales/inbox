@@ -83,12 +83,12 @@ def delete_namespace(account_id, namespace_id, dry_run=False):
     """
     from inbox.models.session import session_scope
     from inbox.models import Account
-    from inbox.ignition import main_engine
+    from inbox.ignition import engine_manager
 
     # Bypass the ORM for performant bulk deletion;
     # we do /not/ want Transaction records created for these deletions,
     # so this is okay.
-    engine = main_engine()
+    engine = engine_manager.get_for_id(namespace_id)
 
     # Chunk delete for tables that might have a large concurrent write volume
     # to prevent those transactions from blocking.
@@ -101,7 +101,7 @@ def delete_namespace(account_id, namespace_id, dry_run=False):
                   'contact', 'event', 'dataprocessingcache']:
         filters[table] = ('namespace_id', namespace_id)
 
-    with session_scope() as db_session:
+    with session_scope(namespace_id) as db_session:
         account = db_session.query(Account).get(account_id)
         if account.discriminator != 'easaccount':
             filters['imapuid'] = ('account_id', account_id)
@@ -145,7 +145,7 @@ def delete_namespace(account_id, namespace_id, dry_run=False):
 
     # Delete the account object manually to get rid of the various objects
     # associated with it (e.g: secrets, tokens, etc.)
-    with session_scope() as db_session:
+    with session_scope(account_id) as db_session:
         account = db_session.query(Account).get(account_id)
         if dry_run is False:
             db_session.delete(account)
@@ -170,10 +170,9 @@ def _batch_delete(engine, table, (column, id_), dry_run=False):
     query = 'DELETE FROM {} WHERE {}={} LIMIT 1000;'.format(table, column, id_)
 
     for i in range(0, batches):
+        print query
         if dry_run is False:
             engine.execute(query)
-        else:
-            print query
 
     end = time.time()
     print 'Completed batch deletion for table: {}, time taken: {}'.\

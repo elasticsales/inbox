@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 from gevent import monkey; monkey.patch_all()
+import gevent_openssl; gevent_openssl.monkey_patch()
 import sys
 import click
 from setproctitle import setproctitle; setproctitle('inbox-auth')
@@ -20,11 +21,15 @@ configure_logging(config.get('LOGLEVEL'))
 @click.argument('email_address')
 @click.option('--reauth', is_flag=True,
               help='Re-authenticate an account even if it already exists')
-def main(email_address, reauth):
+@click.option('--target', type=int, default=0,
+              help='Database shard id to target for the account')
+def main(email_address, reauth, target):
     """ Auth an email account. """
     preflight()
 
-    with session_scope() as db_session:
+    shard_id = target << 48
+
+    with session_scope(shard_id) as db_session:
         account = db_session.query(Account).filter_by(
             email_address=email_address).first()
         if account is not None and not reauth:
@@ -42,8 +47,7 @@ def main(email_address, reauth):
         auth_handler = handler_from_provider(provider)
         auth_info.update(auth_handler.interactive_auth(email_address))
 
-        account = auth_handler.create_account(db_session, email_address,
-                                              auth_info)
+        account = auth_handler.create_account(email_address, auth_info)
 
         try:
             if auth_handler.verify_account(account):

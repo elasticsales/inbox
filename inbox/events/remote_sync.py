@@ -56,7 +56,7 @@ class EventSync(BaseSyncMonitor):
             self.log.warning(
                 'Access to provider calendar API not enabled; bypassing sync')
             return
-        with session_scope() as db_session:
+        with session_scope(self.namespace_id) as db_session:
             handle_calendar_deletes(self.namespace_id, deleted_uids,
                                     self.log, db_session)
             calendar_uids_and_ids = handle_calendar_updates(self.namespace_id,
@@ -69,14 +69,14 @@ class EventSync(BaseSyncMonitor):
             # Get a timestamp before polling, so that we don't subsequently
             # miss remote updates that happen while the poll loop is executing.
             sync_timestamp = datetime.utcnow()
-            with session_scope() as db_session:
+            with session_scope(self.namespace_id) as db_session:
                 last_sync = db_session.query(Calendar.last_synced).filter(
                     Calendar.id == id_).scalar()
 
             event_changes = self.provider.sync_events(
                 uid, sync_from_time=last_sync)
 
-            with session_scope() as db_session:
+            with session_scope(self.namespace_id) as db_session:
                 handle_event_updates(self.namespace_id, id_, event_changes,
                                      self.log, db_session)
                 cal = db_session.query(Calendar).get(id_)
@@ -186,7 +186,7 @@ def handle_event_updates(namespace_id, calendar_id, events, log, db_session):
             link_events(db_session, event)
 
         # Batch commits to avoid long transactions that may lock calendar rows.
-        if (added_count + updated_count) % 1000 == 0:
+        if (added_count + updated_count) % 10 == 0:
             db_session.commit()
 
     log.info('synced added and updated events',
@@ -230,7 +230,7 @@ class GoogleEventSync(EventSync):
 
     def _refresh_gpush_subscriptions(self):
 
-        with session_scope() as db_session:
+        with session_scope(self.namespace_id) as db_session:
             account = db_session.query(Account).get(self.account_id)
 
             if not self.provider.push_notifications_enabled(account):
@@ -260,7 +260,7 @@ class GoogleEventSync(EventSync):
                         raise exc
 
     def _sync_data(self):
-        with session_scope() as db_session:
+        with session_scope(self.namespace_id) as db_session:
 
             account = db_session.query(Account).get(self.account_id)
             if account.should_update_calendars(MAX_TIME_WITHOUT_SYNC):

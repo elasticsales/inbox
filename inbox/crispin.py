@@ -32,13 +32,16 @@ import gevent
 from gevent import socket
 from gevent.lock import BoundedSemaphore
 from gevent.queue import Queue
+from sqlalchemy.orm import joinedload
 
 from inbox.util.concurrency import retry
 from inbox.util.itert import chunk
 from inbox.util.misc import or_none
 from inbox.basicauth import GmailSettingError
 from inbox.models.session import session_scope
-from inbox.models.account import Account
+from inbox.models.backends.imap import ImapAccount
+from inbox.models.backends.generic import GenericAccount
+from inbox.models.backends.gmail import GmailAccount
 from nylas.logging import get_logger
 log = get_logger()
 
@@ -71,7 +74,8 @@ def _get_connection_pool(account_id, pool_size, pool_map, readonly):
     with _lock_map[account_id]:
         if account_id not in pool_map:
             pool_map[account_id] = CrispinConnectionPool(
-                account_id, num_connections=pool_size, readonly=readonly)
+                account_id, num_connections=pool_size,
+                readonly=readonly)
         return pool_map[account_id]
 
 
@@ -159,7 +163,7 @@ class CrispinConnectionPool(object):
                     client.logout()
                 except Exception:
                     log.info('Error on IMAP logout', exc_info=True)
-                client = None
+            client = None
             raise exc
         except:
             raise
@@ -168,9 +172,10 @@ class CrispinConnectionPool(object):
             self._sem.release()
 
     def _set_account_info(self):
-        with session_scope() as db_session:
-            account = db_session.query(Account).get(self.account_id)
+        with session_scope(self.account_id) as db_session:
+            account = db_session.query(ImapAccount).get(self.account_id)
             self.sync_state = account.sync_state
+            self.provider = account.provider
             self.provider_info = account.provider_info
             self.email_address = account.email_address
             self.auth_handler = account.auth_handler
@@ -181,23 +186,31 @@ class CrispinConnectionPool(object):
 
     def _new_raw_connection(self):
         """Returns a new, authenticated IMAPClient instance for the account."""
-        with session_scope() as db_session:
-            account = db_session.query(Account).get(self.account_id)
-            conn = self.auth_handler.connect_account(account)
-
-            if account.debug:
-                def _log(text):
-                    log.debug('imap_log',
-                             conn=id(conn),
-                             account_id=self.account_id,
-                             text=text)
-
-                conn.debug = 4
-                conn._imap._mesg = _log
+        with session_scope(self.account_id) as db_session:
+            if self.provider == 'gmail':
+                account = db_session.query(GmailAccount).options(
+                    joinedload(GmailAccount.auth_credentials)).get(
+                    self.account_id)
             else:
-                conn.debug = False
+                account = db_session.query(GenericAccount).options(
+                    joinedload(GenericAccount.secret)).get(self.account_id)
+            db_session.expunge(account)
 
-            return conn
+        conn = self.auth_handler.connect_account(account)
+
+        if account.debug:
+            def _log(text):
+                log.debug('imap_log',
+                         conn=id(conn),
+                         account_id=self.account_id,
+                         text=text)
+
+            conn.debug = 4
+            conn._imap._mesg = _log
+        else:
+            conn.debug = False
+
+        return conn
 
     def _new_connection(self):
         conn = self._new_raw_connection()
@@ -646,48 +659,43 @@ class CrispinClient(object):
 
         return results
 
-    def delete_draft(self, inbox_uid, message_id_header):
+    def delete_draft(self, message_id_header):
         """
-        Delete a draft, as identified either by its X-Inbox-Id or by its
-        Message-Id header. We first delete the message from the Drafts folder,
+        Delete a draft, as identified by its Message-Id header. We first delete
+        the message from the Drafts folder,
         and then also delete it from the Trash folder if necessary.
 
         """
+        log.info('Trying to delete draft', message_id_header=message_id_header)
         drafts_folder_name = self.folder_names()['drafts'][0]
         self.conn.select_folder(drafts_folder_name)
-        self._delete_message(inbox_uid, message_id_header)
+        draft_deleted = self._delete_message(message_id_header)
+        if draft_deleted:
+            trash_folder_name = self.folder_names()['trash'][0]
+            self.conn.select_folder(trash_folder_name)
+            self._delete_message(message_id_header)
+        return draft_deleted
 
-        trash_folder_name = self.folder_names()['trash'][0]
-        self.conn.select_folder(trash_folder_name)
-        self._delete_message(inbox_uid, message_id_header)
-
-    def _delete_message(self, inbox_uid, message_id_header):
+    def _delete_message(self, message_id_header):
         """
-        Delete a message from the selected folder, using either the X-Inbox-Id
-        header or the Message-Id header to locate it. Does nothing if no
-        matching messages are found, or if more than one matching message is
-        found.
+        Delete a message from the selected folder, using the Message-Id header
+        to locate it. Does nothing if no matching messages are found, or if
+        more than one matching message is found.
 
         """
-        assert inbox_uid or message_id_header, 'Need at least one header'
-        if inbox_uid:
-            matching_uids = self.find_by_header('X-Inbox-Id', inbox_uid)
-        else:
-            matching_uids = self.find_by_header('Message-Id',
-                                                message_id_header)
+        matching_uids = self.find_by_header('Message-Id', message_id_header)
         if not matching_uids:
             log.error('No remote messages found to delete',
-                      inbox_uid=inbox_uid,
                       message_id_header=message_id_header)
-            return
+            return False
         if len(matching_uids) > 1:
             log.error('Multiple remote messages found to delete',
-                      inbox_uid=inbox_uid,
                       message_id_header=message_id_header,
                       uids=matching_uids)
-            return
+            return False
         self.conn.delete_messages(matching_uids)
         self.conn.expunge()
+        return True
 
     def logout(self):
         self.conn.logout()
@@ -696,7 +704,6 @@ class CrispinClient(object):
         """Idle for up to `timeout` seconds. Make sure we take the connection
         back out of idle mode so that we can reuse this connection in another
         context."""
-        log.info('Idling', timeout=timeout)
         self.conn.idle()
         try:
             with self._restore_timeout():
@@ -782,7 +789,8 @@ class GmailCrispinClient(CrispinClient):
         """
         data = self.conn.fetch(uids, ['FLAGS', 'X-GM-LABELS'])
         uid_set = set(uids)
-        return {uid: GmailFlags(ret['FLAGS'], ret['X-GM-LABELS'])
+        return {uid: GmailFlags(ret['FLAGS'],
+                                self._decode_labels(ret['X-GM-LABELS']))
                 for uid, ret in data.items() if uid in uid_set}
 
     def condstore_changed_flags(self, modseq):
@@ -800,7 +808,8 @@ class GmailCrispinClient(CrispinClient):
                 if not data_for_uid:
                     continue
                 ret = data_for_uid[uid]
-            results[uid] = GmailFlags(ret['FLAGS'], ret['X-GM-LABELS'])
+            results[uid] = GmailFlags(ret['FLAGS'],
+                                      self._decode_labels(ret['X-GM-LABELS']))
         return results
 
     def g_msgids(self, uids):
@@ -915,13 +924,14 @@ class GmailCrispinClient(CrispinClient):
             if uid not in uid_set:
                 continue
             msg = raw_messages[uid]
-            messages.append(RawMessage(uid=long(uid),
-                                       internaldate=msg['INTERNALDATE'],
-                                       flags=msg['FLAGS'],
-                                       body=msg['BODY[]'],
-                                       g_thrid=long(msg['X-GM-THRID']),
-                                       g_msgid=long(msg['X-GM-MSGID']),
-                                       g_labels=msg['X-GM-LABELS']))
+            messages.append(
+                RawMessage(uid=long(uid),
+                           internaldate=msg['INTERNALDATE'],
+                           flags=msg['FLAGS'],
+                           body=msg['BODY[]'],
+                           g_thrid=long(msg['X-GM-THRID']),
+                           g_msgid=long(msg['X-GM-MSGID']),
+                           g_labels=self._decode_labels(msg['X-GM-LABELS'])))
         return messages
 
     def g_metadata(self, uids):
@@ -958,10 +968,12 @@ class GmailCrispinClient(CrispinClient):
         list
         """
         uids = [long(uid) for uid in
-                self.conn.search('X-GM-THRID {}'.format(g_thrid))]
+                self.conn.search(['X-GM-THRID', g_thrid])]
         # UIDs ascend over time; return in order most-recent first
         return sorted(uids, reverse=True)
 
     def find_by_header(self, header_name, header_value):
-        criteria = ['HEADER {} {}'.format(header_name, header_value)]
-        return self.conn.search(criteria)
+        return self.conn.search(['HEADER', header_name, header_value])
+
+    def _decode_labels(self, labels):
+        return map(imapclient.imap_utf7.decode, labels)

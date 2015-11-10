@@ -1,7 +1,6 @@
-from sqlalchemy import Column, Integer, String, ForeignKey
-from sqlalchemy.orm import relationship, backref
+from sqlalchemy import Column, String, ForeignKey
+from sqlalchemy.orm import relationship, backref, validates
 from sqlalchemy.schema import UniqueConstraint
-from sqlalchemy.orm.exc import NoResultFound, MultipleResultsFound
 
 from inbox.models.base import MailSyncBase
 from inbox.models.category import Category
@@ -15,8 +14,7 @@ class Label(MailSyncBase):
     # TOFIX this causes an import error due to circular dependencies
     # from inbox.models.account import Account
     # `use_alter` required here to avoid circular dependency w/Account
-    account_id = Column(Integer,
-                        ForeignKey('account.id', use_alter=True,
+    account_id = Column(ForeignKey('account.id', use_alter=True,
                                    name='label_fk1',
                                    ondelete='CASCADE'), nullable=False)
     account = relationship(
@@ -32,11 +30,21 @@ class Label(MailSyncBase):
                   nullable=False)
     canonical_name = Column(String(MAX_LABEL_NAME_LENGTH), nullable=True)
 
-    category_id = Column(Integer, ForeignKey(Category.id, ondelete='CASCADE'))
+    category_id = Column(ForeignKey(Category.id, ondelete='CASCADE'))
     category = relationship(
         Category,
         backref=backref('labels',
                         cascade='all, delete-orphan'))
+
+    @validates('name')
+    def sanitize_name(self, key, name):
+        name = unicode(name)
+        name = name.rstrip()
+        if len(name) > MAX_LABEL_NAME_LENGTH:
+            log.warning("Truncating label name for account {}; original name "
+                        "was '{}'".format(self.account_id, name))
+            name = name[:MAX_LABEL_NAME_LENGTH]
+        return name
 
     @classmethod
     def find_or_create(cls, session, account, name, role=None):

@@ -1,7 +1,39 @@
 {
-"MYSQL_DATABASE": "inbox",
-"MYSQL_HOSTNAME": "localhost",
-"MYSQL_PORT": 3306,
+"DATABASE_HOSTS": [
+    {
+        "HOSTNAME": "localhost",
+        "PORT": 3306,
+        "SHARDS": [
+            {
+                "ID": 0,
+                "SCHEMA_NAME": "inbox",
+                "OPEN": true
+            },
+            {
+                "ID": 1,
+                "SCHEMA_NAME": "inbox_1",
+                "OPEN": true
+            }
+        ]
+    },
+    {
+        "HOSTNAME": "127.0.0.1",
+        "PORT": 3306,
+        "SHARDS": [
+            {
+                "ID": 2,
+                "SCHEMA_NAME": "inbox_2",
+                "OPEN": true
+            },
+            {
+                "ID": 3,
+                "SCHEMA_NAME": "inbox_3",
+                "OPEN": true,
+                "DISABLED": true
+            }
+        ]
+    }
+],
 
 "SYNC_STEAL_ACCOUNTS": true,
 
@@ -30,8 +62,6 @@
 "EMAIL_EXCEPTIONS": false,
 "ENCRYPT_SECRETS": false,
 "DEBUG_CONSOLE_ON": true,
-
-"ELASTICSEARCH_HOSTS": [{"host": "localhost", "port": 9200}],
 
 "FEATURE_FLAGS": "ical_autoimport"
 }

@@ -5,14 +5,13 @@ from sqlalchemy.orm.exc import NoResultFound
 from inbox.basicauth import ValidationError
 from nylas.logging import get_logger
 from inbox.crispin import retry_crispin, connection_pool
-from inbox.models import Account, Folder
+from inbox.models import Account, Folder, Category
 from inbox.models.constants import MAX_FOLDER_NAME_LENGTH
 from inbox.models.session import session_scope
 from inbox.mailsync.backends.base import BaseMailSyncMonitor
 from inbox.mailsync.backends.base import (MailsyncError,
-                                          thread_polling, thread_finished)
+                                          thread_polling)
 from inbox.mailsync.backends.imap.generic import FolderSyncEngine
-from inbox.heartbeat.status import clear_heartbeat_status
 from inbox.mailsync.gc import DeleteHandler
 log = get_logger()
 
@@ -37,6 +36,7 @@ class ImapSyncMonitor(BaseMailSyncMonitor):
         self.sync_engine_class = FolderSyncEngine
 
         self.folder_monitors = Group()
+        self.delete_handler = None
 
         BaseMailSyncMonitor.__init__(self, account, heartbeat)
 
@@ -56,7 +56,7 @@ class ImapSyncMonitor(BaseMailSyncMonitor):
         list of tuples (folder_name, folder_id) for each folder we want to sync
         (in order).
         """
-        with session_scope() as db_session:
+        with session_scope(self.namespace_id) as db_session:
             with connection_pool(self.account_id).get() as crispin_client:
                 self.sync_engine_class = self.get_sync_engine_class(
                                             crispin_client)
@@ -78,7 +78,7 @@ class ImapSyncMonitor(BaseMailSyncMonitor):
                 except NoResultFound:
                     log.error('Missing Folder object when starting sync',
                               folder_name=folder_name)
-                    raise MailsyncError("Missing Folder '{}' on account {}"
+                    raise MailsyncError(u"Missing Folder '{}' on account {}"
                                         .format(folder_name, self.account_id))
             return sync_folder_names_ids
 
@@ -119,7 +119,10 @@ class ImapSyncMonitor(BaseMailSyncMonitor):
         for name in discard:
             log.info('Folder deleted from remote', account_id=self.account_id,
                      name=name)
-            db_session.delete(local_folders[name])
+            cat = db_session.query(Category).get(
+                local_folders[name].category_id)
+            if cat is not None:
+                db_session.delete(cat)
             del local_folders[name]
 
         # Create new folders
@@ -134,69 +137,55 @@ class ImapSyncMonitor(BaseMailSyncMonitor):
 
         db_session.commit()
 
-    def start_new_folder_sync_engines(self, folders=set()):
-        new_folders = [f for f in self.prepare_sync() if f not in folders]
-        for folder_name, folder_id in new_folders:
-            log.info('Folder sync engine started',
-                     account_id=self.account_id,
-                     folder_id=folder_id,
-                     folder_name=folder_name)
-            thread = self.sync_engine_class(self.account_id,
-                                            folder_name,
-                                            folder_id,
-                                            self.email_address,
-                                            self.provider_name,
-                                            self.syncmanager_lock)
-            self.folder_monitors.start(thread)
-            while not thread_polling(thread) and \
-                    not thread_finished(thread) and \
-                    not thread.ready():
+    def start_new_folder_sync_engines(self):
+        running_monitors = {monitor.folder_id: monitor for monitor in
+                            self.folder_monitors}
+        for folder_name, folder_id in self.prepare_sync():
+            if folder_id in running_monitors:
+                thread = running_monitors[folder_id]
+            else:
+                log.info('Folder sync engine started',
+                         account_id=self.account_id,
+                         folder_id=folder_id,
+                         folder_name=folder_name)
+                thread = self.sync_engine_class(self.account_id,
+                                                self.namespace_id,
+                                                folder_name,
+                                                folder_id,
+                                                self.email_address,
+                                                self.provider_name,
+                                                self.syncmanager_lock)
+                self.folder_monitors.start(thread)
+            while not thread_polling(thread) and not thread.ready():
                 sleep(self.heartbeat)
 
-            # allow individual folder sync monitors to shut themselves down
-            # after completing the initial sync
-            if thread_finished(thread) or thread.ready():
-                if thread.exception:
-                    # Exceptions causing the folder sync to exit should not
-                    # clear the heartbeat.
-                    log.info('Folder sync engine exited with error',
-                             account_id=self.account_id,
-                             folder_id=folder_id,
-                             folder_name=folder_name,
-                             error=thread.exception)
-                else:
-                    log.info('Folder sync engine finished',
-                             account_id=self.account_id,
-                             folder_id=folder_id,
-                             folder_name=folder_name)
-                    # clear the heartbeat for this folder-thread since it
-                    # exited cleanly.
-                    clear_heartbeat_status(self.account_id, folder_id)
-
-                # note: thread is automatically removed from
-                # self.folder_monitors
-            else:
-                folders.add((folder_name, folder_id))
+            if thread.ready():
+                log.info('Folder sync engine exited',
+                         account_id=self.account_id,
+                         folder_id=folder_id,
+                         folder_name=folder_name,
+                         error=thread.exception)
 
     def start_delete_handler(self):
-        self.delete_handler = DeleteHandler(account_id=self.account_id,
-                                            namespace_id=self.namespace_id,
-                                            uid_accessor=lambda m: m.imapuids)
-        self.delete_handler.start()
+        if self.delete_handler is None:
+            self.delete_handler = DeleteHandler(
+                account_id=self.account_id,
+                namespace_id=self.namespace_id,
+                uid_accessor=lambda m: m.imapuids)
+            self.delete_handler.start()
 
     def sync(self):
         try:
             self.start_delete_handler()
-            folders = set()
-            self.start_new_folder_sync_engines(folders)
+            self.start_new_folder_sync_engines()
             while True:
                 sleep(self.refresh_frequency)
-                self.start_new_folder_sync_engines(folders)
+                self.start_new_folder_sync_engines()
         except ValidationError as exc:
             log.error(
                 'Error authenticating; stopping sync', exc_info=True,
                 account_id=self.account_id, logstash_tag='mark_invalid')
-            with session_scope() as db_session:
+            with session_scope(self.namespace_id) as db_session:
                 account = db_session.query(Account).get(self.account_id)
                 account.mark_invalid()
                 account.update_sync_error(str(exc))

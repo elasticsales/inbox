@@ -47,7 +47,7 @@ class Message(MailSyncBase, HasRevisions, HasPublicID):
         load_on_pending=True)
 
     # Do delete messages if their associated thread is deleted.
-    thread_id = Column(Integer, ForeignKey('thread.id', ondelete='CASCADE'),
+    thread_id = Column(ForeignKey('thread.id', ondelete='CASCADE'),
                        nullable=False)
     thread = relationship(
         'Thread',
@@ -150,8 +150,7 @@ class Message(MailSyncBase, HasRevisions, HasPublicID):
     # Whether this draft is a reply to an existing thread.
     is_reply = Column(Boolean)
 
-    reply_to_message_id = Column(Integer, ForeignKey('message.id'),
-                                 nullable=True)
+    reply_to_message_id = Column(ForeignKey('message.id'), nullable=True)
     reply_to_message = relationship('Message', uselist=False)
 
     def mark_for_deletion(self):
@@ -236,7 +235,7 @@ class Message(MailSyncBase, HasRevisions, HasPublicID):
                     msg._parse_mimepart(mid, mimepart, account.namespace.id,
                                         html_parts, plain_parts)
                 except (mime.DecodingError, AttributeError, RuntimeError,
-                        TypeError, binascii.Error) as e:
+                        TypeError, binascii.Error, UnicodeDecodeError) as e:
                     log.error('Error parsing message MIME parts',
                               folder_name=folder_name, account_id=account.id,
                               error=e)
@@ -278,7 +277,15 @@ class Message(MailSyncBase, HasRevisions, HasPublicID):
         self.bcc_addr = parse_mimepart_address_header(parsed, 'Bcc')
 
         self.in_reply_to = parsed.headers.get('In-Reply-To')
+
+        # The RFC mandates that the Message-Id header must be at most 998
+        # characters. Sadly, not everybody follows specs.
         self.message_id_header = parsed.headers.get('Message-Id')
+        if self.message_id_header and len(self.message_id_header) > 998:
+            self.message_id_header = self.message_id_header[:998]
+            log.warning('Message-Id header too long. Truncating',
+                        parsed.headers.get('Message-Id'),
+                        logstash_tag='truncated_message_id')
 
         self.received_date = received_date if received_date else \
             get_internaldate(parsed.headers.get('Date'),
@@ -565,10 +572,14 @@ Index('ix_message_namespace_id_message_id_header', Message.namespace_id,
 Index('ix_message_namespace_id_is_created', Message.namespace_id,
       Message.is_created)
 
+Index('ix_message_namespace_id_message_id_header_subject',
+      Message.namespace_id, Message.subject, Message.message_id_header,
+      mysql_length={'subject': 191, 'message_id_header': 191})
+
 
 class MessageCategory(MailSyncBase):
     """ Mapping between messages and categories. """
-    message_id = Column(Integer, ForeignKey(Message.id, ondelete='CASCADE'),
+    message_id = Column(ForeignKey(Message.id, ondelete='CASCADE'),
                         nullable=False)
     message = relationship(
         'Message',
@@ -576,7 +587,7 @@ class MessageCategory(MailSyncBase):
                         collection_class=set,
                         cascade='all, delete-orphan'))
 
-    category_id = Column(Integer, ForeignKey(Category.id, ondelete='CASCADE'),
+    category_id = Column(ForeignKey(Category.id, ondelete='CASCADE'),
                          nullable=False)
     category = relationship(
         Category,

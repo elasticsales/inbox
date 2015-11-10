@@ -1,6 +1,5 @@
-import os
 import base64
-import email.header
+import os
 import uuid
 import gevent
 import time
@@ -34,26 +33,27 @@ from inbox.contacts.algorithms import (calculate_contact_scores,
                                        calculate_group_scores,
                                        calculate_group_counts, is_stale)
 import inbox.contacts.crud
+from inbox.contacts.search import ContactSearchClient
 from inbox.sendmail.base import (create_message_from_json, update_draft,
                                  delete_draft, create_draft_from_mime,
                                  SendMailException)
 from nylas.logging import get_logger
+from inbox.ignition import engine_manager
 from inbox.models.action_log import schedule_action
 from inbox.models.session import new_session, session_scope
-from inbox.search.base import get_search_client
+from inbox.search.base import get_search_client, SearchBackendException
 from inbox.transactions import delta_sync
 from inbox.api.err import err, APIException, NotFoundError, InputError
 from inbox.events.ical import (generate_icalendar_invite, send_invite,
                                generate_rsvp, send_rsvp)
 
 
-from inbox.ignition import main_engine
-engine = main_engine()
 log = get_logger()
 
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 1000
 LONG_POLL_REQUEST_TIMEOUT = 120
+SEND_TIMEOUT = 60
 
 app = Blueprint(
     'namespace_api',
@@ -85,7 +85,7 @@ if config.get('DEBUG_PROFILING_ON'):
 @app.url_value_preprocessor
 def pull_lang_code(endpoint, values):
     if 'namespace_public_id' in values:
-        g.namespace_public_id = values.pop('namespace_public_id')
+        values.pop('namespace_public_id')
         g.legacy_nsid = True
     else:
         g.legacy_nsid = False
@@ -93,29 +93,17 @@ def pull_lang_code(endpoint, values):
 
 @app.before_request
 def start():
+    engine = engine_manager.get_for_id(g.namespace_id)
     g.db_session = new_session(engine)
-    try:
-        valid_public_id(g.namespace_public_id)
-        g.namespace = Namespace.from_public_id(g.namespace_public_id,
-                                               g.db_session)
-
-        g.encoder = APIEncoder(g.namespace.public_id,
-                               legacy_nsid=g.legacy_nsid)
-    except NoResultFound:
-        raise NotFoundError("Couldn't find namespace  `{0}` ".format(
-            g.namespace_public_id))
-
+    g.namespace = Namespace.get(g.namespace_id, g.db_session)
+    g.encoder = APIEncoder(g.namespace.public_id,
+                           legacy_nsid=g.legacy_nsid)
     g.log = log.new(endpoint=request.endpoint,
                     account_id=g.namespace.account_id)
-
     g.parser = reqparse.RequestParser(argument_class=ValidatableArgument)
     g.parser.add_argument('limit', default=DEFAULT_LIMIT, type=limit,
                           location='args')
     g.parser.add_argument('offset', default=0, type=offset, location='args')
-
-    if hasattr(g, 'namespace_public_id') and \
-            not g.namespace_public_id == g.namespace.public_id:
-        return err(404, "Unknown namespace ID")
 
 
 @app.after_request
@@ -262,11 +250,16 @@ def thread_search_api():
         return err(400, err_string)
 
     search_client = get_search_client(g.namespace.account)
-    results = search_client.search_threads(g.db_session, args['q'],
-                                            offset=args['offset'],
-                                            limit=args['limit'])
-
-    return g.encoder.jsonify(results)
+    try:
+        results = search_client.search_threads(g.db_session, args['q'],
+                                               offset=args['offset'],
+                                               limit=args['limit'])
+        return g.encoder.jsonify(results)
+    except SearchBackendException as exc:
+        kwargs = {}
+        if exc.server_error:
+            kwargs['server_error'] = exc.server_error
+        return err(exc.http_code, exc.message, **kwargs)
 
 
 @app.route('/threads/<public_id>')
@@ -391,11 +384,16 @@ def message_search_api():
         return err(400, err_string)
 
     search_client = get_search_client(g.namespace.account)
-    results = search_client.search_messages(g.db_session, args['q'],
-                                            offset=args['offset'],
-                                            limit=args['limit'])
-
-    return g.encoder.jsonify(results)
+    try:
+        results = search_client.search_messages(g.db_session, args['q'],
+                                                offset=args['offset'],
+                                                limit=args['limit'])
+        return g.encoder.jsonify(results)
+    except SearchBackendException as exc:
+        kwargs = {}
+        if exc.server_error:
+            kwargs['server_error'] = exc.server_error
+        return err(exc.http_code, exc.message, **kwargs)
 
 
 @app.route('/messages/<public_id>', methods=['GET'])
@@ -715,7 +713,9 @@ def contact_api():
 
     if args['filter']:
         results = results.filter(Contact.email_address == args['filter'])
-    results = results.order_by(asc(Contact.id))
+    results = results.with_hint(
+        Contact, 'USE INDEX (ix_contact_ns_uid_provider_name)')\
+        .order_by(asc(Contact.created_at))
 
     if args['view'] == 'count':
         return g.encoder.jsonify({"count": results.scalar()})
@@ -724,6 +724,23 @@ def contact_api():
     if args['view'] == 'ids':
         return g.encoder.jsonify([r for r, in results])
 
+    return g.encoder.jsonify(results)
+
+
+@app.route('/contacts/search', methods=['GET'])
+def contact_search_api():
+    g.parser.add_argument('q', type=bounded_str, location='args')
+    args = strict_parse_args(g.parser, request.args)
+    if not args['q']:
+        err_string = ('GET HTTP method must include query'
+                      ' url parameter')
+        g.log.error(err_string)
+        return err(400, err_string)
+
+    search_client = ContactSearchClient(g.namespace.id)
+    results = search_client.search_contacts(g.db_session, args['q'],
+                                            offset=args['offset'],
+                                            limit=args['limit'])
     return g.encoder.jsonify(results)
 
 
@@ -1148,9 +1165,10 @@ def file_download_api(public_id):
     try:
         name = name.encode('latin-1')
     except UnicodeEncodeError:
-        name = email.header.Header(name, 'utf-8').encode()
+        name = '=?utf-8?b?' + base64.b64encode(name.encode('utf-8')) + '?='
     response.headers['Content-Disposition'] = \
         'attachment; filename={0}'.format(name)
+
     g.log.info(response.headers)
     return response
 
@@ -1322,10 +1340,11 @@ def draft_delete_api(public_id):
 
 @app.route('/send', methods=['POST'])
 def draft_send_api():
+    request_started = time.time()
     account = g.namespace.account
-
     if request.content_type == "message/rfc822":
-        msg = create_draft_from_mime(account, request.data, g.db_session)
+        msg = create_draft_from_mime(account, request.data,
+                                     g.db_session)
         validate_draft_recipients(msg)
         resp = send_raw_mime(account, g.db_session, msg)
         return resp
@@ -1333,22 +1352,25 @@ def draft_send_api():
     data = request.get_json(force=True)
     draft_public_id = data.get('draft_id')
     if draft_public_id is not None:
-        draft = get_draft(draft_public_id, data.get('version'), g.namespace.id,
-                          g.db_session)
+        draft = get_draft(draft_public_id, data.get('version'),
+                          g.namespace.id, g.db_session)
         schedule_action('delete_draft', draft, draft.namespace.id,
                         g.db_session, inbox_uid=draft.inbox_uid,
                         message_id_header=draft.message_id_header)
     else:
-        draft = create_message_from_json(data, g.namespace, g.db_session,
-                                         is_draft=False)
-
+        draft = create_message_from_json(data, g.namespace,
+                                         g.db_session, is_draft=False)
     validate_draft_recipients(draft)
-    resp = send_draft(account, draft, g.db_session)
-
     if isinstance(account, GenericAccount):
         schedule_action('save_sent_email', draft, draft.namespace.id,
                         g.db_session)
+    if time.time() - request_started > SEND_TIMEOUT:
+        # Preemptively time out the request if we got stuck doing database work
+        # -- we don't want clients to disconnect and then still send the
+        # message.
+        return err(504, 'Request timed out.')
 
+    resp = send_draft(account, draft, g.db_session)
     return resp
 
 
@@ -1404,7 +1426,7 @@ def sync_deltas():
 
     start_time = time.time()
     while time.time() - start_time < timeout:
-        with session_scope() as db_session:
+        with session_scope(g.namespace.id) as db_session:
             deltas, end_pointer = delta_sync.format_transactions_after_pointer(
                 g.namespace, start_pointer, db_session, args['limit'],
                 exclude_types, include_types, exclude_folders,

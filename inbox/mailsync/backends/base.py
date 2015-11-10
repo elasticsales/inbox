@@ -14,6 +14,10 @@ from inbox.heartbeat.status import clear_heartbeat_status
 # issues of greenlets being stuck)
 STACKTRACE_DEBUG_WAIT = 30*60
 
+THROTTLE_COUNT = 200
+THROTTLE_WAIT = 60
+
+
 class MailsyncError(Exception):
     pass
 
@@ -137,21 +141,12 @@ class BaseMailSyncMonitor(Greenlet):
     def _cleanup(self):
         if self.stacktrace_debug:
             self.stacktrace_debug.kill()
-        with session_scope() as mailsync_db_session:
+        with session_scope(self.namespace_id) as mailsync_db_session:
             map(lambda x: x.set_stopped(mailsync_db_session),
                 self.folder_monitors)
         self.folder_monitors.kill()
         clear_heartbeat_status(self.account_id)
 
 
-def _check_thread_state(thread, is_state):
-    state = getattr(thread, 'state')
-    return state == is_state or (state and state.startswith(is_state))
-
-
-def thread_finished(thread):
-    return _check_thread_state(thread, 'finish')
-
-
 def thread_polling(thread):
-    return _check_thread_state(thread, 'poll')
+    return getattr(thread, 'state') == 'poll'

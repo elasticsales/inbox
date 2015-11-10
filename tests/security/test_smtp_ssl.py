@@ -18,6 +18,7 @@ SELF_SIGNED_KEYFILE = 'tests/data/self_signed_cert.key'
 
 from inbox.sendmail.smtp.postel import SMTP_OVER_SSL_TEST_PORT
 
+SHARD_ID = 0
 SMTP_SERVER_HOST = 'localhost'
 SMTP_SERVER_PORT = SMTP_OVER_SSL_TEST_PORT
 
@@ -48,13 +49,14 @@ def local_smtp_account(db):
     from inbox.auth.generic import GenericAuthHandler
 
     handler = GenericAuthHandler(provider_name='custom')
-    acc = handler.create_account(db.session, 'user@gmail.com',
-                                 {'email': 'user@gmail.com',
-                                  'password': 'hunter2',
-                                  'imap_server_host': 'imap-test.nylas.com',
-                                  'imap_server_port': 143,
-                                  'smtp_server_host': SMTP_SERVER_HOST,
-                                  'smtp_server_port': SMTP_SERVER_PORT})
+    acc = handler.get_account(SHARD_ID,
+                              'user@gmail.com',
+                              {'email': 'user@gmail.com',
+                               'password': 'hunter2',
+                               'imap_server_host': 'imap-test.nylas.com',
+                               'imap_server_port': 143,
+                               'smtp_server_host': SMTP_SERVER_HOST,
+                               'smtp_server_port': SMTP_SERVER_PORT})
     db.session.add(acc)
     db.session.commit()
     return acc

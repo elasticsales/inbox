@@ -66,7 +66,7 @@ class ContactSync(BaseSyncMonitor):
         # Grab timestamp so next sync gets deltas from now
         sync_timestamp = datetime.utcnow()
 
-        with session_scope() as db_session:
+        with session_scope(self.namespace_id) as db_session:
             account = db_session.query(Account).get(self.account_id)
             last_sync_dt = account.last_synced_contacts
 
@@ -79,6 +79,15 @@ class ContactSync(BaseSyncMonitor):
                 assert new_contact.uid is not None, \
                     'Got remote item with null uid'
                 assert isinstance(new_contact.uid, basestring)
+
+                if (not new_contact.deleted and
+                        db_session.query(Contact).filter(
+                            Contact.namespace == account.namespace,
+                            Contact.email_address == new_contact.email_address,
+                            Contact.name == new_contact.name).first()):
+                    # Skip creating a new contact if we've already imported one
+                    # (e.g., from mail).
+                    continue
 
                 try:
                     existing_contact = db_session.query(Contact).filter(
@@ -102,12 +111,11 @@ class ContactSync(BaseSyncMonitor):
                     db_session.add(new_contact)
                     change_counter['added'] += 1
 
-                # Flush every 100 objects for perf
-                if sum(change_counter.values()) % 100:
-                    db_session.flush()
+                if sum(change_counter.values()) % 10:
+                    db_session.commit()
 
         # Update last sync
-        with session_scope() as db_session:
+        with session_scope(self.namespace_id) as db_session:
             account = db_session.query(Account).get(self.account_id)
             account.last_synced_contacts = sync_timestamp
 

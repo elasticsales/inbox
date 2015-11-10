@@ -18,14 +18,15 @@ from inbox.util.concurrency import retry_with_logging
 from nylas.logging import get_logger
 from nylas.logging.sentry import log_uncaught_errors
 logger = get_logger()
-from inbox.models.session import session_scope
+from inbox.models.session import session_scope, global_session_scope
 from inbox.models import ActionLog, Namespace, Account
 from inbox.util.file import Lock
 from inbox.util.stats import statsd_client
 from inbox.actions.base import (mark_unread, mark_starred, move, change_labels,
-                                save_draft, delete_draft, save_sent_email,
-                                create_folder, create_label, update_folder,
-                                update_label, delete_folder, delete_label)
+                                save_draft, update_draft, delete_draft,
+                                save_sent_email, create_folder, create_label,
+                                update_folder, update_label, delete_folder,
+                                delete_label)
 from inbox.events.actions.base import (create_event, delete_event,
                                        update_event)
 
@@ -41,6 +42,7 @@ ACTION_FUNCTION_MAP = {
     'move': move,
     'change_labels': change_labels,
     'save_draft': save_draft,
+    'update_draft': update_draft,
     'delete_draft': delete_draft,
     'save_sent_email': save_sent_email,
     'create_event': create_event,
@@ -77,7 +79,7 @@ class SyncbackService(gevent.Greenlet):
         gevent.Greenlet.__init__(self)
 
     def _process_log(self):
-        with session_scope() as db_session:
+        with global_session_scope() as db_session:
             # Only actions on accounts associated with this sync-engine
             query = db_session.query(ActionLog).join(Namespace).join(Account).\
                 filter(ActionLog.discriminator == 'actionlog',
@@ -172,7 +174,7 @@ class SyncbackWorker(gevent.Greenlet):
                 extra_args=self.extra_args)
 
             for _ in range(ACTION_MAX_NR_OF_RETRIES):
-                with session_scope() as db_session:
+                with session_scope(self.account_id) as db_session:
                     try:
                         action_log_entry = db_session.query(ActionLog).get(
                             self.action_log_id)
@@ -195,7 +197,7 @@ class SyncbackWorker(gevent.Greenlet):
 
                     except Exception:
                         log_uncaught_errors(log, account_id=self.account_id)
-                        with session_scope() as db_session:
+                        with session_scope(self.account_id) as db_session:
                             action_log_entry.retries += 1
                             if (action_log_entry.retries ==
                                     ACTION_MAX_NR_OF_RETRIES):

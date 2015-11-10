@@ -1,7 +1,8 @@
+import os
 from datetime import datetime
 
-from sqlalchemy import (Column, Integer, String, DateTime, Boolean, ForeignKey,
-                        Enum, inspect, bindparam)
+from sqlalchemy import (Column, BigInteger, String, DateTime, Boolean,
+                        ForeignKey, Enum, inspect, bindparam, Index)
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql.expression import false
 
@@ -69,7 +70,7 @@ class Account(MailSyncBase, HasPublicID, HasEmailAddress, HasRunState,
     # DEPRECATED
     last_synced_events = Column(DateTime, nullable=True)
 
-    emailed_events_calendar_id = Column(Integer,
+    emailed_events_calendar_id = Column(BigInteger,
                                         ForeignKey('calendar.id',
                                                    ondelete='SET NULL',
                                                    use_alter=True,
@@ -191,13 +192,16 @@ class Account(MailSyncBase, HasPublicID, HasEmailAddress, HasRunState,
         if sync_host is not None:
             self.sync_host = sync_host
 
-    def disable_sync(self, reason=None):
+    def disable_sync(self, reason):
         """ Tell the monitor that this account should stop syncing. """
         self.sync_should_run = False
         if reason:
             self._sync_status['sync_disabled_reason'] = reason
         elif 'sync_disabled_reason' in self._sync_status:
             del self._sync_status['sync_disabled_reason']
+        self._sync_status['sync_disabled_on'] = datetime.utcnow()
+        self._sync_status['sync_disabled_by'] = os.environ.get('USER',
+                                                               'unknown')
 
     def mark_invalid(self, reason='invalid credentials', scope='mail'):
         """
@@ -281,7 +285,7 @@ class Account(MailSyncBase, HasPublicID, HasEmailAddress, HasRunState,
 
     @property
     def is_deleted(self):
-        return self.sync_state in ('stopped', 'killed') and \
+        return self.sync_state in ('stopped', 'killed', 'invalid') and \
             self.sync_should_run is False and \
             self._sync_status.get('sync_disabled_reason') == 'account deleted'
 
@@ -299,3 +303,7 @@ class Account(MailSyncBase, HasPublicID, HasEmailAddress, HasRunState,
     discriminator = Column('type', String(16))
     __mapper_args__ = {'polymorphic_identity': 'account',
                        'polymorphic_on': discriminator}
+
+
+Index('ix_account_sync_should_run_sync_host', Account.sync_should_run,
+      Account.sync_host, mysql_length={'sync_host': 191})

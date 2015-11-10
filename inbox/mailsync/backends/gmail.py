@@ -22,7 +22,7 @@ user always gets the full thread when they look at mail.
 from __future__ import division
 from collections import OrderedDict
 from datetime import datetime, timedelta
-from gevent import kill, spawn
+from gevent import kill, spawn, sleep
 from sqlalchemy.orm import joinedload, load_only
 
 from inbox.util.itert import chunk
@@ -35,6 +35,7 @@ from inbox.models.session import session_scope
 from inbox.mailsync.backends.imap.generic import FolderSyncEngine
 from inbox.mailsync.backends.imap.monitor import ImapSyncMonitor
 from inbox.mailsync.backends.imap import common
+from inbox.mailsync.backends.base import THROTTLE_COUNT, THROTTLE_WAIT
 log = get_logger()
 
 PROVIDER = 'gmail'
@@ -42,7 +43,8 @@ SYNC_MONITOR_CLS = 'GmailSyncMonitor'
 
 
 MAX_DOWNLOAD_BYTES = 2 ** 20
-MAX_DOWNLOAD_COUNT = 30
+# USE MAX_DOWNLOAD_COUNT = 1 instead of 30 until N1 launch herding dies.
+MAX_DOWNLOAD_COUNT = 1
 
 
 class GmailSyncMonitor(ImapSyncMonitor):
@@ -81,13 +83,13 @@ class GmailSyncMonitor(ImapSyncMonitor):
                 continue
 
             Label.find_or_create(db_session, account,
-                                 raw_folder.display_name, raw_folder.role)
+                                 raw_folder.display_name,
+                                 raw_folder.role)
 
             if raw_folder.role in ('all', 'spam', 'trash'):
-                folder = db_session.query(Folder). \
-                        filter(Folder.account_id == account.id,
-                                Folder.canonical_name == raw_folder.role). \
-                        first()
+                folder = db_session.query(Folder).filter(
+                    Folder.account_id == account.id,
+                    Folder.canonical_name == raw_folder.role).first()
                 if folder:
                     if folder.name != raw_folder.display_name:
                         log.info('Folder name changed on remote',
@@ -145,7 +147,7 @@ class GmailFolderSyncEngine(FolderSyncEngine):
         try:
             remote_uids = sorted(crispin_client.all_uids(), key=int)
             with self.syncmanager_lock:
-                with session_scope() as db_session:
+                with session_scope(self.namespace_id) as db_session:
                     local_uids = common.local_uids(self.account_id, db_session,
                                                    self.folder_id)
                     common.remove_deleted_uids(
@@ -165,15 +167,16 @@ class GmailFolderSyncEngine(FolderSyncEngine):
                 # Prioritize UIDs for messages in the inbox folder.
                 if len(remote_uids) < 1e6:
                     inbox_uids = set(
-                        crispin_client.search_uids(['X-GM-LABELS inbox']))
+                        crispin_client.search_uids(['X-GM-LABELS', 'inbox']))
                 else:
                     # The search above is really slow (times out) on really
                     # large mailboxes, so bound the search to messages within
                     # the past month in order to get anywhere.
-                    since = (datetime.utcnow() - timedelta(days=30)). \
-                        strftime('%d-%b-%Y')
-                    inbox_uids = set(crispin_client.search_uids(
-                        ['X-GM-LABELS inbox', 'SINCE {}'.format(since)]))
+                    since = datetime.utcnow() - timedelta(days=30)
+                    inbox_uids = set(crispin_client.search_uids([
+                        'X-GM-LABELS', 'inbox',
+                        'SINCE', since]))
+
                 uids_to_download = (sorted(unknown_uids - inbox_uids) +
                                     sorted(unknown_uids & inbox_uids))
             else:
@@ -194,7 +197,7 @@ class GmailFolderSyncEngine(FolderSyncEngine):
                 kill(change_poller)
 
     def resync_uids_impl(self):
-        with session_scope() as db_session:
+        with session_scope(self.namespace_id) as db_session:
             imap_folder_info_entry = db_session.query(ImapFolderInfo)\
                 .options(load_only('uidvalidity', 'highestmodseq'))\
                 .filter_by(account_id=self.account_id,
@@ -248,6 +251,7 @@ class GmailFolderSyncEngine(FolderSyncEngine):
         operation is not super common unless you're regularly moving lots
         of messages to trash or spam, and even then the overhead of just
         downloading the body is generally not that high.
+
         """
         new_g_msgids = {msg.g_msgid for msg in raw_messages}
         existing_g_msgids = g_msgids(self.namespace_id, db_session,
@@ -288,7 +292,7 @@ class GmailFolderSyncEngine(FolderSyncEngine):
                 uid.update_labels(raw_message.g_labels)
                 common.update_message_metadata(
                     db_session, account, message_obj, uid.is_draft)
-            db_session.commit()
+                db_session.commit()
 
         return brand_new_messages
 
@@ -312,7 +316,7 @@ class GmailFolderSyncEngine(FolderSyncEngine):
             return
         new_uids = set()
         with self.syncmanager_lock:
-            with session_scope() as db_session:
+            with session_scope(self.namespace_id) as db_session:
                 account = Account.get(self.account_id, db_session)
                 folder = Folder.get(self.folder_id, db_session)
                 raw_messages = self.__deduplicate_message_object_creation(
@@ -372,6 +376,7 @@ class GmailFolderSyncEngine(FolderSyncEngine):
                             max_download_count=MAX_DOWNLOAD_COUNT):
         expanded_pending_uids = self.expand_uids_to_download(
             crispin_client, uids, metadata)
+        count = 0
         while True:
             dl_size = 0
             batch = []
@@ -388,6 +393,22 @@ class GmailFolderSyncEngine(FolderSyncEngine):
                 return
             self.download_and_commit_uids(crispin_client, batch)
             self.heartbeat_status.publish()
+            count += len(batch)
+            if self.throttled and count >= THROTTLE_COUNT:
+                # Throttled accounts' folders sync at a rate of
+                # 1 message/ minute, after the first approx. THROTTLE_COUNT
+                # messages for this batch are synced.
+                # Note this is an approx. limit since we use the #(uids),
+                # not the #(messages).
+                sleep(THROTTLE_WAIT)
+
+    @property
+    def throttled(self):
+        with session_scope(self.namespace_id) as db_session:
+            account = db_session.query(Account).get(self.account_id)
+            throttled = account.throttled
+
+        return throttled
 
 
 def g_msgids(namespace_id, session, in_):

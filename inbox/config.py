@@ -1,9 +1,8 @@
 import errno
 import os
 import yaml
-from urllib import quote_plus as urlquote
 
-__all__ = ['config', 'engine_uri']
+__all__ = ['config']
 
 
 class ConfigError(Exception):
@@ -29,7 +28,8 @@ class Configuration(dict):
 
 
 def _update_config_from_env(config):
-    """Update a config dictionary from configuration files specified in the
+    """
+    Update a config dictionary from configuration files specified in the
     environment.
 
     The environment variable `INBOX_CFG_PATH` contains a list of .json or .yml
@@ -50,8 +50,8 @@ def _update_config_from_env(config):
       {srcdir}/etc/secrets-dev.yml:{srcdir}/etc/config-dev.yml
 
     Missing files in the path will be ignored.
-    """
 
+    """
     srcdir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
 
     if 'INBOX_ENV' in os.environ:
@@ -109,31 +109,3 @@ config = Configuration()
 _update_config_from_env(config)
 _get_local_feature_flags(config)
 _get_process_name(config)
-
-if 'MYSQL_PASSWORD' not in config:
-    raise Exception(
-        'Missing secrets config file? Run `sudo cp etc/secrets-dev.yml '
-        '/etc/inboxapp/secrets.yml` and retry')
-
-
-def engine_uri(database=None):
-    """ By default doesn't include the specific database. """
-
-    info = {
-        'username': config.get_required('MYSQL_USER'),
-        'password': config.get_required('MYSQL_PASSWORD'),
-        'host': config.get_required('MYSQL_HOSTNAME'),
-        'port': str(config.get_required('MYSQL_PORT')),
-        'database': database if database else '',
-    }
-
-    # So we can use docker links to dynamically attach containerized databases
-    # https://docs.docker.com/userguide/dockerlinks/#environment-variables
-
-    info['host'] = os.getenv("MYSQL_PORT_3306_TCP_ADDR", info['host'])
-    info['port'] = os.getenv("MYSQL_PORT_3306_TCP_PORT", info['port'])
-
-    uri_template = 'mysql+mysqldb://{username}:{password}@{host}' \
-                   ':{port}/{database}?charset=utf8mb4'
-
-    return uri_template.format(**{k: urlquote(v) for k, v in info.items()})

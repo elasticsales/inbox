@@ -1,11 +1,10 @@
 -e git+https://github.com/closeio/tasktiger.git#egg=tasktiger
-nylas-production-python==0.2.5
+nylas-production-python==0.2.6
 coverage==3.7.1
 httplib2==0.8
 pytest==2.5.2
 pytest-xdist==1.11
 wsgiref==0.1.2
-futures==2.1.3
 SQLAlchemy==1.0.6
 pymongo==2.5.2  # For json_util in bson
 dnspython==1.11.1
@@ -22,8 +21,8 @@ setproctitle==1.1.8
 gdata==2.0.18
 git+https://github.com/nylas/dateutil.git#egg=python-dateutil
 git+https://github.com/khamidou/flanker.git#egg=flanker
--e git+https://github.com/elasticsales/imapclient.git#egg=imapclient
-alembic==0.6.4
+hg+https://bitbucket.org/mjs0/imapclient@d8ea261f28ee29#egg=imapclient
+alembic==0.6.5
 iconv==1.0
 pep8==1.4.6
 flake8==2.1.0
@@ -38,7 +37,7 @@ pyinstrument==0.12
 simplejson==3.6.0
 Flask-RESTful==0.3.2
 uritemplate==0.6
-git+https://github.com/collective/icalendar.git#egg=icalendar
+icalendar==3.9.1
 pynacl==0.3.0
 pyaml==14.05.7
 enum34==1.0.4
@@ -46,10 +45,15 @@ msgpack-python==0.4.2
 guppy==0.1.10
 redis==2.10.3
 hiredis==0.1.5
-mock==1.0.1
+mock==1.3.0
 mockredispy==2.9.0.10
 vobject==0.8.1c
 lxml==3.4.2
 arrow==0.5.4
 hypothesis==1.10.3
 statsd==3.1
+boto3==1.1.4
+Pympler==0.4.2
+pyopenssl>=0.15.1
+gevent_openssl==1.2
+git+https://github.com/alekstorm/backports.ssl.git#egg=backports.ssl

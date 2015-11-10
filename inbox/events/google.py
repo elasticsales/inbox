@@ -7,6 +7,7 @@ import gevent
 import requests
 import uuid
 
+from inbox.auth.oauth import OAuthRequestsWrapper
 from inbox.basicauth import AccessNotEnabledError
 from inbox.config import config
 from nylas.logging import get_logger
@@ -134,7 +135,7 @@ class GoogleEventsProvider(object):
                 raise
 
     def _get_access_token(self, force_refresh=False):
-        with session_scope() as db_session:
+        with session_scope(self.namespace_id) as db_session:
             acc = db_session.query(Account).get(self.account_id)
             # This will raise OAuthError if OAuth access was revoked. The
             # BaseSyncMonitor loop will catch this, clean up, and exit.
@@ -150,14 +151,23 @@ class GoogleEventsProvider(object):
         while True:
             if next_page_token is not None:
                 params['pageToken'] = next_page_token
-            r = requests.get(url, params=params, auth=OAuth(token))
-            if r.status_code == 200:
+            try:
+                r = requests.get(url, params=params,
+                                 auth=OAuthRequestsWrapper(token))
+                r.raise_for_status()
                 data = r.json()
                 items += data['items']
                 next_page_token = data.get('nextPageToken')
                 if next_page_token is None:
                     return items
-            else:
+
+            except requests.exceptions.SSLError:
+                self.log.warning(
+                    'SSLError making Google Calendar API requestl retrying',
+                    url=url, exc_info=True)
+                gevent.sleep(30 + random.randrange(0, 60))
+                continue
+            except requests.HTTPError:
                 self.log.warning(
                     'HTTP error making Google Calendar API request', url=r.url,
                     response=r.content, status=r.status_code)
@@ -186,7 +196,7 @@ class GoogleEventsProvider(object):
                         log.warning('API not enabled; returning empty result')
                         raise AccessNotEnabledError()
                 # Unexpected error; raise.
-                r.raise_for_status()
+                raise
 
     def _make_event_request(self, method, calendar_uid, event_uid=None,
                             **kwargs):
@@ -196,7 +206,9 @@ class GoogleEventsProvider(object):
               'calendars/{}/events/{}'.format(urllib.quote(calendar_uid),
                                               urllib.quote(event_uid))
         token = self._get_access_token()
-        response = requests.request(method, url, auth=OAuth(token), **kwargs)
+        response = requests.request(method, url,
+                                    auth=OAuthRequestsWrapper(token),
+                                    **kwargs)
         return response
 
     def create_remote_event(self, event, **kwargs):
@@ -293,7 +305,7 @@ class GoogleEventsProvider(object):
         r = requests.post(WATCH_CALENDARS_URL,
                           data=json.dumps(data),
                           headers=headers,
-                          auth=OAuth(token))
+                          auth=OAuthRequestsWrapper(token))
 
         if r.status_code == 200:
             data = r.json()
@@ -329,17 +341,23 @@ class GoogleEventsProvider(object):
         headers = {
             'content-type': 'application/json'
         }
-        r = requests.post(watch_url,
-                          data=json.dumps(data),
-                          headers=headers,
-                          auth=OAuth(token))
+        try:
+            r = requests.post(watch_url,
+                              data=json.dumps(data),
+                              headers=headers,
+                              auth=OAuthRequestsWrapper(token))
+        except requests.exceptions.SSLError:
+            self.log.warning(
+                'SSLError subscribing to Google push notifications',
+                url=watch_url, exc_info=True)
+            return
 
         if r.status_code == 200:
             data = r.json()
             return data.get('expiration')
         else:
             self.handle_watch_errors(r)
-            return None
+            return
 
     def handle_watch_errors(self, r):
         self.log.warning(
@@ -543,13 +561,3 @@ def _dump_event(event):
                 dump['attendees'].append(attendee)
 
     return dump
-
-
-class OAuth(requests.auth.AuthBase):
-    """Helper class for setting the Authorization header on HTTP requests."""
-    def __init__(self, token):
-        self.token = token
-
-    def __call__(self, r):
-        r.headers['Authorization'] = 'Bearer {}'.format(self.token)
-        return r

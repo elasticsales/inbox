@@ -6,13 +6,10 @@ from inbox.api.err import APIException, NotFoundError, InputError
 from inbox.api.validation import valid_public_id
 from nylas.logging import get_logger
 log = get_logger()
-from inbox.models.session import new_session
+from inbox.models.session import global_session_scope
 
 from inbox.models.backends.gmail import GmailAccount
 from inbox.models import Calendar
-
-from inbox.ignition import main_engine
-engine = main_engine()
 
 
 app = Blueprint(
@@ -34,7 +31,6 @@ def resp(http_code, message=None, **kwargs):
 
 @app.before_request
 def start():
-    g.db_session = new_session(engine)
     g.log = get_logger()
 
     try:
@@ -48,14 +44,6 @@ def start():
         return resp(204)
 
 
-@app.after_request
-def finish(response):
-    if response.status_code == 200:
-        g.db_session.commit()
-    g.db_session.close()
-    return response
-
-
 @app.errorhandler(APIException)
 def handle_input_error(error):
     response = jsonify(message=error.message,
@@ -64,38 +52,42 @@ def handle_input_error(error):
     return response
 
 
-@app.route('/calendar_list_update/<public_account_id>', methods=['POST'])
-def calendar_update(public_account_id):
+@app.route('/calendar_list_update/<account_public_id>', methods=['POST'])
+def calendar_update(account_public_id):
 
     try:
-        valid_public_id(public_account_id)
-        account = g.db_session.query(GmailAccount) \
-                  .filter(GmailAccount.public_id == public_account_id) \
-                  .one()
-        account.handle_gpush_notification()
+        valid_public_id(account_public_id)
+        with global_session_scope() as db_session:
+            account = db_session.query(GmailAccount) \
+                .filter(GmailAccount.public_id == account_public_id) \
+                .one()
+            account.handle_gpush_notification()
+            db_session.commit()
         return resp(200)
     except ValueError:
         raise InputError('Invalid public ID')
     except NoResultFound:
         g.log.info('Getting push notifications for non-existing account',
-                    account_public_id=public_account_id)
+                    account_public_id=account_public_id)
         raise NotFoundError("Couldn't find account `{0}`"
-                            .format(public_account_id))
+                            .format(account_public_id))
 
 
-@app.route('/calendar_update/<public_calendar_id>', methods=['POST'])
-def event_update(public_calendar_id):
+@app.route('/calendar_update/<calendar_public_id>', methods=['POST'])
+def event_update(calendar_public_id):
     try:
-        valid_public_id(public_calendar_id)
-        calendar = g.db_session.query(Calendar) \
-                  .filter(Calendar.public_id == public_calendar_id) \
-                  .one()
-        calendar.handle_gpush_notification()
+        valid_public_id(calendar_public_id)
+        with global_session_scope() as db_session:
+            calendar = db_session.query(Calendar) \
+                .filter(Calendar.public_id == calendar_public_id) \
+                .one()
+            calendar.handle_gpush_notification()
+            db_session.commit()
         return resp(200)
     except ValueError:
         raise InputError('Invalid public ID')
     except NoResultFound:
         g.log.info('Getting push notifications for non-existing calendar',
-                    calendar_public_id=public_calendar_id)
+                    calendar_public_id=calendar_public_id)
         raise NotFoundError("Couldn't find calendar `{0}`"
-                            .format(public_calendar_id))
+                            .format(calendar_public_id))

@@ -1,4 +1,4 @@
-from sqlalchemy import (Column, Integer, String, ForeignKey, Index, Enum,
+from sqlalchemy import (Column, BigInteger, String, ForeignKey, Index, Enum,
                         inspect)
 from sqlalchemy.orm import relationship
 
@@ -10,16 +10,16 @@ from inbox.models.namespace import Namespace
 class Transaction(MailSyncBase, HasPublicID):
     """ Transactional log to enable client syncing. """
     # Do delete transactions if their associated namespace is deleted.
-    namespace_id = Column(Integer,
-                          ForeignKey(Namespace.id, ondelete='CASCADE'),
+    namespace_id = Column(ForeignKey(Namespace.id, ondelete='CASCADE'),
                           nullable=False)
     namespace = relationship(Namespace)
 
-    object_type = Column(String(20), nullable=False, index=True)
-    record_id = Column(Integer, nullable=False, index=True)
+    object_type = Column(String(20), nullable=False)
+    record_id = Column(BigInteger, nullable=False, index=True)
     object_public_id = Column(String(191), nullable=False, index=True)
     command = Column(Enum('insert', 'update', 'delete'), nullable=False)
 
+Index('ix_transaction_table_name', Transaction.object_type)
 Index('namespace_id_deleted_at', Transaction.namespace_id,
       Transaction.deleted_at)
 Index('object_type_record_id', Transaction.object_type, Transaction.record_id)

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, Enum, ForeignKey, bindparam
+from sqlalchemy import Column, BigInteger, ForeignKey, bindparam
 from sqlalchemy.orm import relationship, backref
 
 from inbox.models.base import MailSyncBase
@@ -7,12 +7,9 @@ from inbox.sqlalchemy_ext.util import bakery
 
 
 class Namespace(MailSyncBase, HasPublicID):
-    """ A way to do grouping / permissions, basically. """
-    # NOTE: only root namespaces have account backends
-    account_id = Column(Integer,
+    account_id = Column(BigInteger,
                         ForeignKey('account.id', ondelete='CASCADE'),
                         nullable=True)
-    # really the root_namespace
     account = relationship('Account',
                            lazy='joined',
                            single_parent=True,
@@ -22,10 +19,6 @@ class Namespace(MailSyncBase, HasPublicID):
                                            passive_deletes=True,
                                            cascade='all,delete-orphan'),
                            uselist=False)
-
-    # invariant: imapaccount is non-null iff type is root
-    type = Column(Enum('root', 'shared_folder'), nullable=False,
-                  server_default='root')
 
     def __str__(self):
         return "{} <{}>".format(self.public_id, self.account.email_address if
@@ -37,10 +30,14 @@ class Namespace(MailSyncBase, HasPublicID):
             return self.account.email_address
 
     @classmethod
+    def get(cls, id_, session):
+        q = bakery(lambda session: session.query(cls))
+        q += lambda q: q.filter(cls.id == bindparam('id_'))
+        return q(session).params(id_=id_).first()
+
+    @classmethod
     def from_public_id(cls, public_id, db_session):
         q = bakery(lambda session: session.query(Namespace))
         q += lambda q: q.filter(
             Namespace.public_id == bindparam('public_id'))
         return q(db_session).params(public_id=public_id).one()
-
-
