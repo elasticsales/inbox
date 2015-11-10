@@ -1,4 +1,4 @@
--e git+ssh://git@github.com/closeio/tasktiger.git#egg=tasktiger
+-e git+https://github.com/closeio/tasktiger.git#egg=tasktiger
 nylas-production-python==0.2.5
 coverage==3.7.1
 httplib2==0.8
