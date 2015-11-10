@@ -34,9 +34,9 @@ class OAuthAuthHandler(AuthHandler):
         return conn
 
     def _get_IMAP_connection(self, account):
-        host, port = account.imap_endpoint
+        host, port, is_secure = account.imap_endpoint
         try:
-            conn = create_imap_connection(host, port)
+            conn = create_imap_connection(host, port, is_secure)
         except (IMAPClient.Error, socket.error) as exc:
             log.error('Error instantiating IMAP connection',
                       account_id=account.id,

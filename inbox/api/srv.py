@@ -173,7 +173,7 @@ def create_namespace():
 
     account.email_address = data['email_address']
 
-    with session_scope() as db_session:
+    with global_session_scope() as db_session:
         if auth_creds:
             db_session.add(auth_creds)
         db_session.add(account)
@@ -190,7 +190,7 @@ def modify_namespace(namespace_public_id):
     from inbox.models.backends.generic import GenericAccount
     from inbox.models.backends.gmail import GmailAccount
 
-    with session_scope() as db_session:
+    with global_session_scope() as db_session:
         namespace = db_session.query(Namespace) \
             .filter(Namespace.public_id == namespace_public_id).one()
 
