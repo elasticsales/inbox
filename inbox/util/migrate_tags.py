@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 import calendar
 from inbox.heartbeat.config import get_redis_client
 import dateutil.parser
@@ -345,6 +344,3 @@ def migrate_accounts():
         accounts = db_session.query(Account).options(load_only(Account.id))
         for account in accounts:
             migrate_account.delay(account.id)
-
-if __name__ == '__main__':
-    migrate_accounts()

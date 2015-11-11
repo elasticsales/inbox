@@ -1,0 +1,4 @@
+#!/usr/bin/env python
+
+from inbox.util.migrate_tags import migrate_accounts
+migrate_accounts()
