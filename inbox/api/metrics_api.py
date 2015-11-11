@@ -7,7 +7,7 @@ from inbox.heartbeat.status import get_heartbeat_status
 from inbox.models import Folder, Account, Namespace
 from inbox.models.backends.generic import GenericAccount
 from inbox.models.backends.imap import ImapAccount, ImapFolderSyncStatus
-from inbox.models.session import session_scope
+from inbox.models.session import global_session_scope
 
 app = Blueprint(
     'metrics_api',
@@ -16,7 +16,7 @@ app = Blueprint(
 
 @app.route('/')
 def index():
-    with session_scope() as db_session:
+    with global_session_scope() as db_session:
         if 'namespace_id' in request.args:
             namespace = db_session.query(Namespace).filter(
                     Namespace.public_id == request.args['namespace_id']).one()
