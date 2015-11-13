@@ -1,0 +1,77 @@
+#!/usr/bin/env python
+"""
+Deletes account data permanently for accounts where sync_should_run is False.
+
+Includes:
+* All data in the database.
+* Account liveness/status data (in Redis).
+
+USE WITH CAUTION.
+"""
+import time
+
+import click
+
+from inbox.models.session import global_session_scope
+from inbox.models import Account
+from inbox.models.util import delete_namespace
+from inbox.heartbeat.status import clear_heartbeat_status
+
+
+@click.command()
+@click.option('--dry-run', is_flag=True)
+def delete_account_data(dry_run):
+    if dry_run:
+        print 'Dry run enabled. Not actually deleting.'
+
+    question = 'Are you sure you want to delete all accounts with '\
+               'sync_should_run set to False? [yes / no] '
+
+    answer = raw_input(question).strip().lower()
+
+    if answer != 'yes':
+        print 'Will NOT delete, goodbye.'
+        return 0
+
+    with global_session_scope() as db_session:
+        accounts = db_session.query(Account).filter(Account.sync_should_run == False)
+
+	for account in accounts:
+            account_id = account.id
+            namespace_id = account.namespace.id
+
+            if account.sync_should_run:
+                print 'Account with id {} should be running.\n'\
+                      'Will NOT delete.'.format(account_id)
+                continue
+
+            print 'Deleting account with id: {}...'.format(account_id)
+
+            start = time.time()
+
+            # Delete data in database
+            try:
+                print 'Deleting database data'
+                delete_namespace(account_id, namespace_id, dry_run=dry_run)
+            except Exception as e:
+                print 'Database data deletion failed! Error: {}'.format(str(e))
+                return -1
+
+            database_end = time.time()
+            print 'Database data deleted. Time taken: {}'.\
+                format(database_end - start)
+
+            # Delete liveness data
+            if not dry_run:
+                print 'Deleting liveness data'
+                clear_heartbeat_status(account_id)
+
+            end = time.time()
+            print 'All data deleted successfully! TOTAL time taken: {}'.\
+                format(end - start)
+
+    return 0
+
+
+if __name__ == '__main__':
+    delete_account_data()
