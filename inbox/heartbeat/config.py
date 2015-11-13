@@ -1,4 +1,4 @@
-from redis import StrictRedis
+from redis import Redis, StrictRedis
 
 from inbox.config import config
 
@@ -11,8 +11,11 @@ CONTACTS_FOLDER_ID = '-1'
 EVENTS_FOLDER_ID = '-2'
 
 
-def get_redis_client(host=None, port=6379, db=STATUS_DATABASE):
+def get_redis_client(host=None, port=6379, db=STATUS_DATABASE, strict=True):
     if not host:
         host = str(config.get_required('REDIS_HOSTNAME'))
         port = int(config.get_required('REDIS_PORT'))
-    return StrictRedis(host, port, db)
+    if strict:
+        return StrictRedis(host, port, db)
+    else:
+        return Redis(host, port, db)

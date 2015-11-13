@@ -8,18 +8,15 @@ Includes:
 
 USE WITH CAUTION.
 """
-import time
-
 import click
 
 from inbox.models.session import session_scope
 from inbox.models import Account
-from inbox.models.util import delete_namespace
-from inbox.heartbeat.status import clear_heartbeat_status
+from inbox.util.delete_accounts import delete_account_data
 
 
 @click.command()
-def delete_account_data():
+def delete_unused_accounts():
     question = 'Are you sure you want to delete all accounts with '\
                'sync_should_run set to False? [yes / no] '
 
@@ -31,49 +28,19 @@ def delete_account_data():
 
     overall_time = 0
 
+    print 'Queueing tasks'
+
     with session_scope() as db_session:
         accounts = db_session.query(Account).filter(Account.sync_should_run == False)
 
-	for account in accounts:
-            account_id = account.id
-            namespace_id = account.namespace.id
+        for account in accounts:
+            print 'Account {}'.format(account.id)
+            delete_account_data.delay(account.id)
 
-            if account.sync_should_run:
-                print 'Account with id {} should be running.\n'\
-                      'Will NOT delete.'.format(account_id)
-                continue
-
-            print 'Deleting account with id: {}...'.format(account_id)
-
-            start = time.time()
-
-            # Delete data in database
-            try:
-                print 'Deleting database data'
-                delete_namespace(account_id, namespace_id)
-            except Exception as e:
-                print 'Database data deletion failed! Error: {}'.format(str(e))
-                return -1
-
-            database_end = time.time()
-            print 'Database data deleted. Time taken: {}'.\
-                format(database_end - start)
-
-            # Delete liveness data
-            print 'Deleting liveness data'
-            clear_heartbeat_status(account_id)
-
-            end = time.time()
-            print 'All data deleted successfully! TOTAL time taken: {}'.\
-                format(end - start)
-
-            overall_time += (end - start)
-
-        print 'TOTAL time taken for all accounts: {}'.\
-            format(overall_time)
+    print 'Tasks have been queued.'
 
     return 0
 
 
 if __name__ == '__main__':
-    delete_account_data()
+    delete_unused_accounts()
