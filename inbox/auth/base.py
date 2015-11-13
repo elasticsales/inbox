@@ -5,10 +5,8 @@ from sqlalchemy.orm.exc import NoResultFound
 from inbox.models.session import session_scope
 from inbox.providers import providers
 from inbox.basicauth import NotSupportedError
-from inbox.log import get_logger
 import socket
 from socket import gaierror, error as socket_error
-log = get_logger()
 
 
 def handler_from_provider(provider_name):
