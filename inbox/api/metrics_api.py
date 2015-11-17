@@ -1,7 +1,9 @@
 from collections import defaultdict
 from flask import Blueprint, jsonify, request
 from operator import itemgetter
+from sqlalchemy.orm.exc import NoResultFound
 
+from inbox.api.err import NotFoundError
 from inbox.api.kellogs import APIEncoder
 from inbox.heartbeat.status import get_heartbeat_status
 from inbox.models import Folder, Account, Namespace
@@ -18,8 +20,11 @@ app = Blueprint(
 def index():
     with session_scope() as db_session:
         if 'namespace_id' in request.args:
-            namespace = db_session.query(Namespace).filter(
-                    Namespace.public_id == request.args['namespace_id']).one()
+            try:
+                namespace = db_session.query(Namespace).filter(
+                        Namespace.public_id == request.args['namespace_id']).one()
+            except NoResultFound:
+                raise NotFoundError("Couldn't find namespace {}".format(request.args['namespace_id']))
         else:
             namespace = None
 
@@ -65,13 +70,15 @@ def index():
                 for folder_status in account_heartbeat.folders:
                     folder_status_id = int(folder_status.id)
                     if folder_status_id in account_folder_data:
-                        alive = alive and folder_status.alive
                         if 0 in folder_status.devices:
+                            alive = alive and folder_status.alive
                             device = folder_status.devices[0]
                             account_folder_data[folder_status_id].update({
                                 'alive': folder_status.alive,
                                 'heartbeat_at': device.heartbeat_at,
                             })
+                        else:
+                            alive = False
 
                 initial_sync = account_heartbeat.initial_sync or \
                         any(f['state'] == 'initial' for f in account_folder_data.values())

@@ -1,0 +1,32 @@
+#!/usr/bin/env python
+"""
+Marks accounts as disabled for accounts where sync_should_run is False.
+"""
+import click
+import datetime
+import time
+
+from inbox.models.session import session_scope
+from inbox.models import Account
+from inbox.util.delete_accounts import delete_account_data
+
+
+@click.command()
+def delete_unused_accounts():
+    from inbox.ignition import main_engine
+
+    question = 'Are you sure you want to mark all unused accounts as deleted?'\
+               ' [yes / no] '
+    answer = raw_input(question).strip().lower()
+
+    if answer != 'yes':
+        print 'Will NOT proceed, goodbye.'
+        return 0
+
+    with session_scope() as db_session:
+        accounts = db_session.query(Account).filter(Account.sync_should_run == False)
+        for account in accounts:
+            account.disable_sync("account deleted")
+
+if __name__ == '__main__':
+    delete_unused_accounts()

@@ -510,6 +510,13 @@ class CrispinClient(object):
                           "ALL UID", exception=e)
                 t = time.time()
                 fetch_result = self.conn.search(['ALL', 'UID'])
+            elif e.message.find('UID SEARCH failed: Internal error') >= 0:
+                # Oracle Beehive fails for some folders
+                log.debug("Getting UIDs failed when using 'UID SEARCH "
+                          "ALL'. Switching to alternative 'UID SEARCH "
+                          "1:*", exception=e)
+                t = time.time()
+                fetch_result = self.conn.search(['1:*'])
             else:
                 raise
 
