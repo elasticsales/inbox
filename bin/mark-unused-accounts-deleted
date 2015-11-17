@@ -25,8 +25,8 @@ def delete_unused_accounts():
 
     with session_scope() as db_session:
         accounts = db_session.query(Account).filter(Account.sync_should_run == False)
-	for account in accounts:
-	    account.disable_sync("account deleted")
+        for account in accounts:
+            account.disable_sync("account deleted")
 
 if __name__ == '__main__':
     delete_unused_accounts()
