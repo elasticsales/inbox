@@ -227,6 +227,10 @@ def modify_namespace(namespace_public_id):
         encoder = APIEncoder(legacy_nsid=True)
         return encoder.jsonify(namespace)
 
+@app.route('/')
+def home():
+    return "Nylas ready.\n"
+
 @app.route('/logout')
 def logout():
     """ Utility function used to force browsers to reset cached HTTP Basic Auth
