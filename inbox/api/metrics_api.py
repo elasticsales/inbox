@@ -41,7 +41,7 @@ def index():
                     filter(ImapFolderSyncStatus.account_id==accounts[0].id). \
                     join(Folder)
         else:
-            heartbeat = get_heartbeat_status()
+            heartbeat = get_ping_status()
             folder_sync_statuses = db_session.query(ImapFolderSyncStatus). \
                     join(Folder)
 
