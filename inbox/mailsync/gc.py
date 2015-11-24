@@ -1,7 +1,10 @@
-import datetime
 import gevent
+import datetime
+from sqlalchemy import func
 from nylas.logging import get_logger
 from inbox.models import Message
+from inbox.models.category import Category
+from inbox.models.message import MessageCategory
 from inbox.models.session import session_scope
 from inbox.util.concurrency import retry_with_logging
 from inbox.util.debug import bind_context
@@ -23,6 +26,8 @@ class DeleteHandler(gevent.Greenlet):
     and deleting them for good if they've been marked as deleted for longer
     than message_ttl seconds.
 
+    It also periodically deletes categories which have no associated messages.
+
     Parameters
     ----------
     account_id, namespace_id: int
@@ -36,6 +41,7 @@ class DeleteHandler(gevent.Greenlet):
 
         deleting it for good.
     """
+
     def __init__(self, account_id, namespace_id, uid_accessor,
                  message_ttl=DEFAULT_MESSAGE_TTL):
         bind_context(self, 'deletehandler', account_id)
@@ -53,6 +59,7 @@ class DeleteHandler(gevent.Greenlet):
         while True:
             current_time = datetime.datetime.utcnow()
             self.check(current_time)
+            self.gc_deleted_categories()
             gevent.sleep(self.message_ttl.total_seconds())
 
     def check(self, current_time):
@@ -105,4 +112,24 @@ class DeleteHandler(gevent.Greenlet):
                 # simply commit after each delete in order to prevent bulk
                 # delete scenarios from creating a long-running, blocking
                 # transaction.
+                db_session.commit()
+
+    def gc_deleted_categories(self):
+        # Delete categories which have been deleted on the backend.
+        # Go through all the categories and check if there are messages
+        # associated with it. If not, delete it.
+        with session_scope(self.namespace_id) as db_session:
+            cats = db_session.query(Category).filter(
+                Category.namespace_id == self.namespace_id,
+                Category.deleted_at != None)
+
+            for cat in cats:
+                # Check if no message is associated with the category. If yes,
+                # delete it.
+                count = db_session.query(func.count(MessageCategory.id)).filter(
+                    MessageCategory.category_id == cat.id).scalar()
+
+                if count == 0:
+                    db_session.delete(cat)
+
                 db_session.commit()

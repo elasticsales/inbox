@@ -84,7 +84,8 @@ class SyncbackService(gevent.Greenlet):
             query = db_session.query(ActionLog).join(Namespace).join(Account).\
                 filter(ActionLog.discriminator == 'actionlog',
                        ActionLog.status == 'pending',
-                       Account.sync_host == platform.node()).\
+                       Account.sync_host == platform.node(),
+                       Account.sync_should_run).\
                 order_by(ActionLog.id).\
                 options(contains_eager(ActionLog.namespace, Namespace.account))
 
@@ -140,6 +141,7 @@ class SyncbackWorker(gevent.Greenlet):
     given object, not on the whole account.
 
     """
+
     def __init__(self, action_name, semaphore, action_log_id, record_id,
                  account_id, provider, retry_interval=30, extra_args=None):
         self.action_name = action_name

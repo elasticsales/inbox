@@ -11,6 +11,8 @@ from flask.ext.restful import reqparse
 from sqlalchemy import asc, func
 from sqlalchemy.orm.exc import NoResultFound
 
+from nylas.logging import get_logger
+log = get_logger()
 from inbox.models import (Message, Block, Part, Thread, Namespace,
                           Contact, Calendar, Event, Transaction,
                           DataProcessingCache, Category, MessageCategory)
@@ -37,7 +39,6 @@ from inbox.contacts.search import ContactSearchClient
 from inbox.sendmail.base import (create_message_from_json, update_draft,
                                  delete_draft, create_draft_from_mime,
                                  SendMailException)
-from nylas.logging import get_logger
 from inbox.ignition import engine_manager
 from inbox.models.action_log import schedule_action
 from inbox.models.session import new_session, session_scope
@@ -46,9 +47,7 @@ from inbox.transactions import delta_sync
 from inbox.api.err import err, APIException, NotFoundError, InputError
 from inbox.events.ical import (generate_icalendar_invite, send_invite,
                                generate_rsvp, send_rsvp)
-
-
-log = get_logger()
+from inbox.util.blockstore import get_from_blockstore
 
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 1000
@@ -408,17 +407,16 @@ def message_read_api(public_id):
         message = Message.from_public_id(public_id, g.namespace.id,
                                          g.db_session)
     except NoResultFound:
-        raise NotFoundError("Couldn't find message {0} ".format(public_id))
+        raise NotFoundError("Couldn't find message {0}".format(public_id))
 
     if request.headers.get('Accept', None) == 'message/rfc822':
-        if message.full_body is not None:
-            return Response(message.full_body.data,
-                            mimetype='message/rfc822')
+        raw_message = get_from_blockstore(message.data_sha256)
+        if raw_message is not None:
+            return Response(raw_message, mimetype='message/rfc822')
         else:
-            g.log.error("Message without full_body attribute: id='{0}'"
-                        .format(message.id))
+            g.log.error('Missing raw MIME message', id=message.id)
             raise NotFoundError(
-                "Couldn't find raw contents for message `{0}` "
+                "Couldn't find raw contents for message `{0}`"
                 .format(public_id))
 
     return encoder.jsonify(message)
@@ -454,7 +452,7 @@ def folders_labels_query_api():
         results = g.db_session.query(Category)
 
     results = results.filter(Category.namespace_id == g.namespace.id,
-                             Category.deleted_at == None)
+                             Category.deleted_at == None)  # noqa
     results = results.order_by(asc(Category.id))
 
     if args['view'] == 'count':
@@ -482,7 +480,7 @@ def folders_labels_api_impl(public_id):
         category = g.db_session.query(Category).filter(
             Category.namespace_id == g.namespace.id,
             Category.public_id == public_id,
-            Category.deleted_at == None).one()
+            Category.deleted_at == None).one()  # noqa
     except NoResultFound:
         raise NotFoundError('Object not found')
     return g.encoder.jsonify(category)
@@ -507,7 +505,7 @@ def folders_labels_create_api():
     # try to create a category with the same display_name).
     category = g.db_session.query(Category).filter(
         Category.namespace_id == g.namespace.id,
-        Category.name == None,
+        Category.name == None,  # noqa
         Category.display_name == display_name,
         Category.type_ == category_type).first()
 
@@ -542,7 +540,7 @@ def folder_label_update_api(public_id):
         category = g.db_session.query(Category).filter(
             Category.namespace_id == g.namespace.id,
             Category.public_id == public_id,
-            Category.deleted_at == None).one()
+            Category.deleted_at == None).one()  # noqa
     except NoResultFound:
         raise InputError("Couldn't find {} {}".format(
             category_type, public_id))
@@ -580,7 +578,7 @@ def folder_label_delete_api(public_id):
         category = g.db_session.query(Category).filter(
             Category.namespace_id == g.namespace.id,
             Category.public_id == public_id,
-            Category.deleted_at == None).one()
+            Category.deleted_at == None).one()  # noqa
     except NoResultFound:
         raise InputError("Couldn't find {} {}".format(
             category_type, public_id))

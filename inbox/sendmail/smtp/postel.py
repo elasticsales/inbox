@@ -10,6 +10,7 @@ import smtplib
 import requests
 
 from nylas.logging import get_logger
+log = get_logger()
 from inbox.models.session import session_scope
 from inbox.models.backends.imap import ImapAccount
 from inbox.models.backends.oauth import token_manager as default_token_manager
@@ -18,7 +19,7 @@ from inbox.sendmail.base import generate_attachments, SendMailException
 from inbox.sendmail.message import create_email
 from inbox.basicauth import OAuthError
 from inbox.providers import provider_info
-log = get_logger()
+from inbox.util.blockstore import get_from_blockstore
 
 # TODO[k]: Other types (LOGIN, XOAUTH, PLAIN-CLIENTTOKEN, CRAM-MD5)
 AUTH_EXTNS = {'oauth2': 'XOAUTH2',
@@ -40,6 +41,7 @@ SMTP_TEMP_AUTH_FAIL_CODES = (421, 454)
 
 
 class _TokenManagerWrapper:
+
     def get_token(self, account, force_refresh=False):
         if account.provider == 'gmail':
             return g_token_manager.get_token_for_email(
@@ -81,6 +83,7 @@ class SMTP_SSL_VerifyCerts(smtplib.SMTP_SSL):
     """ Derived class which connects via SSL (not starttls) and actually
         verifies SSL certificates on Python 2.
     """
+
     def connect(self, host, port):
         self._server_hostname = host
         smtplib.SMTP_SSL.connect(self, host, port)
@@ -122,6 +125,7 @@ class SMTP_VerifyCerts(smtplib.SMTP):
     """ Derived class which connects via starttls and actually
         verifies SSL certificates on Python 2.
     """
+
     def connect(self, host, port):
         self._server_hostname = host
         smtplib.SMTP.connect(self, host, port)
@@ -172,7 +176,7 @@ class SMTP_VerifyCerts(smtplib.SMTP):
 def _transform_ssl_error(strerror):
     """ Clean up errors like:
 
-    _ssl.c:510: error:14090086:SSL routines:SSL3_GET_SERVER_CERTIFICATE:certificate verify failed
+    _ssl.c:510: error:14090086:SSL routines:SSL3_GET_SERVER_CERTIFICATE:certificate verify failed  # noqa
     """
     if strerror.endswith('certificate verify failed'):
         return 'SMTP server SSL certificate verify failed'
@@ -181,6 +185,7 @@ def _transform_ssl_error(strerror):
 
 
 class SMTPConnection(object):
+
     def __init__(self, account_id, email_address, auth_type,
                  auth_token, smtp_endpoint, log):
         self.account_id = account_id
@@ -303,16 +308,19 @@ class SMTPConnection(object):
 
     def sendmail(self, recipients, msg):
         try:
-            return self.connection.sendmail(self.email_address, recipients, msg)
+            return self.connection.sendmail(
+                self.email_address, recipients, msg)
         except UnicodeEncodeError:
             self.log.error('Unicode error when trying to decode email',
                            logstash_tag='sendmail_encode_error',
                            email=self.email_address, recipients=recipients)
-            raise SendMailException('Invalid character in recipient address', 402)
+            raise SendMailException(
+                'Invalid character in recipient address', 402)
 
 
 class SMTPClient(object):
     """ SMTPClient for Gmail and other IMAP providers. """
+
     def __init__(self, account):
         self.account_id = account.id
         self.log = get_logger()
@@ -466,7 +474,8 @@ class SMTPClient(object):
         recipient_emails = [email for name, email in itertools.chain(
             msg.bcc_addr, msg.cc_addr, msg.to_addr)]
 
-        mime_body = re.sub(r'Bcc: [^\r\n]*\r\n', '', msg.full_body.data)
+        raw_message = get_from_blockstore(msg.data_sha256)
+        mime_body = re.sub(r'Bcc: [^\r\n]*\r\n', '', raw_message)
         self._send(recipient_emails, mime_body)
 
         # Sent to all successfully

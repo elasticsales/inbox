@@ -23,6 +23,7 @@ from inbox.models.backends.imap import ImapUid, ImapFolderInfo
 from inbox.models.util import reconcile_message
 from inbox.sqlalchemy_ext.util import bakery
 from nylas.logging import get_logger
+
 log = get_logger()
 
 
@@ -35,8 +36,8 @@ def local_uids(account_id, session, folder_id, limit=None):
         q += lambda q: q.order_by(desc(ImapUid.msg_uid))
         q += lambda q: q.limit(bindparam('limit'))
     results = q(session).params(account_id=account_id,
-                                   folder_id=folder_id,
-                                   limit=limit).all()
+                                folder_id=folder_id,
+                                limit=limit).all()
     return {u for u, in results}
 
 
@@ -59,6 +60,7 @@ def update_message_metadata(session, account, message, is_draft):
     message.is_draft = is_draft
 
     categories = set()
+
     for i in uids:
         categories.update(i.categories)
 

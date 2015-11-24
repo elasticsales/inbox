@@ -9,10 +9,12 @@ from inbox.models.mixins import (HasRevisions, HasPublicID,
                                  CaseInsensitiveComparator)
 from inbox.models.constants import MAX_INDEXABLE_LENGTH
 from nylas.logging import get_logger
+from inbox.util.misc import fs_folder_path, is_imap_folder_path
 log = get_logger()
 
 
 class Category(MailSyncBase, HasRevisions, HasPublicID):
+
     @property
     def API_OBJECT_NAME(self):
         return self.type_
@@ -36,9 +38,8 @@ class Category(MailSyncBase, HasRevisions, HasPublicID):
             display_name = unicode(display_name)
         display_name = display_name.rstrip()
         if len(display_name) > MAX_INDEXABLE_LENGTH:
-            log.warning("Truncating {} name for account {}; original name was "
-                        "'{}'".format(self.type_, self.namespace.account_id,
-                                      display_name))
+            log.warning('Truncating category name',
+                        type_=self.type_, original=display_name)
             display_name = display_name[:MAX_INDEXABLE_LENGTH]
         return display_name
 
@@ -82,6 +83,11 @@ class Category(MailSyncBase, HasRevisions, HasPublicID):
         if self.namespace.account.provider == 'gmail' and \
                 self.display_name.startswith('[Gmail]/'):
             return self.display_name[8:]
+
+        if self.namespace.account.provider in ['generic', 'fastmail'] and \
+                is_imap_folder_path(self.display_name):
+            return fs_folder_path(self.display_name)
+
         return self.display_name
 
     __table_args__ = (UniqueConstraint('namespace_id', 'name', 'display_name',
