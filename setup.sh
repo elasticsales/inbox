@@ -90,6 +90,7 @@ apt-get -y -o Dpkg::Options::="--force-confold" install \
                    libmysqlclient-dev \
                    gcc \
                    g++ \
+                   libssl-dev \
                    libzmq-dev \
                    libxml2-dev \
                    libxslt-dev \
