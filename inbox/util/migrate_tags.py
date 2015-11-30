@@ -341,8 +341,7 @@ def migrate_account(account_id):
 
 def migrate_accounts():
     with session_scope() as db_session:
-        accounts = db_session.query(Account)\
-                   .filter(Account.sync_should_run == True)\
-                   .options(load_only(Account.id))
+        accounts = db_session.query(Account)
         for account in accounts:
-            migrate_account.delay(account.id)
+            if not account.is_deleted:
+                migrate_account.delay(account.id)
