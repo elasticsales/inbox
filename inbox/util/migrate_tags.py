@@ -24,7 +24,7 @@ log = get_logger()
 TASKTIGER_DATABASE = 10
 MIGRATION_DATABASE = 11
 
-REQUEUE_TIME = 60
+REQUEUE_TIME = 180
 
 tiger = tasktiger.TaskTiger(connection=get_redis_client(db=TASKTIGER_DATABASE,
                                                         strict=False))
