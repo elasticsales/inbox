@@ -15,6 +15,7 @@ from nylas.logging import configure_logging, get_logger
 from redis import Redis
 import tasktiger
 from tasktiger import retry
+from tasktiger.exceptions import JobTimeoutException
 import time
 
 configure_logging()
@@ -330,7 +331,8 @@ def migrate_account_messages(account_id):
 
 @tiger.task(unique=True,
             lock=True,
-            retry_on=[InvalidRequestError],
+            retry_on=[InvalidRequestError, JobTimeoutException,
+                      OperationalError],
             retry_method=retry.fixed(60, 100),
             hard_timeout=1200)
 def migrate_account(account_id):
