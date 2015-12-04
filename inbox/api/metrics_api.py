@@ -28,10 +28,19 @@ def index():
         else:
             namespace = None
 
-        accounts = db_session.query(ImapAccount).with_polymorphic([GenericAccount])
+        # Get all account IDs that aren't deleted
+        account_ids = [result[0] for result in
+            db_session.query(ImapAccount.id, ImapAccount._sync_status)
+            if result[1].get('sync_disabled_reason') != 'account deleted']
+
+        accounts = db_session.query(ImapAccount) \
+                   .with_polymorphic([GenericAccount])
 
         if namespace:
             accounts = accounts.filter(Account.namespace == namespace)
+        else:
+            # This is faster than fetching all accounts.
+            accounts = accounts.filter(ImapAccount.id.in_(account_ids))
 
         accounts = list(accounts)
 
