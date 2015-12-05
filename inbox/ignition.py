@@ -16,6 +16,7 @@ DB_POOL_SIZE = config.get_required('DB_POOL_SIZE')
 # Sane default of max overflow=5 if value missing in config.
 DB_POOL_MAX_OVERFLOW = config.get('DB_POOL_MAX_OVERFLOW') or 5
 DB_POOL_TIMEOUT = config.get('DB_POOL_TIMEOUT') or 60
+DB_POOL_RECYCLE = config.get('DB_POOL_RECYCLE') or 3600
 
 
 # See
@@ -36,14 +37,14 @@ def build_uri(username, password, hostname, port, database_name):
 
 def engine(database_name, database_uri, pool_size=DB_POOL_SIZE,
            max_overflow=DB_POOL_MAX_OVERFLOW, pool_timeout=DB_POOL_TIMEOUT,
-           echo=False):
+           echo=False, pool_recycle=DB_POOL_RECYCLE):
     engine = create_engine(database_uri,
                            listeners=[ForceStrictMode()],
                            isolation_level='READ COMMITTED',
                            echo=False,
                            pool_size=pool_size,
                            pool_timeout=pool_timeout,
-                           pool_recycle=3600,
+                           pool_recycle=pool_recycle,
                            max_overflow=max_overflow,
                            connect_args={'charset': 'utf8mb4',
                                          'waiter': gevent_waiter})
