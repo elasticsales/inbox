@@ -213,7 +213,28 @@ def modify_namespace(namespace_public_id):
 
         elif isinstance(account, GmailAccount):
             if 'refresh_token' in data:
+                from inbox.models.backends.gmail import GmailAuthCredentials
+                from inbox.config import config
+
+                OAUTH_CLIENT_ID = config.get_required('GOOGLE_OAUTH_CLIENT_ID')
+                OAUTH_CLIENT_SECRET = config.get_required('GOOGLE_OAUTH_CLIENT_SECRET')
+
                 account.refresh_token = data['refresh_token']
+
+                # See if we already have credentials for this client_id/secret
+                # pair. If those don't exist, make a new GmailAuthCredentials
+                auth_creds = next(
+                    (auth_creds for auth_creds in account.auth_credentials
+                     if (auth_creds.client_id == OAUTH_CLIENT_ID and
+                         auth_creds.client_secret == OAUTH_CLIENT_SECRET)),
+                    GmailAuthCredentials())
+                auth_creds.gmailaccount = account
+                auth_creds.scopes = 'https://mail.google.com/'
+                auth_creds.client_id = OAUTH_CLIENT_ID
+                auth_creds.client_secret = OAUTH_CLIENT_SECRET
+                auth_creds.refresh_token = data['refresh_token']
+                auth_creds.is_valid = True
+                db_session.add(auth_creds)
 
             if 'imap_endpoint' in data or 'imap_username' in data or \
                'imap_password' in data:
