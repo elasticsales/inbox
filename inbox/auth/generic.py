@@ -220,7 +220,7 @@ def create_imap_connection(host, port, is_secure=True):
     context.verify_mode = ssl.CERT_NONE
 
     conn = IMAPClient(host, port=port, use_uid=True,
-                      ssl=use_ssl, ssl_context=context, timeout=300)
+                      ssl=use_ssl, ssl_context=context, timeout=600)
     if is_secure and not use_ssl:
         # Raises an exception if TLS can't be established
         conn.starttls(context)
