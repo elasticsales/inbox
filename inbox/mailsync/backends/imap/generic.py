@@ -141,6 +141,7 @@ class FolderSyncEngine(Greenlet):
             'initial uidinvalid': self.resync_uids,
             'poll': self.poll,
             'poll uidinvalid': self.resync_uids,
+            'finish': lambda: 'finish',
         }
 
         Greenlet.__init__(self)
