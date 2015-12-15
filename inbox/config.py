@@ -1,13 +1,12 @@
 import errno
 import os
 import yaml
-from urllib import quote_plus as urlquote
 
-
-__all__ = ['config', 'engine_uri', 'db_uri']
+__all__ = ['config']
 
 
 class ConfigError(Exception):
+
     def __init__(self, error=None, help=None):
         self.error = error or ''
         self.help = help or \
@@ -19,6 +18,7 @@ class ConfigError(Exception):
 
 
 class Configuration(dict):
+
     def __init__(self, *args, **kwargs):
         dict.__init__(self, *args, **kwargs)
 
@@ -30,7 +30,8 @@ class Configuration(dict):
 
 
 def _update_config_from_env(config):
-    """Update a config dictionary from configuration files specified in the
+    """
+    Update a config dictionary from configuration files specified in the
     environment.
 
     The environment variable `INBOX_CFG_PATH` contains a list of .json or .yml
@@ -51,8 +52,8 @@ def _update_config_from_env(config):
       {srcdir}/etc/secrets-dev.yml:{srcdir}/etc/config-dev.yml
 
     Missing files in the path will be ignored.
-    """
 
+    """
     srcdir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
 
     if 'INBOX_ENV' in os.environ:
@@ -101,39 +102,12 @@ def _get_local_feature_flags(config):
         flags = config.get('FEATURE_FLAGS', '').split()
     config['FEATURE_FLAGS'] = flags
 
+
+def _get_process_name(config):
+    if os.environ.get('PROCESS_NAME') is not None:
+        config['PROCESS_NAME'] = os.environ.get("PROCESS_NAME")
+
 config = Configuration()
 _update_config_from_env(config)
 _get_local_feature_flags(config)
-
-if 'MYSQL_PASSWORD' not in config:
-    raise Exception(
-        'Missing secrets config file? Run `sudo cp etc/secrets-dev.yml '
-        '/etc/inboxapp/secrets.yml` and retry')
-
-
-def engine_uri(database=None):
-    """ By default doesn't include the specific database. """
-
-    info = {
-        'username': config.get_required('MYSQL_USER'),
-        'password': config.get_required('MYSQL_PASSWORD'),
-        'host': config.get_required('MYSQL_HOSTNAME'),
-        'port': str(config.get_required('MYSQL_PORT')),
-        'database': database if database else '',
-    }
-
-    # So we can use docker links to dynamically attach containerized databases
-    # https://docs.docker.com/userguide/dockerlinks/#environment-variables
-
-    info['host'] = os.getenv("MYSQL_PORT_3306_TCP_ADDR", info['host'])
-    info['port'] = os.getenv("MYSQL_PORT_3306_TCP_PORT", info['port'])
-
-    uri_template = 'mysql+mysqldb://{username}:{password}@{host}' \
-                   ':{port}/{database}?charset=utf8mb4'
-
-    return uri_template.format(**{k: urlquote(v) for k, v in info.items()})
-
-
-def db_uri():
-    database = config.get_required('MYSQL_DATABASE')
-    return engine_uri(database)
+_get_process_name(config)

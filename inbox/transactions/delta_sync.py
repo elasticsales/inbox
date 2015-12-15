@@ -3,28 +3,13 @@ import gevent
 import collections
 from datetime import datetime
 
-from sqlalchemy import asc, desc
-from sqlalchemy.orm import subqueryload
+from sqlalchemy import asc, desc, func, bindparam
 from inbox.api.kellogs import APIEncoder, encode
 from inbox.models import Transaction, Message, Thread
 from inbox.models.session import session_scope
 from inbox.models.util import transaction_objects
+from inbox.sqlalchemy_ext.util import bakery
 
-
-QUERY_OPTIONS = {
-    Message: (
-        subqueryload('parts').joinedload('block'),
-        subqueryload('thread').load_only('public_id', 'discriminator'),
-        subqueryload('events').load_only('public_id', 'discriminator')
-    ),
-    Thread: (
-        subqueryload('messages').load_only(
-            'public_id', 'is_draft', 'from_addr', 'to_addr', 'cc_addr',
-            'bcc_addr'),
-        subqueryload('tagitems').joinedload('tag').load_only(
-            'public_id', 'name')
-    )
-}
 
 EVENT_NAME_FOR_COMMAND = {
     'insert': 'create',
@@ -45,7 +30,7 @@ def get_transaction_cursor_near_timestamp(namespace_id, timestamp, db_session):
         Id of the namespace for which to get a cursor.
     timestamp: int
         Unix timestamp
-    db_session: InboxSession
+    db_session: new_session
         database session
 
     Returns
@@ -88,9 +73,22 @@ def get_transaction_cursor_near_timestamp(namespace_id, timestamp, db_session):
     return latest_transaction.public_id
 
 
+def _get_last_trx_id_for_namespace(namespace_id, db_session):
+    q = bakery(lambda session: session.query(func.max(Transaction.id)))
+    q += lambda q: q.filter(
+        Transaction.namespace_id == bindparam('namespace_id'),
+        Transaction.deleted_at.is_(None))
+    q += lambda q: q.with_hint(Transaction,
+                               'USE INDEX (namespace_id_deleted_at)')
+    return q(db_session).params(namespace_id=namespace_id).one()[0]
+
+
 def format_transactions_after_pointer(namespace, pointer, db_session,
                                       result_limit, exclude_types=None,
-                                      include_types=None):
+                                      include_types=None,
+                                      exclude_folders=True,
+                                      legacy_nsid=False,
+                                      expand=False):
     """
     Return a pair (deltas, new_pointer), where deltas is a list of change
     events, represented as dictionaries:
@@ -109,7 +107,7 @@ def format_transactions_after_pointer(namespace, pointer, db_session,
         Namespace for which to get changes.
     pointer: int
         Process transactions starting after this id.
-    db_session: InboxSession
+    db_session: new_session
         database session
     result_limit: int
         Maximum number of results to return. (Because we may roll up multiple
@@ -120,6 +118,18 @@ def format_transactions_after_pointer(namespace, pointer, db_session,
         If given, don't include transactions for these types of objects.
 
     """
+    exclude_types = set(exclude_types) if exclude_types else set()
+    # Begin backwards-compatibility shim -- suppress new object types for now,
+    # because clients may not be able to deal with them.
+    exclude_types.add('account')
+    if exclude_folders is True:
+        exclude_types.update(('folder', 'label'))
+    # End backwards-compatibility shim.
+
+    last_trx = _get_last_trx_id_for_namespace(namespace.id, db_session)
+    if last_trx == pointer:
+        return ([], pointer)
+
     while True:
         # deleted_at condition included to allow this query to be satisfied via
         # the legacy index on (namespace_id, deleted_at) for performance.
@@ -157,6 +167,8 @@ def format_transactions_after_pointer(namespace, pointer, db_session,
             trxs_by_obj_type[trx.object_type].append(trx)
 
         for obj_type, trxs in trxs_by_obj_type.items():
+            if obj_type == 'tag':
+                continue
             # Build a dictionary mapping pairs (record_id, command) to
             # transaction. If successive modifies for a given record id appear
             # in the list of transactions, this will only keep the latest
@@ -171,8 +183,10 @@ def format_transactions_after_pointer(namespace, pointer, db_session,
             query = db_session.query(object_cls).filter(
                 object_cls.id.in_(ids_to_query),
                 object_cls.namespace_id == namespace.id)
-            if object_cls in QUERY_OPTIONS:
-                query = query.options(*QUERY_OPTIONS[object_cls])
+            if object_cls == Thread:
+                query = query.options(*Thread.api_loading_options(expand))
+            elif object_cls == Message:
+                query = query.options(*Message.api_loading_options(expand))
             objects = {obj.id: obj for obj in query}
 
             for trx in latest_trxs:
@@ -187,7 +201,8 @@ def format_transactions_after_pointer(namespace, pointer, db_session,
                     if obj is None:
                         continue
                     repr_ = encode(
-                        obj, namespace_public_id=namespace.public_id)
+                        obj, namespace_public_id=namespace.public_id,
+                        legacy_nsid=legacy_nsid, expand=expand)
                     delta['attributes'] = repr_
 
                 results.append((trx.id, delta))
@@ -206,7 +221,8 @@ def format_transactions_after_pointer(namespace, pointer, db_session,
 
 def streaming_change_generator(namespace, poll_interval, timeout,
                                transaction_pointer, exclude_types=None,
-                               include_types=None):
+                               include_types=None, exclude_folders=True,
+                               legacy_nsid=False, expand=False):
     """
     Poll the transaction log for the given `namespace_id` until `timeout`
     expires, and yield each time new entries are detected.
@@ -223,13 +239,14 @@ def streaming_change_generator(namespace, poll_interval, timeout,
         `transaction_pointer`.
 
     """
-    encoder = APIEncoder()
+    encoder = APIEncoder(legacy_nsid=legacy_nsid)
     start_time = time.time()
     while time.time() - start_time < timeout:
-        with session_scope() as db_session:
+        with session_scope(namespace.id) as db_session:
             deltas, new_pointer = format_transactions_after_pointer(
                 namespace, transaction_pointer, db_session, 100,
-                exclude_types, include_types)
+                exclude_types, include_types, exclude_folders,
+                legacy_nsid=legacy_nsid, expand=expand)
 
         if new_pointer is not None and new_pointer != transaction_pointer:
             transaction_pointer = new_pointer

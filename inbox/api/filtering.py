@@ -1,15 +1,18 @@
-from sqlalchemy import and_, or_, desc, asc, func
+from sqlalchemy import and_, or_, desc, asc, func, bindparam
 from sqlalchemy.orm import subqueryload, contains_eager
+from inbox.api.err import InputError
+from inbox.api.validation import valid_public_id
 from inbox.models import (Contact, Event, Calendar, Message,
-                          MessageContactAssociation, Thread, Tag,
-                          TagItem, Block, Part)
+                          MessageContactAssociation, Thread,
+                          Block, Part, MessageCategory, Category)
 from inbox.models.event import RecurringEvent
+from inbox.sqlalchemy_ext.util import bakery
 
 
 def threads(namespace_id, subject, from_addr, to_addr, cc_addr, bcc_addr,
             message_id_header, any_email, thread_public_id, started_before,
             started_after, last_message_before, last_message_after, filename,
-            tag, limit, offset, view, db_session):
+            in_, unread, starred, limit, offset, view, db_session):
 
     if view == 'count':
         query = db_session.query(func.count(Thread.id))
@@ -38,13 +41,6 @@ def threads(namespace_id, subject, from_addr, to_addr, cc_addr, bcc_addr,
         filters.append(Thread.subject == subject)
 
     query = query.filter(*filters)
-
-    if tag is not None:
-        tag_query = db_session.query(TagItem).join(Tag). \
-            filter(or_(Tag.public_id == tag, Tag.name == tag),
-                   Tag.namespace_id == namespace_id).subquery()
-
-        query = query.join(tag_query)
 
     if from_addr is not None:
         from_query = db_session.query(Message.thread_id). \
@@ -97,7 +93,32 @@ def threads(namespace_id, subject, from_addr, to_addr, cc_addr, bcc_addr,
                    Block.namespace_id == namespace_id). \
             subquery()
         query = query.filter(Thread.id.in_(files_query))
-        query = query.join(files_query)
+
+    if in_ is not None:
+        category_filters = [Category.name == in_, Category.display_name == in_]
+        try:
+            valid_public_id(in_)
+            category_filters.append(Category.public_id == in_)
+        except InputError:
+            pass
+        category_query = db_session.query(Message.thread_id). \
+            join(MessageCategory).join(Category). \
+            filter(Category.namespace_id == namespace_id,
+                   or_(*category_filters)).subquery()
+        query = query.filter(Thread.id.in_(category_query))
+
+    if unread is not None:
+        read = not unread
+        unread_query = db_session.query(Message.thread_id).filter(
+            Message.namespace_id == namespace_id,
+            Message.is_read == read).subquery()
+        query = query.filter(Thread.id.in_(unread_query))
+
+    if starred is not None:
+        starred_query = db_session.query(Message.thread_id).filter(
+            Message.namespace_id == namespace_id,
+            Message.is_starred == starred).subquery()
+        query = query.filter(Thread.id.in_(starred_query))
 
     if view == 'count':
         return {"count": query.one()[0]}
@@ -105,27 +126,11 @@ def threads(namespace_id, subject, from_addr, to_addr, cc_addr, bcc_addr,
     # Eager-load some objects in order to make constructing API
     # representations faster.
     if view != 'ids':
-        query = query.options(
-            subqueryload('tagitems').joinedload('tag').
-            load_only('public_id', 'name'))
-
-        if view == 'expanded':
-            query = query.options(
-                subqueryload(Thread.messages).
-                load_only('public_id', 'subject', 'is_draft', 'version',
-                          'from_addr', 'to_addr', 'cc_addr', 'bcc_addr',
-                          'received_date', 'snippet', 'is_read',
-                          'reply_to_message_id', 'reply_to')
-                .joinedload(Message.parts)
-                .joinedload(Part.block))
-
-        else:
-            query = query.options(
-                subqueryload(Thread.messages).
-                load_only('public_id', 'is_draft', 'from_addr', 'to_addr',
-                          'cc_addr', 'bcc_addr'))
+        expand = (view == 'expanded')
+        query = query.options(*Thread.api_loading_options(expand))
 
     query = query.order_by(desc(Thread.recentdate)).limit(limit)
+
     if offset:
         query = query.offset(offset)
 
@@ -135,141 +140,197 @@ def threads(namespace_id, subject, from_addr, to_addr, cc_addr, bcc_addr,
     return query.all()
 
 
-def _messages_or_drafts(namespace_id, drafts, subject, from_addr, to_addr,
-                        cc_addr, bcc_addr, any_email, thread_public_id,
-                        started_before, started_after, last_message_before,
-                        last_message_after, filename, tag, limit, offset,
-                        view, db_session):
+def messages_or_drafts(namespace_id, drafts, subject, from_addr, to_addr,
+                       cc_addr, bcc_addr, any_email, thread_public_id,
+                       started_before, started_after, last_message_before,
+                       last_message_after, received_before, received_after,
+                       filename, in_, unread, starred, limit, offset, view,
+                       db_session):
+    # Warning: complexities ahead. This function sets up the query that gets
+    # results for the /messages API. It loads from several tables, supports a
+    # variety of views and filters, and is performance-critical for the API. As
+    # such, it is not super simple.
+    #
+    # We bake the generated query to avoid paying query compilation overhead on
+    # every request. This requires some attention: every parameter that can
+    # vary between calls *must* be inserted via bindparam(), or else the first
+    # value passed will be baked into the query and reused on each request.
+    # Subqueries (on contact tables) can't be properly baked, so we have to
+    # call query.spoil() on those code paths.
+
+    param_dict = {
+        'namespace_id': namespace_id,
+        'drafts': drafts,
+        'subject': subject,
+        'from_addr': from_addr,
+        'to_addr': to_addr,
+        'cc_addr': cc_addr,
+        'bcc_addr': bcc_addr,
+        'any_email': any_email,
+        'thread_public_id': thread_public_id,
+        'received_before': received_before,
+        'received_after': received_after,
+        'started_before': started_before,
+        'started_after': started_after,
+        'last_message_before': last_message_before,
+        'last_message_after': last_message_after,
+        'filename': filename,
+        'in_': in_,
+        'unread': unread,
+        'starred': starred,
+        'limit': limit,
+        'offset': offset
+    }
 
     if view == 'count':
-        query = db_session.query(func.count(Message.id))
+        query = bakery(lambda s: s.query(func.count(Message.id)))
     elif view == 'ids':
-        query = db_session.query(Message.public_id)
+        query = bakery(lambda s: s.query(Message.public_id))
     else:
-        query = db_session.query(Message)
-        query = query.options(contains_eager(Message.thread))
-
-    query = query.join(Thread)
-
-    filters = [Message.namespace_id == namespace_id]
-    if drafts:
-        filters.append(Message.is_draft)
-    else:
-        filters.append(~Message.is_draft)
+        query = bakery(lambda s: s.query(Message))
+    query += lambda q: q.join(Thread)
+    query += lambda q: q.filter(
+        Message.namespace_id == bindparam('namespace_id'),
+        Message.is_draft == bindparam('drafts'))
 
     if subject is not None:
-        filters.append(Message.subject == subject)
+        query += lambda q: q.filter(Message.subject == bindparam('subject'))
+
+    if unread is not None:
+        query += lambda q: q.filter(Message.is_read != bindparam('unread'))
+
+    if starred is not None:
+        query += lambda q: q.filter(Message.is_starred == bindparam('starred'))
 
     if thread_public_id is not None:
-        filters.append(Thread.public_id == thread_public_id)
+        query += lambda q: q.filter(
+            Thread.public_id == bindparam('thread_public_id'))
 
+    # TODO: deprecate thread-oriented date filters on message endpoints.
     if started_before is not None:
-        filters.append(Thread.subjectdate < started_before)
-        filters.append(Thread.namespace_id == namespace_id)
+        query += lambda q: q.filter(
+            Thread.subjectdate < bindparam('started_before'),
+            Thread.namespace_id == bindparam('namespace_id'))
 
     if started_after is not None:
-        filters.append(Thread.subjectdate > started_after)
-        filters.append(Thread.namespace_id == namespace_id)
+        query += lambda q: q.filter(
+            Thread.subjectdate > bindparam('started_after'),
+            Thread.namespace_id == bindparam('namespace_id'))
 
     if last_message_before is not None:
-        filters.append(Thread.recentdate < last_message_before)
-        filters.append(Thread.namespace_id == namespace_id)
+        query += lambda q: q.filter(
+            Thread.recentdate < bindparam('last_message_before'),
+            Thread.namespace_id == bindparam('namespace_id'))
 
     if last_message_after is not None:
-        filters.append(Thread.recentdate > last_message_after)
-        filters.append(Thread.namespace_id == namespace_id)
+        query += lambda q: q.filter(
+            Thread.recentdate > bindparam('last_message_after'),
+            Thread.namespace_id == bindparam('namespace_id'))
 
-    if tag is not None:
-        query = query.join(TagItem).join(Tag). \
-            filter(or_(Tag.public_id == tag, Tag.name == tag),
-                   Tag.namespace_id == namespace_id)
+    if received_before is not None:
+        query += lambda q: q.filter(
+            Message.received_date <= bindparam('received_before'))
+
+    if received_after is not None:
+        query += lambda q: q.filter(
+            Message.received_date > bindparam('received_after'))
 
     if to_addr is not None:
+        query.spoil()
         to_query = db_session.query(MessageContactAssociation.message_id). \
             join(Contact).filter(
                 MessageContactAssociation.field == 'to_addr',
                 Contact.email_address == to_addr,
-                Contact.namespace_id == namespace_id).subquery()
-        filters.append(Message.id.in_(to_query))
+                Contact.namespace_id == bindparam('namespace_id')).subquery()
+        query += lambda q: q.filter(Message.id.in_(to_query))
 
     if from_addr is not None:
+        query.spoil()
         from_query = db_session.query(MessageContactAssociation.message_id). \
             join(Contact).filter(
                 MessageContactAssociation.field == 'from_addr',
                 Contact.email_address == from_addr,
-                Contact.namespace_id == namespace_id).subquery()
-        filters.append(Message.id.in_(from_query))
+                Contact.namespace_id == bindparam('namespace_id')).subquery()
+        query += lambda q: q.filter(Message.id.in_(from_query))
 
     if cc_addr is not None:
+        query.spoil()
         cc_query = db_session.query(MessageContactAssociation.message_id). \
             join(Contact).filter(
                 MessageContactAssociation.field == 'cc_addr',
                 Contact.email_address == cc_addr,
-                Contact.namespace_id == namespace_id).subquery()
-        filters.append(Message.id.in_(cc_query))
+                Contact.namespace_id == bindparam('namespace_id')).subquery()
+        query += lambda q: q.filter(Message.id.in_(cc_query))
 
     if bcc_addr is not None:
+        query.spoil()
         bcc_query = db_session.query(MessageContactAssociation.message_id). \
             join(Contact).filter(
                 MessageContactAssociation.field == 'bcc_addr',
                 Contact.email_address == bcc_addr,
-                Contact.namespace_id == namespace_id).subquery()
-        filters.append(Message.id.in_(bcc_query))
+                Contact.namespace_id == bindparam('namespace_id')).subquery()
+        query += lambda q: q.filter(Message.id.in_(bcc_query))
 
     if any_email is not None:
+        query.spoil()
         any_email_query = db_session.query(
             MessageContactAssociation.message_id).join(Contact). \
             filter(Contact.email_address == any_email,
-                   Contact.namespace_id == namespace_id).subquery()
-        filters.append(Message.id.in_(any_email_query))
+                   Contact.namespace_id == bindparam('namespace_id')). \
+            subquery()
+        query += lambda q: q.filter(Message.id.in_(any_email_query))
 
     if filename is not None:
-        query = query.join(Part).join(Block). \
-            filter(Block.filename == filename,
-                   Block.namespace_id == namespace_id)
+        query += lambda q: q.join(Part).join(Block). \
+            filter(Block.filename == bindparam('filename'),
+                   Block.namespace_id == bindparam('namespace_id'))
 
-    query = query.filter(*filters)
+    if in_ is not None:
+        query.spoil()
+        category_filters = [Category.name == bindparam('in_'),
+                            Category.display_name == bindparam('in_')]
+        try:
+            valid_public_id(in_)
+            category_filters.append(Category.public_id == bindparam('in_id'))
+            # Type conversion and bindparams interact poorly -- you can't do
+            # e.g.
+            # query.filter(or_(Category.name == bindparam('in_'),
+            #                  Category.public_id == bindparam('in_')))
+            # because the binary conversion defined by Category.public_id will
+            # be applied to the bound value prior to its insertion in the
+            # query. So we define another bindparam for the public_id:
+            param_dict['in_id'] = in_
+        except InputError:
+            pass
+        query += lambda q: q.join(MessageCategory).join(Category). \
+            filter(Category.namespace_id == namespace_id,
+                   or_(*category_filters))
 
     if view == 'count':
-        return {"count": query.one()[0]}
+        res = query(db_session).params(**param_dict).one()[0]
+        return {"count": res}
 
-    query = query.order_by(desc(Message.received_date))
-    query = query.limit(limit)
+    query += lambda q: q.order_by(desc(Message.received_date))
+    query += lambda q: q.limit(bindparam('limit'))
     if offset:
-        query = query.offset(offset)
+        query += lambda q: q.offset(bindparam('offset'))
 
     if view == 'ids':
-        return [x[0] for x in query.all()]
+        res = query(db_session).params(**param_dict).all()
+        return [x[0] for x in res]
 
     # Eager-load related attributes to make constructing API representations
-    # faster.
-    query = query.options(subqueryload(Message.parts).joinedload(Part.block))
+    # faster. Note that we don't use the options defined by
+    # Message.api_loading_options() here because we already have a join to the
+    # thread table. We should eventually try to simplify this.
+    query += lambda q: q.options(
+        contains_eager(Message.thread),
+        subqueryload(Message.messagecategories).joinedload('category'),
+        subqueryload(Message.parts).joinedload(Part.block),
+        subqueryload(Message.events))
 
-    return query.all()
-
-
-def messages(namespace_id, subject, from_addr, to_addr, cc_addr, bcc_addr,
-             any_email, thread_public_id, started_before, started_after,
-             last_message_before, last_message_after, filename, tag, limit,
-             offset, view, db_session):
-    return _messages_or_drafts(namespace_id, False, subject, from_addr,
-                               to_addr, cc_addr, bcc_addr, any_email,
-                               thread_public_id, started_before,
-                               started_after, last_message_before,
-                               last_message_after, filename, tag, limit,
-                               offset, view, db_session)
-
-
-def drafts(namespace_id, subject, from_addr, to_addr, cc_addr, bcc_addr,
-           any_email, thread_public_id, started_before, started_after,
-           last_message_before, last_message_after, filename, tag, limit,
-           offset, view, db_session):
-    return _messages_or_drafts(namespace_id, True, subject, from_addr,
-                               to_addr, cc_addr, bcc_addr, any_email,
-                               thread_public_id, started_before,
-                               started_after, last_message_before,
-                               last_message_after, filename, tag, limit,
-                               offset, view, db_session)
+    prepared = query(db_session).params(**param_dict)
+    return prepared.all()
 
 
 def files(namespace_id, message_public_id, filename, content_type,
@@ -288,7 +349,7 @@ def files(namespace_id, message_public_id, filename, content_type,
     # attachment)
     query = query.outerjoin(Part)
     query = query.filter(or_(Part.id.is_(None),
-                         Part.content_disposition.isnot(None)))
+                             Part.content_disposition.isnot(None)))
 
     if content_type is not None:
         query = query.filter(or_(Block._content_type_common == content_type,
@@ -348,13 +409,16 @@ def filter_event_query(query, event_cls, namespace_id, event_public_id,
 
 
 def recurring_events(filters, starts_before, starts_after, ends_before,
-                     ends_after, db_session):
+                     ends_after, db_session, show_cancelled=False):
     # Expands individual recurring events into full instances.
     # If neither starts_before or ends_before is given, the recurring range
     # defaults to now + 1 year (see events/recurring.py)
 
     recur_query = db_session.query(RecurringEvent)
     recur_query = filter_event_query(recur_query, RecurringEvent, *filters)
+
+    if show_cancelled is False:
+        recur_query = recur_query.filter(RecurringEvent.status != 'cancelled')
 
     before_criteria = []
     if starts_before:
@@ -366,14 +430,15 @@ def recurring_events(filters, starts_before, starts_after, ends_before,
     after_criteria = []
     if starts_after:
         after_criteria.append(or_(RecurringEvent.until > starts_after,
-                                  RecurringEvent.until == None))
+                                  RecurringEvent.until == None))  # noqa
     if ends_after:
         after_criteria.append(or_(RecurringEvent.until > ends_after,
-                                  RecurringEvent.until == None))
+                                  RecurringEvent.until == None))  # noqa
 
     recur_query = recur_query.filter(and_(*after_criteria))
 
     recur_instances = []
+
     for r in recur_query:
         # the occurrences check only checks starting timestamps
         if ends_before and not starts_before:
@@ -436,7 +501,8 @@ def events(namespace_id, event_public_id, calendar_public_id, title,
 
     if expand_recurring:
         expanded = recurring_events(filters, starts_before, starts_after,
-                                    ends_before, ends_after, db_session)
+                                    ends_before, ends_after, db_session,
+                                    show_cancelled=show_cancelled)
 
         # Combine non-recurring events with expanded recurring ones
         all_events = query.filter(Event.discriminator == 'event').all() + \
@@ -465,21 +531,17 @@ def events(namespace_id, event_public_id, calendar_public_id, title,
         return all_events
 
 
-def messages_for_contact_scores(db_session, namespace_id,
-                                from_email, starts_after=None):
-    query = db_session.query(
+def messages_for_contact_scores(db_session, namespace_id, starts_after=None):
+    query = (db_session.query(
         Message.to_addr, Message.cc_addr, Message.bcc_addr,
         Message.id, Message.received_date.label('date'))
-    filters = [Message.namespace_id == namespace_id, ~Message.is_draft]
+        .join(MessageCategory)
+        .join(Category)
+        .filter(Message.namespace_id == namespace_id)
+        .filter(Category.name == 'sent')
+        .filter(~Message.is_draft))
+
     if starts_after:
-        filters.append(Message.received_date > starts_after)
+        query = query.filter(Message.received_date > starts_after)
 
-    from_query = db_session.query(MessageContactAssociation.message_id). \
-        join(Contact).filter(
-            MessageContactAssociation.field == 'from_addr',
-            Contact.email_address == from_email,
-            Contact.namespace_id == namespace_id).subquery()
-
-    filters.append(Message.id.in_(from_query))
-    query = query.filter(*filters)
     return query.all()

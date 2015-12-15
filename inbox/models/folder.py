@@ -1,160 +1,97 @@
-from sqlalchemy import Column, Integer, String, ForeignKey
-from sqlalchemy.orm import relationship, backref
-from sqlalchemy.orm.exc import NoResultFound, MultipleResultsFound
+from sqlalchemy import Column, String, ForeignKey, DateTime, bindparam
+from sqlalchemy.orm import relationship, backref, validates
 from sqlalchemy.schema import UniqueConstraint
+from sqlalchemy.orm.exc import NoResultFound, MultipleResultsFound
 
 from inbox.models.base import MailSyncBase
-from inbox.models.tag import Tag
-from inbox.models.constants import MAX_FOLDER_NAME_LENGTH, MAX_INDEXABLE_LENGTH
-from inbox.log import get_logger
+from inbox.models.category import Category
+from inbox.models.constants import MAX_FOLDER_NAME_LENGTH
+from inbox.sqlalchemy_ext.util import bakery
+from nylas.logging import get_logger
 log = get_logger()
 
 
 class Folder(MailSyncBase):
-    """ Folders and labels from the remote account backend (IMAP/Exchange). """
-    # `use_alter` required here to avoid circular dependency w/Account
-    account_id = Column(Integer,
-                        ForeignKey('account.id', use_alter=True,
-                                   name='folder_fk1',
-                                   ondelete='CASCADE'), nullable=False)
-
+    """ Folders from the remote account backend (Generic IMAP/ Gmail). """
     # TOFIX this causes an import error due to circular dependencies
     # from inbox.models.account import Account
+    # `use_alter` required here to avoid circular dependency w/Account
+    account_id = Column(ForeignKey('account.id', use_alter=True,
+                                   name='folder_fk1',
+                                   ondelete='CASCADE'), nullable=False)
     account = relationship(
-        'Account', backref=backref('folders', cascade='delete'),
-        foreign_keys=[account_id])
+        'Account',
+        backref=backref(
+            'folders',
+            # Don't load folders if the account is deleted,
+            # (the folders will be deleted by the foreign key delete casade).
+            passive_deletes=True),
+        foreign_keys=[account_id],
+        load_on_pending=True)
 
     # Set the name column to be case sensitive, which isn't the default for
     # MySQL. This is a requirement since IMAP allows users to create both a
     # 'Test' and a 'test' (or a 'tEST' for what we care) folders.
     # NOTE: this doesn't hold for EAS, which is case insensitive for non-Inbox
-    # folders (see
-    # https://msdn.microsoft.com/en-us/library/ee624913(v=exchg.80).aspx).
-    name = Column(String(MAX_FOLDER_NAME_LENGTH,
-                         collation='utf8mb4_bin'), nullable=True)
+    # folders as per
+    # https://msdn.microsoft.com/en-us/library/ee624913(v=exchg.80).aspx
+    name = Column(String(MAX_FOLDER_NAME_LENGTH, collation='utf8mb4_bin'),
+                  nullable=True)
     canonical_name = Column(String(MAX_FOLDER_NAME_LENGTH), nullable=True)
 
-    # We use an additional identifier for certain providers,
-    # for e.g. EAS uses it to store the eas_folder_id
-    identifier = Column(String(MAX_FOLDER_NAME_LENGTH), nullable=True)
+    category_id = Column(ForeignKey(Category.id, ondelete='CASCADE'))
+    category = relationship(
+        Category,
+        backref=backref('folders',
+                        cascade='all, delete-orphan'))
 
-    __table_args__ = (UniqueConstraint('account_id', 'name',
-                                       name='account_id_2'),)
+    initial_sync_start = Column(DateTime, nullable=True)
+    initial_sync_end = Column(DateTime, nullable=True)
 
-    @property
-    def lowercase_name(self):
-        if self.name is None:
-            return None
-        return self.name.lower()
-
-    @property
-    def namespace(self):
-        return self.account.namespace
+    @validates('name')
+    def sanitize_name(self, key, name):
+        name = name.rstrip()
+        if len(name) > MAX_FOLDER_NAME_LENGTH:
+            log.warning("Truncating folder name for account {}; original name "
+                        "was '{}'".format(self.account_id, name))
+            name = name[:MAX_FOLDER_NAME_LENGTH]
+        return name
 
     @classmethod
-    def create(cls, account, name, session, canonical_name=None):
-        if name is not None and len(name) > MAX_FOLDER_NAME_LENGTH:
+    def find_or_create(cls, session, account, name, role=None):
+        q = session.query(cls).filter(cls.account_id == account.id)
+
+        if role is not None:
+            q = q.filter(cls.canonical_name == role)
+
+        # Remove trailing whitespace, truncate to max folder name length.
+        # Not ideal but necessary to work around MySQL limitations.
+        name = name.rstrip()
+        if len(name) > MAX_FOLDER_NAME_LENGTH:
             log.warning("Truncating long folder name for account {}; "
                         "original name was '{}'" .format(account.id, name))
             name = name[:MAX_FOLDER_NAME_LENGTH]
-        obj = cls(account=account, name=name, canonical_name=canonical_name)
-        session.add(obj)
-        return obj
+        q = q.filter(cls.name == name)
 
-    @classmethod
-    def find_or_create(cls, session, account, name, canonical_name=None):
-        q = session.query(cls).filter_by(account_id=account.id)
-        if name is not None:
-            # Remove trailing whitespace and truncate to max folder name
-            # length. Not ideal but necessary to work around MySQL limitations.
-            name = name.rstrip()
-            name = name[:MAX_FOLDER_NAME_LENGTH]
-            q = q.filter_by(name=name)
-        if canonical_name is not None:
-            q = q.filter_by(canonical_name=canonical_name)
         try:
             obj = q.one()
         except NoResultFound:
-            obj = cls.create(account, name, session, canonical_name)
+            obj = cls(account=account, name=name, canonical_name=role)
+            obj.category = Category.find_or_create(
+                session, namespace_id=account.namespace.id, name=role,
+                display_name=name, type_='folder')
+            session.add(obj)
         except MultipleResultsFound:
-            log.info("Duplicate folder rows for folder {} for account {}"
+            log.info('Duplicate folder rows for name {}, account_id {}'
                      .format(name, account.id))
             raise
+
         return obj
 
-    def get_associated_tag(self, db_session, create_if_missing=True):
-        if self.canonical_name is not None:
-            try:
-                return db_session.query(Tag). \
-                    filter(Tag.namespace_id == self.namespace.id,
-                           Tag.public_id == self.canonical_name).one()
-            except NoResultFound:
-                # Explicitly set the namespace_id instead of the namespace
-                # attribute to avoid autoflush-induced IntegrityErrors where
-                # the namespace_id is null on flush.
-                if create_if_missing:
-                    tag = Tag(namespace_id=self.account.namespace.id,
-                              name=self.canonical_name,
-                              public_id=self.canonical_name)
-                    db_session.add(tag)
-                    return tag
+    @classmethod
+    def get(cls, id_, session):
+        q = bakery(lambda session: session.query(cls))
+        q += lambda q: q.filter(cls.id == bindparam('id_'))
+        return q(session).params(id_=id_).first()
 
-        else:
-            tag_name = self.name.lower()[:MAX_INDEXABLE_LENGTH]
-            if tag_name in Tag.CANONICAL_TAG_NAMES:
-                tag_name = 'imap/{}'.format(tag_name)
-            try:
-                # In looking for a non-canonical tag, we want to make sure we
-                # don't return a canonical tag with the same name (e.g. a
-                # user-created 'spam' or 'important' folder), so we exclude
-                # tags with the public_id set to the tag name.
-                return db_session.query(Tag). \
-                    filter(Tag.namespace_id == self.namespace.id,
-                           Tag.public_id != tag_name,
-                           Tag.name == tag_name).one()
-            except NoResultFound:
-                # Explicitly set the namespace_id instead of the namespace
-                # attribute to avoid autoflush-induced IntegrityErrors where
-                # the namespace_id is null on flush.
-                if create_if_missing:
-                    tag = Tag(namespace_id=self.account.namespace.id,
-                              name=tag_name)
-                    db_session.add(tag)
-                    return tag
-
-
-class FolderItem(MailSyncBase):
-    """ Mapping of threads to account backend folders.
-
-    Used to provide a read-only copy of these backend folders/labels and,
-    (potentially), to sync local datastore changes to these folders back to
-    the IMAP/Exchange server.
-
-    Note that a thread may appear in more than one folder, as may be the case
-    with Gmail labels.
-    """
-    thread_id = Column(Integer, ForeignKey('thread.id', ondelete='CASCADE'),
-                       nullable=False)
-    # thread relationship is on Thread to make delete-orphan cascade work
-
-    # Might be different from what we've synced from IMAP. (Local datastore
-    # changes.)
-    folder_id = Column(Integer, ForeignKey(Folder.id, ondelete='CASCADE'),
-                       nullable=False)
-
-    # We almost always need the folder name too, so eager load by default.
-    folder = relationship(
-        'Folder', uselist=False,
-        backref=backref('threads',
-                        # If associated folder is deleted, don't load child
-                        # objects and let database-level cascade do its thing.
-                        passive_deletes=True),
-        lazy='joined')
-
-    @property
-    def account(self):
-        return self.folder.account
-
-    @property
-    def namespace(self):
-        return self.thread.namespace
+    __table_args__ = (UniqueConstraint('account_id', 'name'),)

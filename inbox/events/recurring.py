@@ -4,8 +4,9 @@ from dateutil.rrule import (rrulestr, rrule, rruleset,
 
 from inbox.models.event import RecurringEvent, RecurringEventOverride
 from inbox.events.util import parse_rrule_datetime
+from timezones import timezones_table
 
-from inbox.log import get_logger
+from nylas.logging import get_logger
 log = get_logger()
 
 # How far in the future to expand recurring events
@@ -26,6 +27,7 @@ def link_overrides(db_session, event):
     # RecurringEvent instance.
     overrides = db_session.query(RecurringEventOverride).\
         filter_by(namespace_id=event.namespace_id,
+                  calendar_id=event.calendar_id,
                   master_event_uid=event.uid,
                   source=event.source).all()
     for o in overrides:
@@ -42,6 +44,7 @@ def link_master(db_session, event):
         if event.master_event_uid:
             master = db_session.query(RecurringEvent).\
                 filter_by(namespace_id=event.namespace_id,
+                          calendar_id=event.calendar_id,
                           uid=event.master_event_uid,
                           source=event.source).first()
             if master:
@@ -57,10 +60,10 @@ def parse_rrule(event):
         else:
             start = event.start.datetime
         try:
-            rrule = rrulestr(event.rrule, dtstart=start,
-                             compatible=True)
+            rule = rrulestr(event.rrule, dtstart=start,
+                            compatible=True)
 
-            return rrule
+            return rule
         except Exception as e:
             log.error("Error parsing RRULE entry", event_id=event.id,
                       error=e, exc_info=True)
@@ -94,7 +97,14 @@ def get_start_times(event, start=None, end=None):
     if isinstance(event, RecurringEvent):
         # Localize first so that expansion covers DST
         if event.start_timezone:
-            event.start = event.start.to(event.start_timezone)
+            # FIXME @karim: This hotfix was added because of
+            # https://phab.nylas.com/T3612. Remove it after
+            # running the timezones migration.
+            tz = event.start_timezone
+            if tz in timezones_table:
+                tz = timezones_table[tz]
+
+            event.start = event.start.to(tz)
 
         if not start:
             start = event.start

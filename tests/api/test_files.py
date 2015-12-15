@@ -6,10 +6,13 @@ import json
 from datetime import datetime
 
 import pytest
+from tests.api.base import api_client
+
+__all__ = ['api_client']
 
 
 FILENAMES = ['muir.jpg', 'LetMeSendYouEmail.wav', 'piece-jointe.jpg',
-             'andra-moi-ennepe.txt']
+             'andra-moi-ennepe.txt', 'long-non-ascii-filename.txt']
 
 
 @pytest.fixture
@@ -36,7 +39,7 @@ def files(db):
 @pytest.fixture(scope='function')
 def uploaded_file_ids(api_client, files):
     file_ids = []
-    upload_path = api_client.full_path('/files')
+    upload_path = '/files'
     for filename, path in files:
         # Mac and linux fight over filesystem encodings if we store this
         # filename on the fs. Work around by changing the filename we upload
@@ -45,8 +48,10 @@ def uploaded_file_ids(api_client, files):
             filename = u'pièce-jointe.jpg'
         elif filename == 'andra-moi-ennepe.txt':
             filename = u'ἄνδρα μοι ἔννεπε'
+        elif filename == 'long-non-ascii-filename.txt':
+            filename = 100 * u'μ'
         data = {'file': (open(path, 'rb'), filename)}
-        r = api_client.client.post(upload_path, data=data)
+        r = api_client.post_raw(upload_path, data=data)
         assert r.status_code == 200
         file_id = json.loads(r.data)[0]['id']
         file_ids.append(file_id)
@@ -61,14 +66,16 @@ def test_file_filtering(api_client, uploaded_file_ids, draft):
     assert r.status_code == 200
 
     draft_resp = json.loads(r.data)
-    assert len(draft_resp['files']) == 4
+    assert len(draft_resp['files']) == len(uploaded_file_ids)
     d_id = draft_resp['id']
 
-    results = api_client.get_data('/files?message_id={}'
-                                  .format(d_id))
+    results = api_client.get_data('/files')
+    assert len(results) == len(uploaded_file_ids)
+
+    results = api_client.get_data('/files?message_id={}'.format(d_id))
 
     assert all([d_id in f['message_ids'] for f in results])
-    assert len(results) == 4
+    assert len(results) == len(uploaded_file_ids)
 
     results = api_client.get_data('/files?message_id={}&limit=1'
                                   .format(d_id))
@@ -76,7 +83,7 @@ def test_file_filtering(api_client, uploaded_file_ids, draft):
 
     results = api_client.get_data('/files?message_id={}&offset=2'
                                   .format(d_id))
-    assert len(results) == 2
+    assert len(results) == 3
 
     results = api_client.get_data('/files?filename=LetMeSendYouEmail.wav')
     assert len(results) == 1
@@ -87,7 +94,8 @@ def test_file_filtering(api_client, uploaded_file_ids, draft):
     results = api_client.get_data('/files?content_type=image%2Fjpeg')
     assert len(results) == 2
 
-    results = api_client.get_data('/files?content_type=image%2Fjpeg&view=count')
+    results = api_client.get_data(
+        '/files?content_type=image%2Fjpeg&view=count')
     assert results["count"] == 2
 
     results = api_client.get_data('/files?content_type=image%2Fjpeg&view=ids')
@@ -132,6 +140,8 @@ def test_get_with_id(api_client, uploaded_file_ids, filename):
         filename = u'pièce-jointe.jpg'
     elif filename == 'andra-moi-ennepe.txt':
         filename = u'ἄνδρα μοι ἔννεπε'
+    elif filename == 'long-non-ascii-filename.txt':
+        filename = 100 * u'μ'
     in_file = api_client.get_data(u'/files?filename={}'.format(filename))[0]
     data = api_client.get_data('/files/{}'.format(in_file['id']))
     assert data['filename'] == filename
@@ -162,6 +172,8 @@ def test_download(api_client, uploaded_file_ids, filename):
         filename = u'pièce-jointe.jpg'
     elif filename == 'andra-moi-ennepe.txt':
         filename = u'ἄνδρα μοι ἔννεπε'
+    elif filename == 'long-non-ascii-filename.txt':
+        filename = 100 * u'μ'
 
     in_file = api_client.get_data(u'/files?filename={}'.format(filename))[0]
     data = api_client.get_raw('/files/{}/download'.format(in_file['id'])).data

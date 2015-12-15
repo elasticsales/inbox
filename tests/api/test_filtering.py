@@ -2,31 +2,35 @@ import json
 import datetime
 import calendar
 from sqlalchemy import desc
-from inbox.models import Message, Thread, Namespace, Block
+from inbox.models import Message, Thread, Namespace, Block, Category
 from inbox.util.misc import dt_to_timestamp
-from tests.util.base import (api_client, test_client, add_fake_message,
-                             add_fake_thread, thread)
+from tests.util.base import (test_client, add_fake_message,
+                             add_fake_thread)
+from tests.api.base import api_client
 
 __all__ = ['api_client', 'test_client']
 
 
 def test_filtering(db, api_client, default_namespace):
     thread = add_fake_thread(db.session, default_namespace.id)
-    thread.tags.add(default_namespace.tags['inbox'])
     message = add_fake_message(db.session, default_namespace.id, thread,
                                to_addr=[('Bob', 'bob@foocorp.com')],
                                from_addr=[('Alice', 'alice@foocorp.com')],
                                subject='some subject')
+    message.categories.add(
+        Category(namespace_id=message.namespace_id,
+                 name='inbox', display_name='Inbox', type_='label'))
     thread.subject = message.subject
     db.session.commit()
+
     t_start = dt_to_timestamp(thread.subjectdate)
     t_lastmsg = dt_to_timestamp(thread.recentdate)
-
     subject = message.subject
     to_addr = message.to_addr[0][1]
     from_addr = message.from_addr[0][1]
-
     received_date = message.received_date
+    unread = not message.is_read
+    starred = message.is_starred
 
     results = api_client.get_data('/threads?thread_id={}'
                                   .format(thread.public_id))
@@ -59,32 +63,46 @@ def test_filtering(db, api_client, default_namespace):
     assert len(results) == 0
 
     results = api_client.get_data('/threads?started_after={}'
-                                  .format(t_start-1))
+                                  .format(t_start - 1))
     assert len(results) == 1
 
     results = api_client.get_data('/messages?started_after={}'
-                                  .format(t_start-1))
+                                  .format(t_start - 1))
     assert len(results) == 1
 
     results = api_client.get_data('/messages?last_message_before={}&limit=1'
-                                  .format(t_lastmsg+1))
+                                  .format(t_lastmsg + 1))
     assert len(results) == 1
 
     results = api_client.get_data('/threads?last_message_before={}&limit=1'
-                                  .format(t_lastmsg+1))
+                                  .format(t_lastmsg + 1))
     assert len(results) == 1
 
-    results = api_client.get_data('/threads?tag={}&limit=1'
-                                  .format('inbox'))
+    results = api_client.get_data('/threads?in=inbox&limit=1')
     assert len(results) == 1
 
-    results = api_client.get_data('/messages?tag={}&limit=1'
-                                  .format('inbox'))
+    results = api_client.get_data('/messages?in=inbox&limit=1')
+    assert len(results) == 1
+
+    results = api_client.get_data('/messages?in=banana%20rama')
+    assert len(results) == 0
+
+    results = api_client.get_data('/threads?subject={}'.format(subject))
     assert len(results) == 1
 
     results = api_client.get_data('/messages?subject={}'.format(subject))
     assert len(results) == 1
-    results = api_client.get_data('/threads?subject={}'.format(subject))
+
+    results = api_client.get_data('/threads?unread={}'.format(unread))
+    assert len(results) == 1
+
+    results = api_client.get_data('/messages?unread={}'.format((not unread)))
+    assert len(results) == 0
+
+    results = api_client.get_data('/threads?starred={}'.format((not starred)))
+    assert len(results) == 0
+
+    results = api_client.get_data('/messages?starred={}'.format(starred))
     assert len(results) == 1
 
     for _ in range(3):
@@ -185,6 +203,24 @@ def test_filtering(db, api_client, default_namespace):
                for r in results), "Returns a list of string"
 
 
+def test_query_target(db, api_client, thread, default_namespace):
+    cat = Category(namespace_id=default_namespace.id,
+                   name='inbox', display_name='Inbox', type_='label')
+    for _ in range(3):
+        message = add_fake_message(db.session, default_namespace.id, thread,
+                                   to_addr=[('Bob', 'bob@foocorp.com')],
+                                   from_addr=[('Alice', 'alice@foocorp.com')],
+                                   subject='some subject')
+        message.categories.add(cat)
+    db.session.commit()
+
+    results = api_client.get_data('/messages?in=inbox')
+    assert len(results) == 3
+
+    count = api_client.get_data('/messages?in=inbox&view=count')
+    assert count['count'] == 3
+
+
 def test_ordering(api_client, db, default_namespace):
     for i in range(3):
         thr = add_fake_thread(db.session, default_namespace.id)
@@ -206,7 +242,7 @@ def test_ordering(api_client, db, default_namespace):
 
 
 def test_strict_argument_parsing(api_client):
-    r = api_client.client.get(api_client.full_path('/threads?foo=bar'))
+    r = api_client.get_raw('/threads?foo=bar')
     assert r.status_code == 400
 
 
@@ -253,33 +289,31 @@ def test_distinct_results(api_client, db, default_namespace):
     assert len(filtered_results) == 1
 
 
-def test_filtering_namespaces(db, test_client):
-    all_namespaces = json.loads(test_client.get('/n/').data)
-    email = all_namespaces[0]['email_address']
+def test_filtering_accounts(db, test_client):
+    all_accounts = json.loads(test_client.get('/accounts/').data)
+    email = all_accounts[0]['email_address']
 
-    some_namespaces = json.loads(test_client.get('/n/?offset=1').data)
-    assert len(some_namespaces) == len(all_namespaces) - 1
+    some_accounts = json.loads(test_client.get('/accounts/?offset=1').data)
+    assert len(some_accounts) == len(all_accounts) - 1
 
-    no_namespaces = json.loads(test_client.get('/n/?limit=0').data)
-    assert no_namespaces == []
+    no_all_accounts = json.loads(test_client.get('/accounts/?limit=0').data)
+    assert no_all_accounts == []
 
-    all_namespaces = json.loads(test_client.get('/n/?limit=1').data)
-    assert len(all_namespaces) == 1
+    all_accounts = json.loads(test_client.get('/accounts/?limit=1').data)
+    assert len(all_accounts) == 1
 
     filter_ = '?email_address={}'.format(email)
-    namespaces = json.loads(test_client.get('/n/' + filter_).data)
-    assert namespaces[0]['email_address'] == email
+    all_accounts = json.loads(test_client.get('/accounts/' + filter_).data)
+    assert all_accounts[0]['email_address'] == email
 
     filter_ = '?email_address=unknown@email.com'
-    namespaces = json.loads(test_client.get('/n/' + filter_).data)
-    assert len(namespaces) == 0
+    accounts = json.loads(test_client.get('/accounts/' + filter_).data)
+    assert len(accounts) == 0
 
 
-def test_namespace_limiting(db, test_client):
+def test_namespace_limiting(db, api_client, default_namespace):
     dt = datetime.datetime.utcnow()
     subject = dt.isoformat()
-    db.session.add(Namespace())
-    db.session.commit()
     namespaces = db.session.query(Namespace).all()
     assert len(namespaces) > 1
     for ns in namespaces:
@@ -291,14 +325,11 @@ def test_namespace_limiting(db, test_client):
     db.session.commit()
 
     for ns in namespaces:
-        r = json.loads(test_client.get('/n/{}/threads?subject={}'.
-                                       format(ns.public_id, subject)).data)
+        r = api_client.get_data('/threads?subject={}'.format(subject))
         assert len(r) == 1
 
-        r = json.loads(test_client.get('/n/{}/messages?subject={}'.
-                                       format(ns.public_id, subject)).data)
+        r = api_client.get_data('/messages?subject={}'.format(subject))
         assert len(r) == 1
 
-        r = json.loads(test_client.get('/n/{}/files?filename={}'.
-                                       format(ns.public_id, subject)).data)
+        r = api_client.get_data('/files?filename={}'.format(subject))
         assert len(r) == 1

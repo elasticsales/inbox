@@ -5,11 +5,11 @@ from sqlalchemy.orm.exc import NoResultFound
 
 from inbox.api.err import NotFoundError
 from inbox.api.kellogs import APIEncoder
-from inbox.heartbeat.status import get_heartbeat_status
+from inbox.heartbeat.status import get_ping_status
 from inbox.models import Folder, Account, Namespace
 from inbox.models.backends.generic import GenericAccount
 from inbox.models.backends.imap import ImapAccount, ImapFolderSyncStatus
-from inbox.models.session import session_scope
+from inbox.models.session import global_session_scope
 
 app = Blueprint(
     'metrics_api',
@@ -18,7 +18,7 @@ app = Blueprint(
 
 @app.route('/')
 def index():
-    with session_scope() as db_session:
+    with global_session_scope() as db_session:
         if 'namespace_id' in request.args:
             try:
                 namespace = db_session.query(Namespace).filter(
@@ -28,20 +28,29 @@ def index():
         else:
             namespace = None
 
-        accounts = db_session.query(ImapAccount).with_polymorphic([GenericAccount])
+        # Get all account IDs that aren't deleted
+        account_ids = [result[0] for result in
+            db_session.query(ImapAccount.id, ImapAccount._sync_status)
+            if result[1].get('sync_disabled_reason') != 'account deleted']
+
+        accounts = db_session.query(ImapAccount) \
+                   .with_polymorphic([GenericAccount])
 
         if namespace:
             accounts = accounts.filter(Account.namespace == namespace)
+        else:
+            # This is faster than fetching all accounts.
+            accounts = accounts.filter(ImapAccount.id.in_(account_ids))
 
         accounts = list(accounts)
 
         if len(accounts) == 1:
-            heartbeat = get_heartbeat_status(account_id=accounts[0].id)
+            heartbeat = get_ping_status(account_id=accounts[0].id)
             folder_sync_statuses = db_session.query(ImapFolderSyncStatus). \
                     filter(ImapFolderSyncStatus.account_id==accounts[0].id). \
                     join(Folder)
         else:
-            heartbeat = get_heartbeat_status()
+            heartbeat = get_ping_status()
             folder_sync_statuses = db_session.query(ImapFolderSyncStatus). \
                     join(Folder)
 
@@ -70,18 +79,13 @@ def index():
                 for folder_status in account_heartbeat.folders:
                     folder_status_id = int(folder_status.id)
                     if folder_status_id in account_folder_data:
-                        if 0 in folder_status.devices:
-                            alive = alive and folder_status.alive
-                            device = folder_status.devices[0]
-                            account_folder_data[folder_status_id].update({
-                                'alive': folder_status.alive,
-                                'heartbeat_at': device.heartbeat_at,
-                            })
-                        else:
-                            alive = False
+                        alive = alive and folder_status.alive
+                        account_folder_data[folder_status_id].update({
+                            'alive': folder_status.alive,
+                            'heartbeat_at': folder_status.timestamp
+                        })
 
-                initial_sync = account_heartbeat.initial_sync or \
-                        any(f['state'] == 'initial' for f in account_folder_data.values())
+                initial_sync = any(f['state'] == 'initial' for f in account_folder_data.values())
 
                 total_uids = sum(f['remote_uid_count'] or 0 for f in account_folder_data.values())
                 remaining_uids = sum(f['download_uid_count'] or 0 for f in account_folder_data.values())

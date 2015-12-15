@@ -3,7 +3,6 @@
 Deletes an account's data permanently.
 
 Includes:
-* Data indexed for search (in Elasticsearch).
 * All data in the database.
 * Account liveness/status data (in Redis).
 
@@ -24,15 +23,15 @@ import click
 
 from inbox.models.session import session_scope
 from inbox.models import Account
-from inbox.search.util import delete_index
 from inbox.models.util import delete_namespace
 from inbox.heartbeat.status import clear_heartbeat_status
 
 
 @click.command()
 @click.argument('account_id', type=int)
-def delete_account_data(account_id):
-    with session_scope() as db_session:
+@click.option('--dry-run', is_flag=True)
+def delete_account_data(account_id, dry_run):
+    with session_scope(account_id) as db_session:
         account = db_session.query(Account).get(account_id)
 
         if not account:
@@ -41,7 +40,6 @@ def delete_account_data(account_id):
 
         email_address = account.email_address
         namespace_id = account.namespace.id
-        namespace_public_id = account.namespace.public_id
 
         if account.sync_should_run or not account.is_deleted:
             print 'Account with id {} NOT marked for deletion.\n'\
@@ -61,29 +59,17 @@ def delete_account_data(account_id):
     print 'Deleting account with id: {}...'.format(account_id)
     start = time.time()
 
-    # Delete search data
-    try:
-        print 'Deleting search data'
-        delete_index(namespace_id, namespace_public_id)
-    except Exception as e:
-        print 'Deletion of search data failed! Error: {}\n'\
-              'Will NOT delete from database, goodbye.'.format(str(e))
-        return -1
-
-    search_end = time.time()
-    print 'Search data deleted. Time taken: {}'.format(search_end - start)
-
     # Delete data in database
     try:
         print 'Deleting database data'
-        delete_namespace(account_id, namespace_id)
+        delete_namespace(account_id, namespace_id, dry_run=dry_run)
     except Exception as e:
         print 'Database data deletion failed! Error: {}'.format(str(e))
         return -1
 
     database_end = time.time()
     print 'Database data deleted. Time taken: {}'.\
-        format(database_end - search_end)
+        format(database_end - start)
 
     # Delete liveness data
     print 'Deleting liveness data'

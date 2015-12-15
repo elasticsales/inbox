@@ -1,13 +1,16 @@
 # -*- coding: utf-8 -*-
 import smtplib
 import json
+import time
 import pytest
 from flanker import mime
 from inbox.basicauth import OAuthError
 from inbox.models import Message
-from tests.util.base import thread, message
+from tests.util.base import thread, message, imported_event
+from tests.api.base import api_client
 
-__all__ = ['thread', 'message']
+
+__all__ = ['thread', 'message', 'api_client', 'imported_event']
 
 
 class MockTokenManager(object):
@@ -22,16 +25,31 @@ class MockTokenManager(object):
         raise OAuthError()
 
 
+class MockGoogleTokenManager(object):
+
+    def __init__(self, allow_auth=True):
+        self.allow_auth = allow_auth
+
+    def get_token_for_email(self, account, force_refresh=False):
+        if self.allow_auth:
+            return 'foo'
+        raise OAuthError()
+
+
 @pytest.fixture
 def patch_token_manager(monkeypatch):
-    monkeypatch.setattr('inbox.sendmail.smtp.postel.token_manager',
+    monkeypatch.setattr('inbox.sendmail.smtp.postel.default_token_manager',
                         MockTokenManager())
+    monkeypatch.setattr('inbox.sendmail.smtp.postel.g_token_manager',
+                        MockGoogleTokenManager())
 
 
 @pytest.fixture
 def disallow_auth(monkeypatch):
-    monkeypatch.setattr('inbox.sendmail.smtp.postel.token_manager',
+    monkeypatch.setattr('inbox.sendmail.smtp.postel.default_token_manager',
                         MockTokenManager(allow_auth=False))
+    monkeypatch.setattr('inbox.sendmail.smtp.postel.g_token_manager',
+                        MockGoogleTokenManager(allow_auth=False))
 
 
 @pytest.fixture
@@ -131,6 +149,15 @@ def example_draft(db, default_account):
 
 
 @pytest.fixture
+def example_rsvp(imported_event):
+    return {
+        'event_id': imported_event.public_id,
+        'comment': 'I will come.',
+        'status': 'yes',
+    }
+
+
+@pytest.fixture
 def example_draft_bad_subject(db, default_account):
     return {
         'subject': ['draft', 'test'],
@@ -150,6 +177,28 @@ def example_draft_bad_body(db, default_account):
     }
 
 
+@pytest.fixture
+def example_event(db, api_client):
+    from inbox.models.calendar import Calendar
+    cal = db.session.query(Calendar).get(1)
+
+    event = {
+        'title': 'Invite test',
+        'when': {
+            "end_time": 1436210662,
+            "start_time": 1436207062
+        },
+        'participants': [
+            {'email': 'helena@nylas.com'}
+        ],
+        'calendar_id': cal.public_id,
+    }
+
+    r = api_client.post_data('/events', event)
+    event_public_id = json.loads(r.data)['id']
+    return event_public_id
+
+
 def test_send_existing_draft(patch_smtp, api_client, example_draft):
     r = api_client.post_data('/drafts', example_draft)
     draft_public_id = json.loads(r.data)['id']
@@ -167,12 +216,7 @@ def test_send_existing_draft(patch_smtp, api_client, example_draft):
     assert r.status_code == 400
 
     drafts = api_client.get_data('/drafts')
-    threads_with_drafts = api_client.get_data('/threads?tag=drafts')
     assert not drafts
-    assert not threads_with_drafts
-
-    sent_threads = api_client.get_data('/threads?tag=sent')
-    assert len(sent_threads) == 1
 
     message = api_client.get_data('/messages/{}'.format(draft_public_id))
     assert message['object'] == 'message'
@@ -207,10 +251,7 @@ def test_send_rejected_without_recipients(api_client):
 def test_send_new_draft(patch_smtp, api_client, default_account,
                         example_draft):
     r = api_client.post_data('/send', example_draft)
-
     assert r.status_code == 200
-    sent_threads = api_client.get_data('/threads?tag=sent')
-    assert len(sent_threads) == 1
 
 
 def test_malformed_body_rejected(api_client, example_draft_bad_body):
@@ -513,3 +554,74 @@ def test_sending_from_email_multiple_aliases(patch_smtp, patch_token_manager,
                                 'subject': 'Banalities',
                                 'body': '<html>Hello there</html>'})
     assert res.status_code == 400
+
+
+def test_rsvp_invalid_credentials(disallow_auth, api_client, example_rsvp):
+    r = api_client.post_data('/send-rsvp', example_rsvp)
+    assert r.status_code == 403
+    assert json.loads(r.data)['message'] == 'Could not authenticate with ' \
+                                            'the SMTP server.'
+
+
+def test_rsvp_quota_exceeded(quota_exceeded, api_client, example_rsvp):
+    r = api_client.post_data('/send-rsvp', example_rsvp)
+    assert r.status_code == 429
+    assert json.loads(r.data)['message'] == 'Daily sending quota exceeded'
+
+
+def test_rsvp_server_disconnected(connection_closed, api_client, example_rsvp):
+    r = api_client.post_data('/send-rsvp', example_rsvp)
+    assert r.status_code == 503
+    assert json.loads(r.data)['message'] == 'The server unexpectedly closed ' \
+                                            'the connection'
+
+
+def test_rsvp_recipients_rejected(recipients_refused, api_client,
+                                  example_rsvp):
+    r = api_client.post_data('/send-rsvp', example_rsvp)
+    assert r.status_code == 402
+    assert json.loads(r.data)['message'] == 'Sending to all recipients failed'
+
+
+def test_rsvp_message_too_large(message_too_large, api_client, example_rsvp):
+    r = api_client.post_data('/send-rsvp', example_rsvp)
+    assert r.status_code == 402
+    assert json.loads(r.data)['message'] == 'Message too large'
+
+
+def test_rsvp_message_rejected_for_security(insecure_content, api_client,
+                                            example_rsvp):
+    r = api_client.post_data('/send-rsvp', example_rsvp)
+    assert r.status_code == 402
+    assert json.loads(r.data)['message'] == \
+        'Message content rejected for security reasons'
+
+
+def test_rsvp_updates_status(patch_smtp, api_client, example_rsvp,
+                             imported_event):
+    assert len(imported_event.participants) == 1
+    assert imported_event.participants[0]['email'] == 'inboxapptest@gmail.com'
+    assert imported_event.participants[0]['status'] == 'noreply'
+
+    r = api_client.post_data('/send-rsvp', example_rsvp)
+    assert r.status_code == 200
+    dct = json.loads(r.data)
+
+    # Check that the event's status got updated
+    assert len(dct['participants']) == 1
+    assert dct['participants'][0]['email'] == 'inboxapptest@gmail.com'
+    assert dct['participants'][0]['status'] == 'yes'
+    assert dct['participants'][0]['comment'] == 'I will come.'
+
+
+def test_sent_messages_shown_in_delta(patch_smtp, api_client, example_draft):
+    ts = int(time.time())
+    r = api_client.post_data('/delta/generate_cursor', {'start': ts})
+    cursor = json.loads(r.data)['cursor']
+    r = api_client.post_data('/send', example_draft)
+    message_id = json.loads(r.data)['id']
+    deltas = api_client.get_data('/delta?cursor={}'.format(cursor))['deltas']
+    message_delta = next((d for d in deltas if d['id'] == message_id), None)
+    assert message_delta is not None
+    assert message_delta['object'] == 'message'
+    assert message_delta['event'] == 'create'

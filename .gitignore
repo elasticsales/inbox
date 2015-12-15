@@ -58,7 +58,7 @@ __pycache__
 pip-log.txt
 
 # Unit test / coverage reports
-/.hypothesis
+**/.hypothesis
 .coverage
 .tox
 nosetests.xml
@@ -81,3 +81,6 @@ TAGS
 
 # directory used to store build files
 setup/
+
+# Pycharm
+.idea/

@@ -2,7 +2,7 @@ import pkg_resources
 from datetime import datetime
 
 from inbox.api.validation import (
-    get_recipients, get_tags, get_attachments, get_thread, get_message)
+    get_recipients, get_attachments, get_thread, get_message)
 from inbox.api.err import InputError
 from inbox.contacts.process_mail import update_contacts_from_message
 from inbox.models import Message, Part
@@ -28,6 +28,7 @@ class SendMailException(Exception):
         If sending only failed for some recipients, information on the specific
         failures.
     """
+
     def __init__(self, message, http_code, server_error=None, failures=None):
         self.message = message
         self.http_code = http_code
@@ -63,7 +64,7 @@ def create_draft_from_mime(account, raw_mime, db_session):
             raise InputError("reply_to field can have at most one item")
 
         if msg.subject is not None and not \
-                                        isinstance(msg.subject, basestring):
+                isinstance(msg.subject, basestring):
             raise InputError('"subject" should be a string')
 
         if not isinstance(msg.body, basestring):
@@ -78,9 +79,6 @@ def create_draft_from_mime(account, raw_mime, db_session):
             recentdate=msg.received_date,
             namespace=account.namespace,
             subjectdate=msg.received_date)
-        if msg.attachments:
-                attachment_tag = account.namespace.tags['attachment']
-                msg.thread.apply_tag(attachment_tag)
 
         msg.is_created = True
         msg.is_sent = True
@@ -91,12 +89,12 @@ def create_draft_from_mime(account, raw_mime, db_session):
     return msg
 
 
-def create_draft(data, namespace, db_session, syncback):
-    """ Construct a draft object (a Message instance) from `data`, a dictionary
-    representing the POST body of an API request. All new objects are added to
-    the session, but not committed."""
+def create_message_from_json(data, namespace, db_session, is_draft):
+    """ Construct a Message instance from `data`, a dictionary representing the
+    POST body of an API request. All new objects are added to the session, but
+    not committed."""
 
-    # Validate the input and get referenced objects (tags, thread, attachments)
+    # Validate the input and get referenced objects (thread, attachments)
     # as necessary.
     to_addr = get_recipients(data.get('to'), 'to')
     cc_addr = get_recipients(data.get('cc'), 'cc')
@@ -115,7 +113,6 @@ def create_draft(data, namespace, db_session, syncback):
     body = data.get('body', '')
     if not isinstance(body, basestring):
         raise InputError('"body" should be a string')
-    tags = get_tags(data.get('tags'), namespace.id, db_session)
     blocks = get_attachments(data.get('file_ids'), namespace.id, db_session)
     reply_to_thread = get_thread(data.get('thread_id'), namespace.id,
                                  db_session)
@@ -149,7 +146,7 @@ def create_draft(data, namespace, db_session, syncback):
         message = Message()
         message.namespace = namespace
         message.is_created = True
-        message.is_draft = True
+        message.is_draft = is_draft
         message.from_addr = from_addr if from_addr else \
             [(account.name, account.email_address)]
         # TODO(emfree): we should maybe make received_date nullable, so its
@@ -215,17 +212,11 @@ def create_draft(data, namespace, db_session, syncback):
                 recentdate=message.received_date,
                 namespace=namespace,
                 subjectdate=message.received_date)
-            if message.attachments:
-                attachment_tag = namespace.tags['attachment']
-                thread.apply_tag(attachment_tag)
 
         message.thread = thread
-        thread.apply_tag(namespace.tags['drafts'])
-        for tag in tags:
-            thread.apply_tag(tag)
 
     db_session.add(message)
-    if syncback:
+    if is_draft:
         schedule_action('save_draft', message, namespace.id, db_session,
                         version=message.version)
     db_session.flush()
@@ -234,7 +225,7 @@ def create_draft(data, namespace, db_session, syncback):
 
 def update_draft(db_session, account, draft, to_addr=None,
                  subject=None, body=None, blocks=None, cc_addr=None,
-                 bcc_addr=None, from_addr=None, reply_to=None, tags=None):
+                 bcc_addr=None, from_addr=None, reply_to=None):
     """
     Update draft with new attributes.
     """
@@ -265,7 +256,7 @@ def update_draft(db_session, account, draft, to_addr=None,
         draft.parts.remove(part)
         db_session.delete(part)
 
-    # Parts, tags require special handling
+    # Parts require special handling
     for block in blocks:
         # Don't re-add attachments that are already attached
         if block.id in [p.block_id for p in draft.parts]:
@@ -283,36 +274,18 @@ def update_draft(db_session, account, draft, to_addr=None,
         thread.subject = draft.subject
         thread.subjectdate = draft.received_date
         thread.recentdate = draft.received_date
-        attachment_tag = thread.namespace.tags['attachment']
-        if draft.attachments:
-            thread.apply_tag(attachment_tag)
-        else:
-            thread.remove_tag(attachment_tag)
-
-    if tags:
-        tags_to_keep = {tag for tag in thread.tags if not tag.user_created}
-        thread.tags = tags | tags_to_keep
 
     # Remove previous message-contact associations, and create new ones.
     draft.contacts = []
     update_contacts_from_message(db_session, draft, account.namespace)
-
-    prior_inbox_uid = draft.inbox_uid
-    prior_message_id_header = draft.message_id_header
 
     # Update version  + inbox_uid (is_created is already set)
     draft.version += 1
     draft.regenerate_inbox_uid()
 
     # Sync to remote
-    schedule_action('save_draft', draft, draft.namespace.id, db_session,
+    schedule_action('update_draft', draft, draft.namespace.id, db_session,
                     version=draft.version)
-    # Delete previous version on remote
-    schedule_action('delete_draft', draft,
-                    draft.namespace.id, db_session,
-                    inbox_uid=prior_inbox_uid,
-                    message_id_header=prior_message_id_header)
-
     db_session.commit()
     return draft
 
@@ -320,7 +293,6 @@ def update_draft(db_session, account, draft, to_addr=None,
 def delete_draft(db_session, account, draft):
     """ Delete the given draft. """
     thread = draft.thread
-    namespace = draft.namespace
     assert draft.is_draft
 
     # Delete remotely.
@@ -333,10 +305,6 @@ def delete_draft(db_session, account, draft):
     # Delete the thread if it would now be empty.
     if not thread.messages:
         db_session.delete(thread)
-    elif not thread.drafts:
-        # Otherwise, remove the drafts tag from the thread if there are no more
-        # drafts on it.
-        thread.remove_tag(namespace.tags['drafts'])
 
     db_session.commit()
 

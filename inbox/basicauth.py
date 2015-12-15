@@ -18,10 +18,6 @@ class NotSupportedError(AuthError):
     pass
 
 
-class PermissionsError(Exception):
-    pass
-
-
 class OAuthError(ValidationError):
     pass
 
@@ -30,8 +26,19 @@ class ConfigError(Exception):
     pass
 
 
-class UserRecoverableConfigError(ConfigError):
+class UserRecoverableConfigError(Exception):
     pass
+
+
+class GmailSettingError(ValidationError):
+    pass
+
+
+class ImapSupportDisabledError(ValidationError):
+
+    def __init__(self, reason=None):
+        super(ImapSupportDisabledError, self).__init__(reason)
+        self.reason = reason
 
 
 class AccessNotEnabledError(Exception):

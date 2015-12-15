@@ -9,8 +9,9 @@ import gevent
 import pytest
 
 from tests.util.base import add_fake_message, add_fake_thread
+from tests.api.base import api_client
 
-__all__ = ['message', 'thread']
+__all__ = ['api_client']
 
 
 @pytest.fixture
@@ -62,8 +63,9 @@ def attachments(db):
 def patch_remote_save_draft(monkeypatch):
 
     saved_drafts = []
-    def mock_remote_save_draft(account, fname, message, db_sess, date=None):
-        saved_drafts.append((message, date))
+
+    def mock_remote_save_draft(account, message, db_sess):
+        saved_drafts.append(message)
 
     # Patch both, just in case
     monkeypatch.setattr('inbox.actions.backends.generic.remote_save_draft',
@@ -79,13 +81,13 @@ def test_save_update_bad_recipient_draft(db, patch_remote_save_draft,
                                          example_bad_recipient_drafts):
     # You should be able to save a draft, even if
     # the recipient's email is invalid.
-    from inbox.sendmail.base import create_draft
+    from inbox.sendmail.base import create_message_from_json
     from inbox.actions.base import save_draft as save_draft_remote
-    from inbox.models import Account
 
     for example_draft in example_bad_recipient_drafts:
-        draft = create_draft(example_draft, default_account.namespace,
-                             db.session, syncback=False)
+        draft = create_message_from_json(example_draft,
+                                         default_account.namespace, db.session,
+                                         is_draft=True)
 
         save_draft_remote(default_account.id, draft.id, db.session,
                           {'version': draft.version})
@@ -107,14 +109,6 @@ def test_create_and_get_draft(api_client, example_draft):
     saved_draft = matching_saved_drafts[0]
 
     assert all(saved_draft[k] == v for k, v in example_draft.iteritems())
-
-    # Check that thread gets the draft tag
-    threads_with_drafts = api_client.get_data('/threads?tag=drafts')
-    assert len(threads_with_drafts) == 1
-
-    # Check that thread doesn't get the attachment tag, in this case
-    thread_tags = threads_with_drafts[0]['tags']
-    assert not any('attachment' == tag['name'] for tag in thread_tags)
 
 
 def test_create_draft_replying_to_thread(api_client, thread, message):
@@ -154,7 +148,7 @@ def test_create_draft_replying_to_message(api_client, message):
 
 
 def test_reject_incompatible_reply_thread_and_message(
-    db, api_client, message, thread, default_namespace):
+        db, api_client, message, thread, default_namespace):
     alt_thread = add_fake_thread(db.session, default_namespace.id)
     add_fake_message(db.session, default_namespace.id, alt_thread)
 
@@ -197,10 +191,10 @@ def test_drafts_filter(api_client, example_draft):
 
 def test_create_draft_with_attachments(api_client, attachments, example_draft):
     attachment_ids = []
-    upload_path = api_client.full_path('/files')
+    upload_path = '/files'
     for filename, path in attachments:
         data = {'file': (open(path, 'rb'), filename)}
-        r = api_client.client.post(upload_path, data=data)
+        r = api_client.post_raw(upload_path, data=data)
         assert r.status_code == 200
         attachment_id = json.loads(r.data)[0]['id']
         attachment_ids.append(attachment_id)
@@ -230,13 +224,6 @@ def test_create_draft_with_attachments(api_client, attachments, example_draft):
     for file_id in attachment_ids:
         r = api_client.delete('/files/{}'.format(file_id))
         assert r.status_code == 400
-
-    threads_with_drafts = api_client.get_data('/threads?tag=drafts')
-    assert len(threads_with_drafts) == 1
-
-    # Check that thread also gets the attachment tag
-    thread_tags = threads_with_drafts[0]['tags']
-    assert any('attachment' == tag['name'] for tag in thread_tags)
 
     # Now remove the attachment
     example_draft['file_ids'] = [first_attachment]
@@ -359,12 +346,12 @@ def test_delete_draft(api_client, thread, message):
     public_id = json.loads(r.data)['id']
     version = json.loads(r.data)['version']
     thread = api_client.get_data('/threads/{}'.format(thread_public_id))
-    assert 'drafts' in [t['name'] for t in thread['tags']]
+    assert len(thread['draft_ids']) > 0
     api_client.delete('/drafts/{}'.format(public_id),
                       {'version': version})
     thread = api_client.get_data('/threads/{}'.format(thread_public_id))
     assert thread
-    assert 'drafts' not in [t['name'] for t in thread['tags']]
+    assert len(thread['draft_ids']) == 0
 
 
 def test_delete_remote_draft(db, api_client, message):
@@ -466,3 +453,12 @@ def test_contacts_updated(api_client):
 
     r = api_client.get_data('/threads?to=joe@example.com')
     assert len(r) == 1
+
+    # Check that contacts aren't created for garbage recipients.
+    r = api_client.post_data('/drafts',
+                             {'to': [{'name': 'who', 'email': 'nope'}]})
+    assert r.status_code == 200
+    r = api_client.get_data('/threads?to=nope')
+    assert len(r) == 0
+    r = api_client.get_data('/contacts?filter=nope')
+    assert len(r) == 0

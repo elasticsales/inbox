@@ -25,21 +25,21 @@ color() {
       }
 
 color '36;1' "
-      _____       _
-     |_   _|     | |
-       | |  _ __ | |__   _____  __
-       | | | '_ \| '_ \ / _ \ \/ /
-      _| |_| | | | |_) | (_) >  <
-     |_____|_| |_|_.__/ \___/_/\_\\
+      _   _       _
+     | \ | |_   _| | __ _ ___
+     |  \| | | | | |/ _' / __|
+     | |\  | |_| | | (_| \__ \\
+     |_| \_|\__, |_|\__,_|___/
+            |___/
 
-     This script installs dependencies for Inbox.
+     This script installs dependencies for the Nylas Sync Engine.
 
      For more details, visit:
-     https://www.github.com/inboxapp/inbox
+     https://www.github.com/nylas/sync-engine
 "
 
 if ! [ -e ./setup.py ] || ! [ -e ./setup.sh ] ; then
-    color '31;1' "Error: setup.sh should be run from the inbox repo" >&2
+    color '31;1' "Error: setup.sh should be run from the sync-engine repo" >&2
     exit 1
 fi
 
@@ -78,6 +78,7 @@ echo "mysql-server mysql-server/root_password_again password root";
 color '35;1' 'Installing dependencies from apt-get...'
 apt-get -y -o Dpkg::Options::="--force-confold" install \
                    git \
+                   mercurial \
                    wget \
                    mysql-server \
                    mysql-client \
@@ -89,6 +90,7 @@ apt-get -y -o Dpkg::Options::="--force-confold" install \
                    libmysqlclient-dev \
                    gcc \
                    g++ \
+                   libssl-dev \
                    libzmq-dev \
                    libxml2-dev \
                    libxslt-dev \
@@ -195,13 +197,7 @@ find . -name \*.pyc -delete
 
 color '35;1' 'Installing dependencies from pip...'
 SODIUM_INSTALL=system pip install -r requirements.txt
-
 pip install -e .
-if [ -d "../inbox-eas" ]; then
-    pip install -r ../inbox-eas/requirements.txt
-    pip install -e ../inbox-eas
-    python ../inbox-eas/bin/create-test-db
-fi
 
 color '35;1' 'Finished installing dependencies.'
 
@@ -220,11 +216,11 @@ if ! $ignore_config; then
         different=$?
         set -e
         if [ $different -ne 0 ]; then
-        echo "Error: inbox config is newer and merging of configs not (yet) supported."
-        echo "Diffs:"
-        echo "src: $src dest: $dest"
-        diff $dest $src
-        exit 1
+            echo "Error: sync engine config is newer and merging of configs not (yet) supported."
+            echo "Diffs:"
+            echo "src: $src dest: $dest"
+            diff $dest $src
+            exit 1
         fi
     fi
     # make sure that users upgrading from a previous release get file permissions
@@ -243,11 +239,11 @@ if ! $ignore_config; then
         different=$?
         set -e
         if [ $different -ne 0 ]; then
-        echo "Error: inbox secrets config is newer and merging of configs not (yet) supported."
-        echo "Diffs:"
-        echo "src: $src dest: $dest"
-        diff $dest $src
-        exit 1
+            echo "Error: sync engine secrets config is newer and merging of configs not (yet) supported."
+            echo "Diffs:"
+            echo "src: $src dest: $dest"
+            diff $dest $src
+            exit 1
         fi
     fi
     # make sure that users upgrading from a previous release get file permissions
@@ -269,7 +265,7 @@ if ! $prod; then
         different=$?
         set -e
         if [ $different -ne 0 ]; then
-            echo "Error: inbox config is newer and merging of configs not (yet) supported."
+            echo "Error: sync engine config is newer and merging of configs not (yet) supported."
             echo "Diffs:"
             echo "src: $src dest: $dest"
             diff $dest $src
@@ -280,14 +276,8 @@ if ! $prod; then
     mysqld_safe &
     sleep 10
 
-    db_name=`cat /etc/inboxapp/config.json  | grep "MYSQL_DATABASE" | awk '{ print $2 }' | sed "s/\"\(.*\)\",/\1/"`
-    if ! have_dbs=$(mysql -e "show databases like '$db_name'" | grep -q $db_name); then
-        color '35;1' 'Creating databases...'
-        python bin/create-db
-    else
-        color '35;1' 'Upgrading databases...'
-        alembic upgrade head
-    fi
+    bin/create-db
+    bin/create-test-db
 fi
 
 if [[ $(mysql --version) != *"5.6"* ]]
@@ -298,11 +288,16 @@ fi
 color '35;1' 'Cleaning up...'
 apt-get -y autoremove
 
-mkdir -p /var/lib/inboxapp
-chown $SUDO_UID:$SUDO_GID /var/lib/inboxapp
+mkdir -p /var/lib/inboxapp/parts
+chown -R $SUDO_UID:$SUDO_GID /var/lib/inboxapp
 
 mkdir -p /var/log/inboxapp
 chown $SUDO_UID:$SUDO_GID /var/log/inboxapp
+
+mkdir -p /etc/inboxapp
+cp etc/config-dev.json /etc/inboxapp/config.json
+cp etc/secrets-dev.yml /etc/inboxapp/secrets.yml
+chown $SUDO_UID:$SUDO_GID /etc/inboxapp
 
 git config branch.master.rebase true
 

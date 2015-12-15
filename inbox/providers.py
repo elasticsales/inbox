@@ -61,6 +61,7 @@ class ProvidersDict(MutableMapping):
             })
 
     """
+
     def __init__(self):
         self._d = {}
         self._filters = defaultdict(list)
@@ -234,12 +235,14 @@ class PluginInterface(object):
 get_default_providers = lambda: {
     "aol": {
         "type": "generic",
-        "imap": ("imap.aol.com", 993, True),
-        "smtp": ("smtp.aol.com", 587, True),
+        "imap": ("imap.aol.com", 993),
+        "smtp": ("smtp.aol.com", 587),
         "auth": "password",
+        # .endswith() string match
         "domains": ["aol.com"],
-        "mx_servers": ["mailin-01.mx.aol.com", "mailin-02.mx.aol.com",
-                       "mailin-03.mx.aol.com", "mailin-04.mx.aol.com"]
+        # regex match with dots interpreted literally and glob * as .*,
+        # pinned to start and end
+        "mx_servers": ["mailin-0[1-4].mx.aol.com"],
     },
     "eas": {
         "auth": "password",
@@ -247,126 +250,133 @@ get_default_providers = lambda: {
             "onmicrosoft.com",
             "exchange.mit.edu",
         ],
-        # Office365
-        "mx_servers": ["mail.protection.outlook.com", "mail.eo.outlook.com"]
+        "mx_servers": [
+            # Office365
+            "*.mail.protection.outlook.com", "*.mail.eo.outlook.com",
+        ],
+    },
+    "outlook": {
+        "auth": "password",
+        "domains": [
+            "outlook.com", "outlook.com.ar",
+            "outlook.com.au", "outlook.at", "outlook.be",
+            "outlook.com.br", "outlook.cl", "outlook.cz", "outlook.dk",
+            "outlook.fr", "outlook.de", "outlook.com.gr",
+            "outlook.co.il", "outlook.in", "outlook.co.id",
+            "outlook.ie", "outlook.it", "outlook.hu", "outlook.jp",
+            "outlook.kr", "outlook.lv", "outlook.my", "outlook.co.nz",
+            "outlook.com.pe", "outlook.ph", "outlook.pt", "outlook.sa",
+            "outlook.sg", "outlook.sk", "outlook.es", "outlook.co.th",
+            "outlook.com.tr", "outlook.com.vn", "live.com", "live.com.ar"
+            "live.com.au", "live.at", "live.be", "live.cl", "live.cz",
+            "live.dk", "live.fr", "live.de", "live.com.gr", "live.co.il",
+            "live.in", "live.ie", "live.it", "live.hu", "live.jp", "live.lv",
+            "live.co.nz", "live.com.pe", "live.ph", "live.pt", "live.sa",
+            "live.sg", "live.sk", "live.es", "live.co.th", "live.com.tr",
+            "live.com.vn", "live.ca", "hotmail.ca",
+            "hotmail.com", "hotmail.com.ar", "hotmail.com.au",
+            "hotmail.at", "hotmail.be", "hotmail.com.br", "hotmail.cl",
+            "hotmail.cz", "hotmail.dk", "hotmail.fr", "hotmail.de",
+            "hotmail.co.il", "hotmail.in", "hotmail.ie", "hotmail.it",
+            "hotmail.hu", "hotmail.jp", "hotmail.kr", "hotmail.com.pe",
+            "hotmail.pt", "hotmail.sa", "hotmail.es", "hotmail.co.th",
+            "hotmail.com.tr",
+        ],
+        "mx_servers": [
+            "*.pamx1.hotmail.com", "mx.*.hotmail.com",
+        ],
+    },
+    "_outlook": {
+        # IMAP-based Outlook. Legacy-only.
+        "type": "generic",
+        "imap": ("imap-mail.outlook.com", 993),
+        "smtp": ("smtp.live.com", 587),
+        "auth": "oauth2",
+        "events": False,
     },
     "fastmail": {
         "type": "generic",
         "condstore": True,
-        "imap": ("mail.messagingengine.com", 993, True),
-        "smtp": ("mail.messagingengine.com", 587, True),
+        "imap": ("mail.messagingengine.com", 993),
+        "smtp": ("mail.messagingengine.com", 587),
         "auth": "password",
         "folder_map": {"INBOX.Archive": "archive",
                        "INBOX.Drafts": "drafts", "INBOX.Junk Mail": "spam",
                        "INBOX.Sent Items": "sent", "INBOX.Trash": "trash"},
         "domains": ["fastmail.fm"],
-        "mx_servers": ["in1-smtp.messagingengine.com",
-                       "in2-smtp.messagingengine.com"],
+        "mx_servers": ["in[12]-smtp.messagingengine.com"],
+        # exact string matches
         "ns_servers": ["ns1.messagingengine.com.",
                        "ns2.messagingengine.com."],
     },
     "gandi": {
         "type": "generic",
         "condstore": True,
-        "imap": ("mail.gandi.net", 993, True),
-        "smtp": ("mail.gandi.net", 587, True),
+        "imap": ("mail.gandi.net", 993),
+        "smtp": ("mail.gandi.net", 587),
         "auth": "password",
         "domains": ["debuggers.co"],
-        "mx_servers": ["spool.mail.gandi.net", "fb.mail.gandi.net",
-                       "mail4.gandi.net", "mail5.gandi.net"],
+        "mx_servers": ["(spool|fb).mail.gandi.net", "mail[45].gandi.net"],
     },
     "gmail": {
-        "imap": ("imap.gmail.com", 993, True),
-        "smtp": ("smtp.gmail.com", 587, True),
+        "imap": ("imap.gmail.com", 993),
+        "smtp": ("smtp.gmail.com", 587),
         "auth": "oauth2",
         "events": True,
         "contacts": True,
         "mx_servers": ["aspmx.l.google.com",
-                       "aspmx2.googlemail.com",
-                       "aspmx3.googlemail.com",
-                       "aspmx4.googlemail.com",
-                       "aspmx5.googlemail.com",
-                       "alt1.aspmx.l.google.com",
-                       "alt2.aspmx.l.google.com",
-                       "alt3.aspmx.l.google.com",
-                       "alt4.aspmx.l.google.com",
-                       "aspmx1.aspmx.l.google.com",
-                       "aspmx2.aspmx.l.google.com",
-                       "aspmx3.aspmx.l.google.com",
-                       "aspmx4.aspmx.l.google.com",
+                       "aspmx[2-6].googlemail.com",
+                       "(alt|aspmx)[1-4].aspmx.l.google.com",
                        "gmail-smtp-in.l.google.com",
-                       "alt1.gmail-smtp-in.l.google.com",
-                       "alt2.gmail-smtp-in.l.google.com",
-                       "alt3.gmail-smtp-in.l.google.com",
-                       "alt4.gmail-smtp-in.l.google.com",
+                       "alt[1-4].gmail-smtp-in.l.google.com",
                        # Postini
-                       ".*.psmtp.com"],
+                       "*.psmtp.com"],
     },
     "gmx": {
         "type": "generic",
-        "imap": ("imap.gmx.com", 993, True),
-        "smtp": ("smtp.gmx.com", 587, True),
+        "imap": ("imap.gmx.com", 993),
+        "smtp": ("smtp.gmx.com", 587),
         "auth": "password",
         "domains": ["gmx.us", "gmx.com"],
     },
     "hover": {
         "type": "generic",
-        "imap": ("mail.hover.com", 993, True),
-        "smtp": ("mail.hover.com", 587, True),
+        "imap": ("mail.hover.com", 993),
+        "smtp": ("mail.hover.com", 587),
         "auth": "password",
         "mx_servers": ["mx.hover.com.cust.hostedemail.com"],
     },
     "icloud": {
         "type": "generic",
-        "imap": ("imap.mail.me.com", 993, True),
-        "smtp": ("smtp.mail.me.com", 587, True),
+        "imap": ("imap.mail.me.com", 993),
+        "smtp": ("smtp.mail.me.com", 587),
         "auth": "password",
         "events": False,
         "contacts": True,
         "folder_map": {"Sent Messages": "sent",
                        "Deleted Messages": "trash"},
         "domains": ["icloud.com"],
-        "mx_servers": ["mx1.mail.icloud.com", "mx2.mail.icloud.com",
-                       "mx3.mail.icloud.com", "mx4.mail.icloud.com",
-                       "mx5.mail.icloud.com", "mx6.mail.icloud.com"],
+        "mx_servers": ["mx[1-6].mail.icloud.com"]
     },
     "mail.ru": {
         "type": "generic",
-        "imap": ("imap.mail.ru", 993, True),
-        "smtp": ("smtp.mail.ru", 587, True),
+        "imap": ("imap.mail.ru", 993),
+        "smtp": ("smtp.mail.ru", 587),
         "auth": "password",
         "domains": ["mail.ru"],
         "mx_servers": ["mxs.mail.ru"]
     },
     "namecheap": {
         "type": "generic",
-        "imap": ("mail.privateemail.com", 993, True),
-        "smtp": ("mail.privateemail.com", 587, True),
+        "imap": ("mail.privateemail.com", 993),
+        "smtp": ("mail.privateemail.com", 587),
         "auth": "password",
-        "mx_servers": ["mx1.privateemail.com", "mx2.privateemail.com"]
-    },
-    "outlook": {
-        "type": "generic",
-        "imap": ("imap-mail.outlook.com", 993, True),
-        "smtp": ("smtp.live.com", 587, True),
-        "auth": "oauth2",
-        "events": False,
-        "domains": ["hotmail.com", "outlook.com", "outlook.com.ar",
-                    "outlook.com.au", "outlook.at", "outlook.be",
-                    "outlook.com.br", "outlook.cl", "outlook.cz", "outlook.dk",
-                    "outlook.fr", "outlook.de", "outlook.com.gr",
-                    "outlook.co.il", "outlook.in", "outlook.co.id",
-                    "outlook.ie", "outlook.it", "outlook.hu", "outlook.jp",
-                    "outlook.kr", "outlook.lv", "outlook.my", "outlook.co.nz",
-                    "outlook.com.pe", "outlook.ph", "outlook.pt", "outlook.sa",
-                    "outlook.sg", "outlook.sk", "outlook.es", "outlook.co.th",
-                    "outlook.com.tr", "outlook.com.vn"],
-        "mx_servers": [".*.pamx1.hotmail.com"],
+        "mx_servers": ["mx[12].privateemail.com"]
     },
     "yahoo": {
         "type": "generic",
-        "imap": ("imap.mail.yahoo.com", 993, True),
-        "smtp": ("smtp.mail.yahoo.com", 587, True),
+        "imap": ("imap.mail.yahoo.com", 993),
+        "smtp": ("smtp.mail.yahoo.com", 587),
         "auth": "password",
         "folder_map": {"Bulk Mail": "spam"},
         "domains": ["yahoo.com.ar", "yahoo.com.au", "yahoo.at", "yahoo.be",
@@ -384,7 +394,7 @@ get_default_providers = lambda: {
                     "yahoo.co.th", "yahoo.com.tr", "yahoo.co.uk", "yahoo.com",
                     "yahoo.com.vn", "ymail.com", "rocketmail.com"],
         "mx_servers": ["mx-biz.mail.am0.yahoodns.net",
-                       "mx1.biz.mail.yahoo.com", "mx5.biz.mail.yahoo.com",
+                       "mx[15].biz.mail.yahoo.com",
                        "mxvm2.mail.yahoo.com", "mx-van.mail.am0.yahoodns.net"],
     },
     "yandex": {
@@ -396,28 +406,104 @@ get_default_providers = lambda: {
     },
     "zimbra": {
         "type": "generic",
-        "imap": ("mail.you-got-mail.com", 993, True),
-        "smtp": ("smtp.you-got-mail.com", 587, True),
+        "imap": ("mail.you-got-mail.com", 993),
+        "smtp": ("smtp.you-got-mail.com", 587),
         "auth": "password",
         "domains": ["mrmail.com"],
         "mx_servers": ["mx.mrmail.com"]
     },
     "godaddy": {
         "type": "generic",
-        "imap": ("imap.secureserver.net", 993, True),
-        "smtp": ("smtpout.secureserver.net", 465, True),
+        "imap": ("imap.secureserver.net", 993),
+        "smtp": ("smtpout.secureserver.net", 465),
         "auth": "password",
         "mx_servers": ["smtp.secureserver.net",
-                       "mailstore1.secureserver.net",
-                       "mailstore1.asia.secureserver.net",
-                       "mailstore1.europe.secureserver.net"]
+                       "mailstore1.(asia.|europe.)?secureserver.net"]
+    },
+    "163": {
+        "type": "generic",
+        "imap": ("imap.163.com", 993),
+        "smtp": ("smtp.163.com", 465),
+        "auth": "password",
+        "domains": ["163.com"],
+        "mx_servers": ["163mx0[0-3].mxmail.netease.com"]
+    },
+    "163_ym": {
+        "type": "generic",
+        "imap": ("imap.ym.163.com", 993),
+        "smtp": ("smtp.ym.163.com", 994),
+        "auth": "password",
+        "mx_servers": ["mx.ym.163.com"]
+    },
+    "163_qiye": {
+        "type": "generic",
+        "imap": ("imap.qiye.163.com", 993),
+        "smtp": ("smtp.qiye.163.com", 994),
+        "auth": "password",
+        "mx_servers": ["qiye163mx0[12].mxmail.netease.com"]
+    },
+    "126": {
+        "type": "generic",
+        "imap": ("imap.126.com", 993),
+        "smtp": ("smtp.126.com", 465),
+        "auth": "password",
+        "domains": ["126.com"],
+        "mx_servers": ["126mx0[0-2].mxmail.netease.com"]
+    },
+    "yeah.net": {
+        "type": "generic",
+        "imap": ("imap.yeah.net", 993),
+        "smtp": ("smtp.yeah.net", 465),
+        "auth": "password",
+        "domains": ["yeah.net"],
+        "mx_servers": ["yeahmx0[01].mxmail.netease.com"]
+    },
+    "qq": {
+        "type": "generic",
+        "imap": ("imap.qq.com", 993),
+        "smtp": ("smtp.qq.com", 465),
+        "auth": "password",
+        "domains": ["qq.com", "vip.qq.com"],
+        "mx_servers": ["mx[1-3].qq.com"]
+    },
+    "foxmail": {
+        "type": "generic",
+        "imap": ("imap.exmail.qq.com", 993),
+        "smtp": ("smtp.exmail.qq.com", 465),
+        "auth": "password",
+        "domains": ["foxmail.com"],
+        "mx_servers": ["mx[1-3].qq.com"]
+    },
+    "qq_enterprise": {
+        "type": "generic",
+        "imap": ("imap.exmail.qq.com", 993),
+        "smtp": ("smtp.exmail.qq.com", 465),
+        "auth": "password",
+        "mx_servers": ["mxbiz[12].qq.com"]
+    },
+    "aliyun": {
+        "type": "generic",
+        "imap": ("imap.aliyun.com", 993),
+        "smtp": ("smtp.aliyun.com", 465),
+        "auth": "password",
+        "domains": ["aliyun"],
+        "mx_servers": ["mx2.mail.aliyun.com"]
+    },
+    "139": {
+        "type": "generic",
+        "imap": ("imap.139.com", 993),
+        "smtp": ("smtp.139.com", 465),
+        "auth": "password",
+        "domains": ["139.com"],
+        "mx_servers": ["mx[1-3].mail.139.com"]
     },
     "custom": {
         "type": "generic",
         "auth": "password",
         "folder_map": {"INBOX.Archive": "archive",
                        "INBOX.Drafts": "drafts", "INBOX.Junk Mail": "spam",
-                       "INBOX.Sent Items": "sent", "INBOX.Trash": "trash"},
+                       "INBOX.Trash": "trash", "INBOX.Sent Items": "sent",
+                       "INBOX.Sent": "sent"},
     }
 }
 

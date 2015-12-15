@@ -6,15 +6,18 @@ from setproctitle import setproctitle
 from inbox.providers import providers
 from inbox.config import config
 from inbox.contacts.remote_sync import ContactSync
-from inbox.events.remote_sync import EventSync
-from inbox.log import get_logger
-from inbox.models.session import session_scope
+from inbox.events.remote_sync import EventSync, GoogleEventSync
+from nylas.logging import get_logger
+from inbox.ignition import engine_manager
+from inbox.models.session import session_scope, session_scope_by_shard_id
 from inbox.models import Account
 from inbox.util.concurrency import retry_with_logging
-from inbox.util.debug import attach_profiler
 from inbox.util.rdb import break_to_interpreter
 
 from inbox.mailsync.backends import module_registry
+
+USE_GOOGLE_PUSH_NOTIFICATIONS = \
+    'GOOGLE_PUSH_NOTIFICATIONS' in config.get('FEATURE_FLAGS', [])
 
 
 class SyncService(object):
@@ -29,7 +32,8 @@ class SyncService(object):
     poll_interval : int
         Seconds between polls for account changes.
     """
-    def __init__(self, cpu_id, total_cpus, poll_interval=1):
+
+    def __init__(self, cpu_id, total_cpus, poll_interval=10):
         self.keep_running = True
         self.host = platform.node()
         self.cpu_id = cpu_id
@@ -47,19 +51,24 @@ class SyncService(object):
         self.log.info('starting mail sync process',
                       supported_providers=module_registry.keys())
 
-        self.monitors = {}
+        self.syncing_accounts = set()
+        self.email_sync_monitors = {}
         self.contact_sync_monitors = {}
         self.event_sync_monitors = {}
         self.poll_interval = poll_interval
 
-    def run(self):
-        if config.get('DEBUG_PROFILING_ON'):
-            # If config flag is set, get live top-level profiling output on
-            # stdout by doing kill -SIGTRAP <sync_process>.
-            # This slows things down so you probably don't want to do it
-            # normally.
-            attach_profiler()
+        self.stealing_enabled = config.get('SYNC_STEAL_ACCOUNTS', True)
+        self.sync_hosts_for_shards = {}
+        for database in config['DATABASE_HOSTS']:
+            for shard in database['SHARDS']:
+                # If no sync hosts are explicitly configured for the shard,
+                # then try to steal from it. That way if you turn up a new
+                # shard without properly allocating sync hosts to it, accounts
+                # on it will still be started.
+                self.sync_hosts_for_shards[shard['ID']] = shard.get(
+                    'SYNC_HOSTS') or [self.host]
 
+    def run(self):
         if config.get('DEBUG_CONSOLE_ON'):
             # Enable the debugging console if this flag is set. Connect to
             # localhost on the port shown in the logs to get access to a REPL
@@ -74,7 +83,7 @@ class SyncService(object):
         retry_with_logging(self._run_impl, self.log)
 
     def stop(self):
-        for k, v in self.monitors.iteritems():
+        for k, v in self.email_sync_monitors.iteritems():
             gevent.kill(v)
         self.keep_running = False
 
@@ -83,23 +92,38 @@ class SyncService(object):
         return (Account.id % total_cpus == cpu_id)
 
     def accounts_to_start(self):
-        with session_scope() as db_session:
-            start_on_this_cpu = self.account_cpu_filter(self.cpu_id,
-                                                        self.total_cpus)
-            if config.get('SYNC_STEAL_ACCOUNTS', True):
-                # First, atomically claim unscheduled syncs by setting
-                # sync_host.
-                db_session.query(Account).filter(
-                    Account.sync_host.is_(None),
-                    Account.sync_should_run,
-                    start_on_this_cpu).update({'sync_host': self.host},
-                                              synchronize_session=False)
-                db_session.commit()
+        accounts = []
+        for key in engine_manager.engines:
+            with session_scope_by_shard_id(key) as db_session:
+                start_on_this_cpu = self.account_cpu_filter(self.cpu_id,
+                                                            self.total_cpus)
+                if (self.stealing_enabled and
+                        self.host in self.sync_hosts_for_shards[key]):
+                    q = db_session.query(Account).filter(
+                        Account.sync_host.is_(None),
+                        Account.sync_should_run,
+                        start_on_this_cpu)
+                    unscheduled_accounts_exist = db_session.query(
+                        q.exists()).scalar()
+                    if unscheduled_accounts_exist:
+                        # Atomically claim unscheduled syncs by setting
+                        # sync_host.
+                        q.update({'sync_host': self.host},
+                                 synchronize_session=False)
+                        db_session.commit()
 
-            return [id_ for id_, in db_session.query(Account.id).filter(
-                Account.sync_should_run,
-                Account.sync_host == self.host,
-                start_on_this_cpu)]
+                accounts.extend([id_ for id_, in
+                                 db_session.query(Account.id).filter(
+                                     Account.sync_should_run,
+                                     Account.sync_host == self.host,
+                                     start_on_this_cpu)])
+
+                # Close the underlying connection rather than returning it to
+                # the pool. This allows this query to run against all shards
+                # without potentially acquiring a poorly-utilized, persistent
+                # connection from each sync host to each shard.
+                db_session.invalidate()
+        return accounts
 
     def _run_impl(self):
         """
@@ -112,13 +136,12 @@ class SyncService(object):
 
             # Perform the appropriate action on each account
             for account_id in start_accounts:
-                if account_id not in self.monitors:
+                if account_id not in self.syncing_accounts:
                     self.start_sync(account_id)
                 # If the account's sync was killed due to an exception, its
                 # monitor sticks around; to restart, manually stop and start it
 
-            stop_accounts = set(self.monitors.keys()) - \
-                set(start_accounts)
+            stop_accounts = self.syncing_accounts - set(start_accounts)
             for account_id in stop_accounts:
                 self.log.info('sync service stopping sync',
                               account_id=account_id)
@@ -131,7 +154,7 @@ class SyncService(object):
         If that account doesn't exist, does nothing.
 
         """
-        with session_scope() as db_session:
+        with session_scope(account_id) as db_session:
             acc = db_session.query(Account).get(account_id)
             if acc is None:
                 self.log.error('no such account', account_id=account_id)
@@ -146,15 +169,16 @@ class SyncService(object):
                                        .format(acc.sync_host),
                                account_id=account_id)
 
-            elif acc.id not in self.monitors:
+            elif acc.id not in self.syncing_accounts:
                 try:
                     if acc.is_sync_locked and acc.is_killed:
                         acc.sync_unlock()
                     acc.sync_lock()
 
-                    monitor = self.monitor_cls_for[acc.provider](acc)
-                    self.monitors[acc.id] = monitor
-                    monitor.start()
+                    if acc.sync_email:
+                        monitor = self.monitor_cls_for[acc.provider](acc)
+                        self.email_sync_monitors[acc.id] = monitor
+                        monitor.start()
 
                     info = acc.provider_info
                     if info.get('contacts', None) and acc.sync_contacts:
@@ -166,14 +190,22 @@ class SyncService(object):
                         contact_sync.start()
 
                     if info.get('events', None) and acc.sync_events:
-                        event_sync = EventSync(acc.email_address,
-                                               acc.provider,
-                                               acc.id,
-                                               acc.namespace.id)
+                        if (USE_GOOGLE_PUSH_NOTIFICATIONS and
+                                acc.provider == 'gmail'):
+                            event_sync = GoogleEventSync(acc.email_address,
+                                                         acc.provider,
+                                                         acc.id,
+                                                         acc.namespace.id)
+                        else:
+                            event_sync = EventSync(acc.email_address,
+                                                   acc.provider,
+                                                   acc.id,
+                                                   acc.namespace.id)
                         self.event_sync_monitors[acc.id] = event_sync
                         event_sync.start()
 
                     acc.sync_started()
+                    self.syncing_accounts.add(acc.id)
                     db_session.add(acc)
                     db_session.commit()
                     self.log.info('Sync started', account_id=account_id,
@@ -195,8 +227,9 @@ class SyncService(object):
         self.log.info('Stopping monitors', account_id=account_id)
 
         # XXX Can processing this command fail in some way?
-        self.monitors[account_id].shutdown.set()
-        del self.monitors[account_id]
+        if account_id in self.email_sync_monitors:
+            self.email_sync_monitors[account_id].shutdown.set()
+            del self.email_sync_monitors[account_id]
 
         # Stop contacts sync if necessary
         if account_id in self.contact_sync_monitors:
@@ -208,10 +241,12 @@ class SyncService(object):
             self.event_sync_monitors[account_id].shutdown.set()
             del self.event_sync_monitors[account_id]
 
+        self.syncing_accounts.remove(account_id)
+
         fqdn = platform.node()
 
         # Update the state in the database (if necessary)
-        with session_scope() as db_session:
+        with session_scope(account_id) as db_session:
             acc = db_session.query(Account).get(account_id)
             if acc is None:
                 self.log.error('No such account', account_id=account_id)

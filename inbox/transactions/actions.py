@@ -14,16 +14,19 @@ import gevent
 from gevent.coros import BoundedSemaphore
 from sqlalchemy.orm import contains_eager
 
-from inbox.util.concurrency import retry_with_logging, log_uncaught_errors
-from inbox.log import get_logger
+from inbox.util.concurrency import retry_with_logging
+from nylas.logging import get_logger
+from nylas.logging.sentry import log_uncaught_errors
 logger = get_logger()
-from inbox.models.session import session_scope
+from inbox.models.session import session_scope, global_session_scope
 from inbox.models import ActionLog, Namespace, Account
 from inbox.util.file import Lock
-from inbox.actions.base import (mark_read, mark_unread, archive, unarchive,
-                                star, unstar, save_draft, delete_draft,
-                                mark_spam, unmark_spam, mark_trash,
-                                unmark_trash, save_sent_email)
+from inbox.util.stats import statsd_client
+from inbox.actions.base import (mark_unread, mark_starred, move, change_labels,
+                                save_draft, update_draft, delete_draft,
+                                save_sent_email, create_folder, create_label,
+                                update_folder, update_label, delete_folder,
+                                delete_label)
 from inbox.events.actions.base import (create_event, delete_event,
                                        update_event)
 
@@ -34,22 +37,23 @@ syncback_lock = Lock('/var/lock/inbox_syncback/global.lock', block=True)
 
 
 ACTION_FUNCTION_MAP = {
-    'archive': archive,
-    'unarchive': unarchive,
-    'mark_read': mark_read,
     'mark_unread': mark_unread,
-    'star': star,
-    'unstar': unstar,
-    'mark_spam': mark_spam,
-    'unmark_spam': unmark_spam,
-    'mark_trash': mark_trash,
-    'unmark_trash': unmark_trash,
+    'mark_starred': mark_starred,
+    'move': move,
+    'change_labels': change_labels,
     'save_draft': save_draft,
+    'update_draft': update_draft,
     'delete_draft': delete_draft,
     'save_sent_email': save_sent_email,
     'create_event': create_event,
     'delete_event': delete_event,
     'update_event': update_event,
+    'create_folder': create_folder,
+    'create_label': create_label,
+    'update_folder': update_folder,
+    'delete_folder': delete_folder,
+    'update_label': update_label,
+    'delete_label': delete_label
 }
 
 
@@ -75,12 +79,13 @@ class SyncbackService(gevent.Greenlet):
         gevent.Greenlet.__init__(self)
 
     def _process_log(self):
-        with session_scope() as db_session:
+        with global_session_scope() as db_session:
             # Only actions on accounts associated with this sync-engine
             query = db_session.query(ActionLog).join(Namespace).join(Account).\
                 filter(ActionLog.discriminator == 'actionlog',
                        ActionLog.status == 'pending',
-                       Account.sync_host == platform.node()).\
+                       Account.sync_host == platform.node(),
+                       Account.sync_should_run).\
                 order_by(ActionLog.id).\
                 options(contains_eager(ActionLog.namespace, Namespace.account))
 
@@ -99,6 +104,7 @@ class SyncbackService(gevent.Greenlet):
                                         action_log_id=log_entry.id,
                                         record_id=log_entry.record_id,
                                         account_id=namespace.account_id,
+                                        provider=namespace.account.provider,
                                         retry_interval=self.retry_interval,
                                         extra_args=log_entry.extra_args)
                 self.workers.add(worker)
@@ -135,17 +141,32 @@ class SyncbackWorker(gevent.Greenlet):
     given object, not on the whole account.
 
     """
+
     def __init__(self, action_name, semaphore, action_log_id, record_id,
-                 account_id, retry_interval=30, extra_args=None):
+                 account_id, provider, retry_interval=30, extra_args=None):
         self.action_name = action_name
         self.semaphore = semaphore
         self.func = ACTION_FUNCTION_MAP[action_name]
         self.action_log_id = action_log_id
         self.record_id = record_id
         self.account_id = account_id
+        self.provider = provider
         self.extra_args = extra_args
         self.retry_interval = retry_interval
         gevent.Greenlet.__init__(self)
+
+    def _log_to_statsd(self, action_log_status, latency=None):
+        metric_names = [
+            "syncback.overall.{}".format(action_log_status),
+            "syncback.accounts.{}.{}".format(self.account_id,
+                                             action_log_status),
+            "syncback.providers.{}.{}".format(self.provider, action_log_status)
+        ]
+
+        for metric in metric_names:
+            statsd_client.incr(metric)
+            if latency:
+                statsd_client.timing(metric, latency * 1000)
 
     def _run(self):
         with self.semaphore:
@@ -155,7 +176,7 @@ class SyncbackWorker(gevent.Greenlet):
                 extra_args=self.extra_args)
 
             for _ in range(ACTION_MAX_NR_OF_RETRIES):
-                with session_scope() as db_session:
+                with session_scope(self.account_id) as db_session:
                     try:
                         action_log_entry = db_session.query(ActionLog).get(
                             self.action_log_id)
@@ -173,17 +194,19 @@ class SyncbackWorker(gevent.Greenlet):
                         log.info('syncback action completed',
                                  action_id=self.action_log_id,
                                  latency=latency)
+                        self._log_to_statsd(action_log_entry.status, latency)
                         return
 
                     except Exception:
                         log_uncaught_errors(log, account_id=self.account_id)
-                        with session_scope() as db_session:
+                        with session_scope(self.account_id) as db_session:
                             action_log_entry.retries += 1
                             if (action_log_entry.retries ==
                                     ACTION_MAX_NR_OF_RETRIES):
                                 log.critical('Max retries reached, giving up.',
                                              exc_info=True)
                                 action_log_entry.status = 'failed'
+                                self._log_to_statsd(action_log_entry.status)
                             db_session.commit()
 
                 # Wait before retrying

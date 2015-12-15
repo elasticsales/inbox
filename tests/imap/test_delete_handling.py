@@ -1,10 +1,13 @@
 from datetime import datetime, timedelta
 import pytest
+from sqlalchemy import desc, inspect
 from sqlalchemy.orm.exc import ObjectDeletedError
 from inbox.crispin import GmailFlags
 from inbox.mailsync.backends.imap.common import (remove_deleted_uids,
                                                  update_metadata)
 from inbox.mailsync.gc import DeleteHandler
+from inbox.models import Folder, Transaction
+from inbox.models.label import Label
 from tests.util.base import add_fake_imapuid, add_fake_message
 
 
@@ -16,25 +19,36 @@ def marked_deleted_message(db, message):
     return message
 
 
-def test_only_uids_deleted_synchronously(db, default_account,
-                                         default_namespace, thread, message,
+def test_messages_deleted_asynchronously(db, default_account, thread, message,
                                          imapuid, folder):
     msg_uid = imapuid.msg_uid
-    update_metadata(default_account.id, db.session, folder.name, folder.id,
-                    [msg_uid], {msg_uid: GmailFlags((), ('label',))})
-    assert 'label' in [t.name for t in thread.tags]
-    remove_deleted_uids(default_account.id, db.session, [msg_uid], folder.id)
+    update_metadata(default_account.id, folder.id,
+                    {msg_uid: GmailFlags((), ('label',))}, db.session)
+    assert 'label' in [cat.display_name for cat in message.categories]
+    remove_deleted_uids(default_account.id, folder.id, [msg_uid], db.session)
     assert abs((message.deleted_at - datetime.utcnow()).total_seconds()) < 2
-    # Check that thread tags do get updated synchronously.
-    assert 'label' not in [t.name for t in thread.tags]
+    # Check that message categories do get updated synchronously.
+    assert 'label' not in [cat.display_name for cat in message.categories]
+
+
+def test_drafts_deleted_synchronously(db, default_account, thread, message,
+                                      imapuid, folder):
+    message.is_draft = True
+    msg_uid = imapuid.msg_uid
+    remove_deleted_uids(default_account.id, folder.id, [msg_uid], db.session)
+    db.session.expire_all()
+    assert inspect(message).deleted
+    assert inspect(thread).deleted
 
 
 def test_deleting_from_a_message_with_multiple_uids(db, default_account,
                                                     message, thread):
     """Check that deleting a imapuid from a message with
     multiple uids doesn't mark the message for deletion."""
-    inbox_folder = default_account.inbox_folder
-    sent_folder = default_account.sent_folder
+    inbox_folder = Folder.find_or_create(db.session, default_account, 'inbox',
+                                         'inbox')
+    sent_folder = Folder.find_or_create(db.session, default_account, 'sent',
+                                         'sent')
 
     add_fake_imapuid(db.session, default_account.id, message, sent_folder,
                      1337)
@@ -43,8 +57,8 @@ def test_deleting_from_a_message_with_multiple_uids(db, default_account,
 
     assert len(message.imapuids) == 2
 
-    remove_deleted_uids(default_account.id, db.session, [2222],
-                        inbox_folder.id)
+    remove_deleted_uids(default_account.id, inbox_folder.id, [2222],
+                        db.session)
 
     assert message.deleted_at is None, \
         "The associated message should not have been marked for deletion."
@@ -117,3 +131,68 @@ def test_deletion_deferred_with_longer_ttl(db, default_account,
     # Would raise ObjectDeletedError if objects were deleted
     marked_deleted_message.id
     thread.id
+
+
+def test_deletion_creates_revision(db, default_account, default_namespace,
+                                   marked_deleted_message, thread, folder):
+    message_id = marked_deleted_message.id
+    thread_id = thread.id
+    handler = DeleteHandler(account_id=default_account.id,
+                            namespace_id=default_namespace.id,
+                            uid_accessor=lambda m: m.imapuids,
+                            message_ttl=0)
+    handler.check(marked_deleted_message.deleted_at + timedelta(seconds=1))
+    db.session.commit()
+    latest_message_transaction = db.session.query(Transaction). \
+        filter(Transaction.record_id == message_id,
+               Transaction.object_type == 'message',
+               Transaction.namespace_id == default_namespace.id). \
+        order_by(desc(Transaction.id)).first()
+    assert latest_message_transaction.command == 'delete'
+
+    latest_thread_transaction = db.session.query(Transaction). \
+        filter(Transaction.record_id == thread_id,
+               Transaction.object_type == 'thread',
+               Transaction.namespace_id == default_namespace.id). \
+        order_by(desc(Transaction.id)).first()
+    assert latest_thread_transaction.command == 'delete'
+
+
+def test_deleted_labels_get_gced(db, default_account, thread, message,
+                                 imapuid, folder):
+    # Check that only the labels without messages attached to them
+    # get deleted.
+
+    default_namespace = default_account.namespace
+
+    # Create a label w/ no messages attached.
+    label = Label.find_or_create(db.session, default_account, 'dangling label')
+    label.deleted_at = datetime.utcnow()
+    label.category.deleted_at = datetime.utcnow()
+    label_id = label.id
+    db.session.commit()
+
+    # Create a label with attached messages.
+    msg_uid = imapuid.msg_uid
+    update_metadata(default_account.id, folder.id,
+                    {msg_uid: GmailFlags((), ('label',))}, db.session)
+
+    label_ids = []
+    for cat in message.categories:
+        for l in cat.labels:
+            label_ids.append(l.id)
+
+    handler = DeleteHandler(account_id=default_account.id,
+                            namespace_id=default_namespace.id,
+                            uid_accessor=lambda m: m.imapuids,
+                            message_ttl=0)
+    handler.gc_deleted_categories()
+    db.session.commit()
+
+    # Check that the first label got gc'ed
+    marked_deleted = db.session.query(Label).get(label_id)
+    assert marked_deleted is None
+
+    # Check that the other labels didn't.
+    for label_id in label_ids:
+        assert db.session.query(Label).get(label_id) is not None

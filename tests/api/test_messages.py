@@ -1,9 +1,16 @@
 import pytest
 import json
-from tests.util.base import (api_client, add_fake_message, default_namespace,
-                             new_message_from_synced, mime_message, thread)
 
-__all__ = ['api_client', 'default_namespace']
+from inbox.util.blockstore import get_from_blockstore
+
+from tests.util.base import (add_fake_message, default_namespace,
+                             new_message_from_synced, mime_message, thread,
+                             add_fake_thread, generic_account, gmail_account)
+from tests.api.base import api_client, new_api_client
+
+
+__all__ = ['api_client', 'default_namespace', 'new_message_from_synced',
+           'mime_message', 'thread', 'generic_account', 'gmail_account']
 
 
 @pytest.fixture
@@ -13,17 +20,6 @@ def stub_message_from_raw(db, thread, new_message_from_synced):
     db.session.add(new_msg)
     db.session.commit()
     return new_msg
-
-
-# TODO(emfree) clean up fixture dependencies
-def test_rfc822_format(stub_message_from_raw, api_client, mime_message):
-    """ Test the API response to retreive raw message contents """
-    full_path = api_client.full_path('/messages/{}'.format(
-        stub_message_from_raw.public_id))
-
-    results = api_client.client.get(full_path,
-                                    headers={'Accept': 'message/rfc822'})
-    assert results.data == mime_message.to_string()
 
 
 @pytest.fixture
@@ -68,9 +64,19 @@ bicycle rights. Thundercats kale chips church-key American Apparel.
     return message
 
 
+# TODO(emfree) clean up fixture dependencies
+def test_rfc822_format(stub_message_from_raw, api_client, mime_message):
+    """ Test the API response to retreive raw message contents """
+    full_path = '/messages/{}'.format(stub_message_from_raw.public_id)
+
+    results = api_client.get_raw(full_path,
+                                 headers={'Accept': 'message/rfc822'})
+    assert results.data == get_from_blockstore(stub_message_from_raw.data_sha256)
+
+
 def test_sender_and_participants(stub_message, api_client):
-    resp = api_client.client.get(api_client.full_path(
-        '/threads/{}'.format(stub_message.thread.public_id)))
+    resp = api_client.get_raw('/threads/{}'
+                                     .format(stub_message.thread.public_id))
     assert resp.status_code == 200
     resp_dict = json.loads(resp.data)
     participants = resp_dict['participants']
@@ -94,7 +100,7 @@ def test_expanded_threads(stub_message, api_client):
             assert 'body' not in msg_dict
             assert msg_dict['object'] == 'message'
             assert msg_dict['thread_id'] == stub_message.thread.public_id
-            valid_keys = ['namespace_id', 'to', 'from', 'files', 'unread',
+            valid_keys = ['account_id', 'to', 'from', 'files', 'unread',
                           'unread', 'date', 'snippet']
             assert all(x in msg_dict for x in valid_keys)
 
@@ -102,20 +108,20 @@ def test_expanded_threads(stub_message, api_client):
             assert 'body' not in draft
             assert draft['object'] == 'draft'
             assert draft['thread_id'] == stub_message.thread.public_id
-            valid_keys = ['namespace_id', 'to', 'from', 'files', 'unread',
+            valid_keys = ['account_id', 'to', 'from', 'files', 'unread',
                           'snippet', 'date', 'version', 'reply_to_message_id']
             assert all(x in draft for x in valid_keys)
 
     # /threads/<thread_id>
-    resp = api_client.client.get(api_client.full_path(
-        '/threads/{}?view=expanded'.format(stub_message.thread.public_id)))
+    resp = api_client.get_raw(
+        '/threads/{}?view=expanded'.format(stub_message.thread.public_id))
     assert resp.status_code == 200
     resp_dict = json.loads(resp.data)
     _check_json_thread(resp_dict)
 
     # /threads/
-    resp = api_client.client.get(api_client.full_path(
-        '/threads/?view=expanded'.format(stub_message.thread.public_id)))
+    resp = api_client.get_raw(
+        '/threads/?view=expanded'.format(stub_message.thread.public_id))
     assert resp.status_code == 200
     resp_dict = json.loads(resp.data)
 
@@ -135,23 +141,117 @@ def test_expanded_message(stub_message, api_client):
         assert 'References' in msg_dict['headers']
         assert 'Message-Id' in msg_dict['headers']
 
-        valid_keys = ['namespace_id', 'to', 'from', 'files', 'unread',
+        valid_keys = ['account_id', 'to', 'from', 'files', 'unread',
                       'unread', 'date', 'snippet']
         assert all(x in msg_dict for x in valid_keys)
 
     # /message/<message_id>
-    resp = api_client.client.get(api_client.full_path(
-        '/messages/{}?view=expanded'.format(stub_message.public_id)))
+    resp = api_client.get_raw(
+        '/messages/{}?view=expanded'.format(stub_message.public_id))
     assert resp.status_code == 200
     resp_dict = json.loads(resp.data)
     _check_json_message(resp_dict)
 
     # /messages/
-    resp = api_client.client.get(api_client.full_path(
-        '/messages/?view=expanded'))
+    resp = api_client.get_raw('/messages/?view=expanded')
     assert resp.status_code == 200
     resp_dict = json.loads(resp.data)
 
     for message_json in resp_dict:
         if message_json['id'] == stub_message.public_id:
             _check_json_message(message_json)
+
+
+def test_folders_labels(db, api_client, generic_account, gmail_account):
+    # Generic IMAP threads, messages have a 'folders' field
+    generic_thread = add_fake_thread(db.session, generic_account.namespace.id)
+    generic_message = add_fake_message(db.session,
+                                       generic_account.namespace.id,
+                                       generic_thread)
+
+    # Because we're using the generic_account namespace
+    api_client = new_api_client(db, generic_account.namespace)
+
+    resp_data = api_client.get_data(
+        '/threads/{}'.format(generic_thread.public_id))
+
+    assert resp_data['id'] == generic_thread.public_id
+    assert resp_data['object'] == 'thread'
+    assert 'folders' in resp_data and 'labels' not in resp_data
+
+    resp_data = api_client.get_data(
+        '/messages/{}'.format(generic_message.public_id))
+
+    assert resp_data['id'] == generic_message.public_id
+    assert resp_data['object'] == 'message'
+    assert 'folder' in resp_data and 'labels' not in resp_data
+
+    # Because we're using the generic_account namespace
+    api_client = new_api_client(db, gmail_account.namespace)
+
+    # Gmail threads, messages have a 'labels' field
+    gmail_thread = add_fake_thread(db.session, gmail_account.namespace.id)
+    gmail_message = add_fake_message(db.session,
+                                     gmail_account.namespace.id, gmail_thread)
+
+    resp_data = api_client.get_data(
+        '/threads/{}'.format(gmail_thread.public_id))
+
+    assert resp_data['id'] == gmail_thread.public_id
+    assert resp_data['object'] == 'thread'
+    assert 'labels' in resp_data and 'folders' not in resp_data
+
+    resp_data = api_client.get_data(
+        '/messages/{}'.format(gmail_message.public_id))
+
+    assert resp_data['id'] == gmail_message.public_id
+    assert resp_data['object'] == 'message'
+    assert 'labels' in resp_data and 'folders' not in resp_data
+
+
+def test_folders_labels_delete(db, api_client, generic_account, gmail_account):
+    api_client = new_api_client(db, generic_account.namespace)
+    # Generic IMAP threads, messages have a 'folders' field
+    generic_thread = add_fake_thread(db.session, generic_account.namespace.id)
+    generic_message = add_fake_message(db.session,
+                                       generic_account.namespace.id,
+                                       generic_thread)
+    resp = api_client.post_data('/folders/',
+                                {"display_name": "Test_Folder"})
+    assert resp.status_code == 200
+    generic_folder = json.loads(resp.data)
+    data = {"folder_id": generic_folder['id']}
+    # Add message to folder
+    api_client.put_data('/messages/{}'.format(generic_message.public_id), data)
+
+    # try deleting folder that contains a message
+    delete_data = api_client.delete('/folders/{}'.format(generic_folder['id']))
+    assert delete_data.status_code == 403
+
+    resp = api_client.post_data('/folders/',
+                                {"display_name": "Test_Folder2"})
+    empty_folder = json.loads(resp.data)
+
+    # try deleting folder that contains a message
+    delete_data = api_client.delete('/folders/{}'.format(empty_folder['id']))
+    assert delete_data.status_code == 200
+
+    # Because we're using the generic_account namespace
+    api_client = new_api_client(db, gmail_account.namespace)
+
+    # Gmail threads, messages have a 'labels' field
+    gmail_thread = add_fake_thread(db.session, gmail_account.namespace.id)
+    gmail_message = add_fake_message(db.session,
+                                     gmail_account.namespace.id, gmail_thread)
+
+    resp = api_client.post_data('/labels/',
+                                {"display_name": "Test_Labels"})
+    assert resp.status_code == 200
+    gmail_label = json.loads(resp.data)
+    data = {"folder_id": gmail_label['id']}
+    # Add label to message
+    api_client.put_data('/messages/{}'.format(gmail_message.public_id), data)
+
+    # try deleting label
+    delete_data = api_client.delete('/labels/{}'.format(gmail_label['id']))
+    assert delete_data.status_code == 200

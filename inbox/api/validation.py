@@ -4,15 +4,18 @@ from arrow.parser import ParserError
 from flanker.addresslib import address
 from flask.ext.restful import reqparse
 from sqlalchemy.orm.exc import NoResultFound
-from inbox.models import Calendar, Tag, Thread, Block, Message
+from inbox.models import Calendar, Thread, Block, Message, Category, Event
 from inbox.models.when import parse_as_when
+from inbox.models.constants import MAX_INDEXABLE_LENGTH
 from inbox.api.err import InputError, NotFoundError, ConflictError
-from inbox.search.query import MessageQuery, ThreadQuery
+from inbox.api.kellogs import encode
+from inbox.util.addr import valid_email
 
 MAX_LIMIT = 1000
 
 
 class ValidatableArgument(reqparse.Argument):
+
     def handle_validation_error(self, error):
         raise InputError(str(error))
 
@@ -121,28 +124,6 @@ def get_draft(draft_public_id, version, namespace_id, db_session):
     return draft
 
 
-def get_tags(tag_public_ids, namespace_id, db_session):
-    tags = set()
-    if tag_public_ids is None:
-        return tags
-    if not isinstance(tag_public_ids, list):
-        raise InputError('{} is not a list of tag ids'.format(tag_public_ids))
-    for tag_public_id in tag_public_ids:
-        # Validate public id before querying with it
-        valid_public_id(tag_public_id)
-        try:
-            # We're trading a bit of performance for more meaningful error
-            # messages here by looking these up one-by-one.
-            tag = db_session.query(Tag). \
-                filter(Tag.namespace_id == namespace_id,
-                       Tag.public_id == tag_public_id,
-                       Tag.user_created).one()
-            tags.add(tag)
-        except NoResultFound:
-            raise InputError('Invalid tag public id {}'.format(tag_public_id))
-    return tags
-
-
 def get_attachments(block_public_ids, namespace_id, db_session):
     attachments = set()
     if block_public_ids is None:
@@ -242,6 +223,10 @@ def valid_event(event):
     for p in participants:
         if 'email' not in p:
             raise InputError("'participants' must must have email")
+
+        if not valid_email(p['email']):
+            raise InputError("'{}' is not a valid email".format(p['email']))
+
         if 'status' in p:
             if p['status'] not in ('yes', 'no', 'maybe', 'noreply'):
                 raise InputError("'participants' status must be one of: "
@@ -265,10 +250,62 @@ def valid_event_update(event, namespace, db_session):
                                  "yes, no, maybe, noreply")
 
 
+def noop_event_update(event, data):
+    # Check whether the update is actually updating fields.
+    # We do this by cloning the event, updating the fields and
+    # comparing them. This is less cumbersome than having to think
+    # about the multiple values of the `when` field.
+    e = Event()
+    e.update(event)
+    e.namespace = event.namespace
+
+    for attr in Event.API_MODIFIABLE_FIELDS:
+        if attr in data:
+            setattr(e, attr, data[attr])
+
+    e1 = encode(event)
+    e2 = encode(e)
+
+    for attr in Event.API_MODIFIABLE_FIELDS:
+        # We have to handle participants a bit differently because
+        # it's a list which can be permuted.
+        if attr == 'participants':
+            continue
+
+        event_value = e1.get(attr)
+        e_value = e2.get(attr)
+        if event_value != e_value:
+            return False
+
+    e_participants = {p['email']: p for p in e.participants}
+    event_participants = {p['email']: p for p in event.participants}
+    if len(e_participants.keys()) != len(event_participants.keys()):
+        return False
+
+    for email in e_participants:
+        if email not in event_participants:
+            return False
+
+        p1 = e_participants[email]
+        p2 = event_participants[email]
+
+        p1_status = p1.get('status')
+        p2_status = p2.get('status')
+        if p1_status != p2_status:
+            return False
+
+        p1_comment = p1.get('comment')
+        p2_comment = p2.get('comment')
+        if p1_comment != p2_comment:
+            return False
+
+    return True
+
+
 def valid_delta_object_types(types_arg):
     types = [item.strip() for item in types_arg.split(',')]
     allowed_types = ('contact', 'message', 'event', 'file', 'tag',
-                     'thread', 'calendar', 'draft')
+                     'thread', 'calendar', 'draft', 'folder', 'label')
     for type_ in types:
         if type_ not in allowed_types:
             raise InputError('Invalid object type {}'.format(type_))
@@ -276,8 +313,11 @@ def valid_delta_object_types(types_arg):
 
 
 def validate_draft_recipients(draft):
-    """Check that a draft has at least one recipient, and that all recipient
-    emails are at least plausible email addresses, before we try to send it."""
+    """
+    Check that a draft has at least one recipient, and that all recipient
+    emails are at least plausible email addresses, before we try to send it.
+
+    """
     if not any((draft.to_addr, draft.bcc_addr, draft.cc_addr)):
         raise InputError('No recipients specified')
     for field in draft.to_addr, draft.bcc_addr, draft.cc_addr:
@@ -289,39 +329,19 @@ def validate_draft_recipients(draft):
                                      format(email_address))
 
 
-def validate_search_query(query):
-    if query is None:
-        # No query defaults to 'all'
-        return
+def valid_display_name(namespace_id, category_type, display_name, db_session):
+    if display_name is None or not isinstance(display_name, basestring):
+        raise InputError('"display_name" must be a valid string')
 
-    if not isinstance(query, list):
-        raise InputError('Search query must be a list')
+    display_name = display_name.rstrip()
+    if len(display_name) > MAX_INDEXABLE_LENGTH:
+        # Set as MAX_FOLDER_LENGTH, MAX_LABEL_LENGTH
+        raise InputError('"display_name" is too long')
 
-    queried_fields = []
-    query_values = []
-    for subquery in query:
-        queried_fields.extend(subquery.keys())
-        query_values.extend(subquery.values())
+    if db_session.query(Category).filter(
+            Category.namespace_id == namespace_id,
+            Category.lowercase_name == display_name).first() is not None:
+        raise InputError('{} with name "{}" already exists'.format(
+                         category_type, display_name))
 
-    if len(query) > 1:
-        # We can't OR together 'all' queries, so check they are not supplied
-        if not all([k != 'all' for k in queried_fields]):
-            raise InputError("Cannot perform OR search with 'all' subquery")
-
-    # valid search attributes - we search across children/parents if the
-    # attribute isn't present on the type being queried.
-    attrs = [a for a in MessageQuery.attrs]
-    attrs.extend(ThreadQuery.attrs)
-    attrs.append('all')
-    attrs.append('weights')
-
-    if not all([k in attrs for k in queried_fields]):
-        raise InputError('Invalid search fields specified')
-
-    if any([isinstance(v, list) for v in query_values]):
-        raise InputError('Search query value cannot be a list')
-
-
-def validate_search_sort(sort):
-    if sort not in ('datetime', 'relevance', None):
-        raise InputError("Sort order must be 'datetime' or 'relevance'")
+    return display_name

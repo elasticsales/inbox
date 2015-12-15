@@ -6,9 +6,12 @@ from json import JSONEncoder, dumps
 from flask import Response, g
 
 from inbox.models import (Message, Contact, Calendar, Event, When,
-                          Thread, Namespace, Block, Tag)
+                          Thread, Namespace, Block, Category, Account)
 from inbox.models.backends.imap import ImapUid
-from inbox.models.event import RecurringEvent, RecurringEventOverride
+from inbox.models.event import (RecurringEvent, RecurringEventOverride,
+                                InflatedEvent)
+from nylas.logging import get_logger
+log = get_logger()
 
 
 def format_address_list(addresses):
@@ -17,10 +20,12 @@ def format_address_list(addresses):
     return [{'name': name, 'email': email} for name, email in addresses]
 
 
-def format_tags_list(tags):
-    if tags is None:
+def format_categories(categories):
+    if categories is None:
         return []
-    return [{'name': tag.name, 'id': tag.public_id} for tag in tags]
+    return [{'id': category.public_id, 'name': category.name,
+             'display_name': category.api_display_name} for category in
+            categories]
 
 
 def encode_imapuid(imapuid):
@@ -37,8 +42,31 @@ def encode_imapuid(imapuid):
         'g_labels': imapuid.g_labels,
     }
 
+def format_phone_numbers(phone_numbers):
+    formatted_phone_numbers = []
+    for number in phone_numbers:
+        formatted_phone_numbers.append({
+            'type': number.type,
+            'number': number.number,
+        })
+    return formatted_phone_numbers
 
-def encode(obj, namespace_public_id=None, expand=False):
+
+def encode(obj, namespace_public_id=None, expand=False, legacy_nsid=False):
+    try:
+        return _encode(obj, namespace_public_id, expand,
+                       legacy_nsid=legacy_nsid)
+    except Exception as e:
+        error_context = {
+            "id": getattr(obj, "id", None),
+            "cls": str(getattr(obj, "__class__", None)),
+            "exception": e
+        }
+        log.error("object encoding failure", **error_context)
+        raise
+
+
+def _encode(obj, namespace_public_id=None, expand=False, legacy_nsid=False):
     """
     Returns a dictionary representation of an Inbox model object obj, or
     None if there is no such representation defined. If the optional
@@ -65,13 +93,18 @@ def encode(obj, namespace_public_id=None, expand=False):
         This function returns a dict with only the data we want to make
         public."""
         dct = {}
-        for attribute in ['name', 'status', 'email']:
+        for attribute in ['name', 'status', 'email', 'comment']:
             dct[attribute] = participant.get(attribute)
 
         return dct
 
     def _get_lowercase_class_name(obj):
         return type(obj).__name__.lower()
+
+    if legacy_nsid:
+        public_id_key_name = 'namespace_id'
+    else:
+        public_id_key_name = 'account_id'
 
     # Flask's jsonify() doesn't handle datetimes or json arrays as primary
     # objects.
@@ -82,9 +115,10 @@ def encode(obj, namespace_public_id=None, expand=False):
         return obj.isoformat()
 
     if isinstance(obj, arrow.arrow.Arrow):
-        return encode(obj.datetime)
+        return encode(obj.datetime, legacy_nsid=legacy_nsid)
 
-    elif isinstance(obj, Namespace):
+    # TODO deprecate this and remove -- legacy_nsid
+    elif isinstance(obj, Namespace) and legacy_nsid:
         return {
             'id': obj.public_id,
             'object': 'namespace',
@@ -95,16 +129,42 @@ def encode(obj, namespace_public_id=None, expand=False):
             'email_address': obj.account.email_address,
             'name': obj.account.name,
             'provider': obj.account.provider,
-            # 'status':  'syncing',  # TODO what are values here
-            # 'last_sync':  1398790077,  # tuesday 4/29
-            # 'scope': ['mail', 'contacts']
+            'organization_unit': obj.account.category_type
+        }
+    elif isinstance(obj, Namespace):  # these are now "Account" objects
+        return {
+            'id': obj.public_id,
+            'object': 'account',
+            'account_id': obj.public_id,
+
+            'email_address': obj.account.email_address,
+            'name': obj.account.name,
+            'provider': obj.account.provider,
+            'organization_unit': obj.account.category_type,
+            'sync_state': obj.account.sync_state
+        }
+
+    elif isinstance(obj, Account) and not legacy_nsid:
+        raise Exception("Should never be serializing accounts (legacy_nsid)")
+
+    elif isinstance(obj, Account):
+        return {
+            'account_id': obj.namespace.public_id,  # ugh
+            'id': obj.namespace.public_id,  # ugh
+            'object': 'account',
+            'email_address': obj.email_address,
+            'name': obj.name,
+            'organization_unit': obj.category_type,
+
+            'provider': obj.provider,
+            'sync_state': obj.sync_state
         }
 
     elif isinstance(obj, Message):
         resp = {
             'id': obj.public_id,
             'object': 'message',
-            'namespace_id': _get_namespace_public_id(obj),
+            public_id_key_name: _get_namespace_public_id(obj),
             'subject': obj.subject,
             'from': format_address_list(obj.from_addr),
             'reply_to': format_address_list(obj.reply_to),
@@ -117,16 +177,16 @@ def encode(obj, namespace_public_id=None, expand=False):
             'snippet': obj.snippet,
             'body': obj.body,
             'unread': not obj.is_read,
+            'starred': obj.is_starred,
             'files': obj.api_attachment_metadata,
-            'events': [encode(e) for e in obj.events]
+            'events': [encode(e, legacy_nsid=legacy_nsid) for e in obj.events]
         }
 
-        if expand:
-            resp['headers'] = {
-                'Message-Id': obj.message_id_header,
-                'In-Reply-To': obj.in_reply_to,
-                'References': obj.references
-            }
+        categories = format_categories(obj.categories)
+        if obj.namespace.account.category_type == 'folder':
+            resp['folder'] = categories[0] if categories else None
+        else:
+            resp['labels'] = categories
 
         # If the message is a draft (Inbox-created or otherwise):
         if obj.is_draft:
@@ -144,21 +204,39 @@ def encode(obj, namespace_public_id=None, expand=False):
             imap_uid_info.append(encode_imapuid(imapuid))
         resp['imap_uid_info'] = imap_uid_info
 
+        if expand:
+            resp['headers'] = {
+                'Message-Id': obj.message_id_header,
+                'In-Reply-To': obj.in_reply_to,
+                'References': obj.references
+            }
+
         return resp
 
     elif isinstance(obj, Thread):
         base = {
             'id': obj.public_id,
             'object': 'thread',
-            'namespace_id': _get_namespace_public_id(obj),
+            public_id_key_name: _get_namespace_public_id(obj),
             'subject': obj.subject,
             'participants': format_address_list(obj.participants),
             'last_message_timestamp': obj.recentdate,
+            'last_message_received_timestamp': obj.receivedrecentdate,
             'first_message_timestamp': obj.subjectdate,
             'snippet': obj.snippet,
-            'tags': format_tags_list(obj.tags),
-            'version': obj.version
+            'unread': obj.unread,
+            'starred': obj.starred,
+            'has_attachments': obj.has_attachments,
+            'version': obj.version,
+            # For backwards-compatibility -- remove after deprecating tags API
+            'tags': obj.tags
         }
+
+        categories = format_categories(obj.categories)
+        if obj.namespace.account.category_type == 'folder':
+            base['folders'] = categories
+        else:
+            base['labels'] = categories
 
         if not expand:
             base['message_ids'] = \
@@ -166,14 +244,7 @@ def encode(obj, namespace_public_id=None, expand=False):
             base['draft_ids'] = [m.public_id for m in obj.drafts]
             return base
 
-        # Strip duplicates (e.g. when a message is moved) but preserve order
-        seen = set()
-        messages = []
-        for message in obj.messages:
-            if message.public_id in seen:
-                continue
-            seen.add(message.public_id)
-            messages.append(message)
+        messages = obj.messages
 
         imap_uid_info_by_msg = defaultdict(list)
         imapuids = g.db_session.query(ImapUid).filter( \
@@ -186,10 +257,15 @@ def encode(obj, namespace_public_id=None, expand=False):
         all_expanded_messages = []
         all_expanded_drafts = []
         for msg in messages:
+
+            # Skip duplicates (e.g. when a message is moved)
+            if msg.id not in imap_uid_info_by_msg:
+                continue
+
             resp = {
                 'id': msg.public_id,
                 'object': 'message',
-                'namespace_id': _get_namespace_public_id(msg),
+                public_id_key_name: _get_namespace_public_id(msg),
                 'subject': msg.subject,
                 'from': format_address_list(msg.from_addr),
                 'reply_to': format_address_list(msg.reply_to),
@@ -201,9 +277,15 @@ def encode(obj, namespace_public_id=None, expand=False):
                 'thread_id': obj.public_id,
                 'snippet': msg.snippet,
                 'unread': not msg.is_read,
+                'starred': msg.is_starred,
                 'files': msg.api_attachment_metadata,
                 'imap_uid_info': imap_uid_info_by_msg[msg.id],
             }
+            categories = format_categories(msg.categories)
+            if obj.namespace.account.category_type == 'folder':
+                resp['folder'] = categories[0] if categories else None
+            else:
+                resp['labels'] = categories
 
             if msg.is_draft:
                 resp['object'] = 'draft'
@@ -225,16 +307,17 @@ def encode(obj, namespace_public_id=None, expand=False):
         return {
             'id': obj.public_id,
             'object': 'contact',
-            'namespace_id': _get_namespace_public_id(obj),
+            public_id_key_name: _get_namespace_public_id(obj),
             'name': obj.name,
-            'email': obj.email_address
+            'email': obj.email_address,
+            'phone_numbers': format_phone_numbers(obj.phone_numbers)
         }
 
     elif isinstance(obj, Event):
         resp = {
             'id': obj.public_id,
             'object': 'event',
-            'namespace_id': _get_namespace_public_id(obj),
+            public_id_key_name: _get_namespace_public_id(obj),
             'calendar_id': obj.calendar.public_id if obj.calendar else None,
             'message_id': obj.message.public_id if obj.message else None,
             'title': obj.title,
@@ -244,7 +327,7 @@ def encode(obj, namespace_public_id=None, expand=False):
                              for participant in obj.participants],
             'read_only': obj.read_only,
             'location': obj.location,
-            'when': encode(obj.when),
+            'when': encode(obj.when, legacy_nsid=legacy_nsid),
             'busy': obj.busy,
             'status': obj.status,
         }
@@ -254,16 +337,22 @@ def encode(obj, namespace_public_id=None, expand=False):
                 'timezone': obj.start_timezone
             }
         if isinstance(obj, RecurringEventOverride):
-            resp['original_start_time'] = encode(obj.original_start_time)
+            resp['original_start_time'] = encode(obj.original_start_time,
+                                                 legacy_nsid=legacy_nsid)
             if obj.master:
                 resp['master_event_id'] = obj.master.public_id
+        if isinstance(obj, InflatedEvent):
+            del resp['message_id']
+            if obj.master:
+                resp['master_event_id'] = obj.master.public_id
+
         return resp
 
     elif isinstance(obj, Calendar):
         return {
             'id': obj.public_id,
             'object': 'calendar',
-            'namespace_id': _get_namespace_public_id(obj),
+            public_id_key_name: _get_namespace_public_id(obj),
             'name': obj.name,
             'description': obj.description,
             'read_only': obj.read_only,
@@ -272,7 +361,8 @@ def encode(obj, namespace_public_id=None, expand=False):
     elif isinstance(obj, When):
         # Get time dictionary e.g. 'start_time': x, 'end_time': y or 'date': z
         times = obj.get_time_dict()
-        resp = {k: encode(v) for k, v in times.iteritems()}
+        resp = {k: encode(v, legacy_nsid=legacy_nsid) for
+                k, v in times.iteritems()}
         resp['object'] = _get_lowercase_class_name(obj)
         return resp
 
@@ -280,7 +370,7 @@ def encode(obj, namespace_public_id=None, expand=False):
         resp = {
             'id': obj.public_id,
             'object': 'file',
-            'namespace_id': _get_namespace_public_id(obj),
+            public_id_key_name: _get_namespace_public_id(obj),
             'content_type': obj.content_type,
             'size': obj.size,
             'filename': obj.filename,
@@ -289,23 +379,27 @@ def encode(obj, namespace_public_id=None, expand=False):
             # if obj is actually a message attachment (and not merely an
             # uploaded file), set additional properties
             resp.update({
-                'message_ids': [p.message.public_id for p in obj.parts]
-            })
+                'message_ids': [p.message.public_id for p in obj.parts]})
+
+            content_ids = list({p.content_id for p in obj.parts
+                                if p.content_id is not None})
+            content_id = None
+            if len(content_ids) > 0:
+                content_id = content_ids[0]
+
+            resp.update({'content_id': content_id})
 
         return resp
 
-    elif isinstance(obj, Tag):
+    elif isinstance(obj, Category):
+        # 'object' is set to 'folder' or 'label'
         resp = {
             'id': obj.public_id,
-            'object': 'tag',
+            'object': obj.type,
+            public_id_key_name: _get_namespace_public_id(obj),
             'name': obj.name,
-            'namespace_id': _get_namespace_public_id(obj),
-            'readonly': obj.readonly
+            'display_name': obj.api_display_name
         }
-        if obj.unread_count is not None:
-            resp['unread_count'] = obj.unread_count
-        if obj.thread_count is not None:
-            resp['thread_count'] = obj.thread_count
         return resp
 
 
@@ -324,15 +418,20 @@ class APIEncoder(object):
         public id of the namespace to which the object to serialize belongs.
 
     """
-    def __init__(self, namespace_public_id=None, expand=False):
-        self.encoder_class = self._encoder_factory(namespace_public_id, expand)
 
-    def _encoder_factory(self, namespace_public_id, expand):
+    def __init__(self, namespace_public_id=None, expand=False,
+                 legacy_nsid=False):
+        self.encoder_class = self._encoder_factory(namespace_public_id, expand,
+                                                   legacy_nsid)
+
+    def _encoder_factory(self, namespace_public_id, expand, legacy_nsid):
         class InternalEncoder(JSONEncoder):
+
             def default(self, obj):
                 custom_representation = encode(obj,
                                                namespace_public_id,
-                                               expand=expand)
+                                               expand=expand,
+                                               legacy_nsid=legacy_nsid)
                 if custom_representation is not None:
                     return custom_representation
                 # Let the base class default method raise the TypeError

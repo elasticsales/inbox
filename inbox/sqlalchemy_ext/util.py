@@ -4,6 +4,7 @@ import uuid
 import struct
 import time
 import traceback
+import weakref
 
 from bson import json_util, EPOCH_NAIVE
 # Monkeypatch to not include tz_info in decoded JSON.
@@ -14,41 +15,40 @@ from sqlalchemy import String, Text, event
 from sqlalchemy.types import TypeDecorator, BINARY
 from sqlalchemy.interfaces import PoolListener
 from sqlalchemy.engine import Engine
+from sqlalchemy.ext import baked
 from sqlalchemy.ext.mutable import Mutable
 from sqlalchemy.ext.declarative import DeclarativeMeta
 
 from inbox.util.encoding import base36encode, base36decode
 
-from inbox.log import get_logger
+from nylas.logging import get_logger
 log = get_logger()
 
 
-SLOW_QUERY_THRESHOLD_MS = 5000
+MAX_SANE_QUERIES_PER_SESSION = 100
 MAX_TEXT_LENGTH = 65535
+
+
+bakery = baked.bakery()
+
+
+query_counts = weakref.WeakKeyDictionary()
 
 
 @event.listens_for(Engine, "before_cursor_execute")
 def before_cursor_execute(conn, cursor, statement,
                           parameters, context, executemany):
-    context._query_start_time = time.time()
+    if conn not in query_counts:
+        query_counts[conn] = 1
+    else:
+        query_counts[conn] += 1
 
 
-@event.listens_for(Engine, "after_cursor_execute")
-def after_cursor_execute(conn, cursor, statement,
-                         parameters, context, executemany):
-    total = int(1000 * (time.time() - context._query_start_time))
-    # We only care about slow reads here
-    if total > SLOW_QUERY_THRESHOLD_MS and statement.startswith('SELECT'):
-        statement = ' '.join(statement.split())
-        try:
-            # Turn `parameters` into a string as a quick fix for easier
-            # downstream parsing (Elasticsearch has trouble with arrays of
-            # heterogeneous type such as [1, 'a']).
-            log.warning('slow query', query_time=total, statement=statement,
-                        parameters=str(parameters))
-        except UnicodeDecodeError:
-            log.warning('slow query', query_time=total)
-            log.error('logging UnicodeDecodeError')
+@event.listens_for(Engine, 'commit')
+def before_commit(conn):
+    if query_counts.get(conn, 0) > MAX_SANE_QUERIES_PER_SESSION:
+        log.warning('Dubiously many queries per session!',
+                    query_count=query_counts.get(conn))
 
 
 # in seconds
@@ -200,6 +200,7 @@ class Base36UID(TypeDecorator):
 # dumps() return standard Python dicts like the json.* equivalents
 # (because these are simply called under the hood)
 class MutableDict(Mutable, dict):
+
     @classmethod
     def coerce(cls, key, value):
         """ Convert plain dictionaries to MutableDict. """
@@ -235,6 +236,7 @@ class MutableDict(Mutable, dict):
 
 
 class MutableList(Mutable, list):
+
     @classmethod
     def coerce(cls, key, value):
         """Convert plain list to MutableList"""
@@ -326,6 +328,7 @@ def generate_public_id():
 # Without this, MySQL will silently insert invalid values in the database if
 # not running with sql-mode=traditional.
 class ForceStrictMode(PoolListener):
+
     def connect(self, dbapi_con, connection_record):
         cur = dbapi_con.cursor()
         cur.execute("SET SESSION sql_mode='TRADITIONAL'")

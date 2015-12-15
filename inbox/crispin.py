@@ -1,6 +1,4 @@
-""" IMAPClient wrapper for the Nilas Sync Engine.
-
-"""
+""" IMAPClient wrapper for the Nilas Sync Engine. """
 import contextlib
 import re
 import time
@@ -31,44 +29,55 @@ from email.parser import HeaderParser
 from collections import namedtuple, defaultdict
 
 import gevent
+from backports import ssl
 from gevent import socket
 from gevent.lock import BoundedSemaphore
 from gevent.queue import Queue
+from sqlalchemy.orm import joinedload
 
 from inbox.util.concurrency import retry
 from inbox.util.itert import chunk
-from inbox.util.misc import or_none, timed
-from inbox.basicauth import ValidationError
+from inbox.util.misc import or_none
+from inbox.basicauth import GmailSettingError
 from inbox.models.session import session_scope
-from inbox.models.account import Account
-
-from inbox.log import get_logger
+from inbox.models.backends.imap import ImapAccount
+from inbox.models.backends.generic import GenericAccount
+from inbox.models.backends.gmail import GmailAccount
+from nylas.logging import get_logger
 log = get_logger()
 
-__all__ = ['CrispinClient', 'GmailCrispinClient', 'CondStoreCrispinClient']
+__all__ = ['CrispinClient', 'GmailCrispinClient']
 
 # Unify flags API across IMAP and Gmail
 Flags = namedtuple('Flags', 'flags')
 # Flags includes labels on Gmail because Gmail doesn't use \Draft.
 GmailFlags = namedtuple('GmailFlags', 'flags labels')
-
-GMetadata = namedtuple('GMetadata', 'msgid thrid')
+GMetadata = namedtuple('GMetadata', 'g_msgid g_thrid size')
 RawMessage = namedtuple(
     'RawImapMessage',
     'uid internaldate flags body g_thrid g_msgid g_labels')
+RawFolder = namedtuple('RawFolder', 'display_name role')
 
 # Lazily-initialized map of account ids to lock objects.
 # This prevents multiple greenlets from concurrently creating duplicate
 # connection pools for a given account.
 _lock_map = defaultdict(threading.Lock)
 
+# Exception classes which indicate the network connection to the IMAP
+# server is broken.
+CONN_NETWORK_EXC_CLASSES = (socket.error, ssl.SSLError)
 
-CONN_DISCARD_EXC_CLASSES = (socket.error, imaplib.IMAP4.error)
+# Exception classes on which operations should be retried.
+CONN_RETRY_EXC_CLASSES = CONN_NETWORK_EXC_CLASSES + (imaplib.IMAP4.error,)
 
+# Exception classes on which connections should be discarded.
+CONN_DISCARD_EXC_CLASSES = CONN_NETWORK_EXC_CLASSES +  \
+                           (ssl.CertificateError, imaplib.IMAP4.error)
 
-class GmailSettingError(Exception):
-    """ Thrown on misconfigured Gmail accounts. """
-    pass
+# Exception classes which indicate the IMAP connection has become
+# unusable.
+CONN_UNUSABLE_EXC_CLASSES = CONN_NETWORK_EXC_CLASSES + \
+                            (ssl.CertificateError, imaplib.IMAP4.abort)
 
 
 class FolderMissingError(Exception):
@@ -79,7 +88,8 @@ def _get_connection_pool(account_id, pool_size, pool_map, readonly):
     with _lock_map[account_id]:
         if account_id not in pool_map:
             pool_map[account_id] = CrispinConnectionPool(
-                account_id, num_connections=pool_size, readonly=readonly)
+                account_id, num_connections=pool_size,
+                readonly=readonly)
         return pool_map[account_id]
 
 
@@ -127,6 +137,7 @@ class CrispinConnectionPool(object):
     readonly : bool
         Is the connection to the IMAP server read-only?
     """
+
     def __init__(self, account_id, num_connections, readonly):
         log.info('Creating Crispin connection pool for account {} with {} '
                  'connections'.format(account_id, num_connections))
@@ -161,12 +172,13 @@ class CrispinConnectionPool(object):
             # thing to do.
             log.info('IMAP connection error; discarding connection',
                      exc_info=True)
-            if client is not None:
+            if client is not None and \
+               not isinstance(exc, CONN_UNUSABLE_EXC_CLASSES):
                 try:
                     client.logout()
-                except:
-                    log.error('Error on IMAP logout', exc_info=True)
-                client = None
+                except Exception:
+                    log.info('Error on IMAP logout', exc_info=True)
+            client = None
             raise exc
         except:
             raise
@@ -175,63 +187,52 @@ class CrispinConnectionPool(object):
             self._sem.release()
 
     def _set_account_info(self):
-        with session_scope() as db_session:
-            account = db_session.query(Account).get(self.account_id)
+        with session_scope(self.account_id) as db_session:
+            account = db_session.query(ImapAccount).get(self.account_id)
             self.sync_state = account.sync_state
+            self.provider = account.provider
             self.provider_info = account.provider_info
             self.email_address = account.email_address
             self.auth_handler = account.auth_handler
+            if account.provider == 'gmail':
+                self.client_cls = GmailCrispinClient
+            else:
+                self.client_cls = CrispinClient
+
+    def _new_raw_connection(self):
+        """Returns a new, authenticated IMAPClient instance for the account."""
+        from inbox.auth.gmail import GmailAuthHandler
+        with session_scope(self.account_id) as db_session:
+            if isinstance(self.auth_handler, GmailAuthHandler):
+                account = db_session.query(GmailAccount).options(
+                    joinedload(GmailAccount.auth_credentials)).get(
+                    self.account_id)
+            else:
+                account = db_session.query(GenericAccount).options(
+                    joinedload(GenericAccount.secret)).get(self.account_id)
+            db_session.expunge(account)
+
+        conn = self.auth_handler.connect_account(account)
+
+        if account.debug:
+            def _log(text):
+                log.debug('imap_log',
+                         conn=id(conn),
+                         account_id=self.account_id,
+                         text=text)
+
+            conn.debug = 4
+            conn._imap._mesg = _log
+        else:
+            conn.debug = False
+
+        return conn
 
     def _new_connection(self):
-        try:
-            with session_scope() as db_session:
-                account = db_session.query(Account).get(self.account_id)
-                conn = self.auth_handler.connect_account(account)
-                if account.debug:
-                    def _log(text):
-                        log.debug('imap_log',
-                                 conn=id(conn),
-                                 account_id=self.account_id,
-                                 text=text)
-
-                    conn.debug = 4
-                    conn._imap._mesg = _log
-                else:
-                    conn.debug = False
-
-                # If we can connect the account, then we can set the state
-                # to 'running' if it wasn't already
-                if self.sync_state != 'running':
-                    self.sync_state = account.sync_state = 'running'
-
-                if account.provider == 'gmail':
-                    client_cls = GmailCrispinClient
-                else:
-                    """
-                    if 'CONDSTORE' in conn.capabilities():
-                        client_cls = CondStoreCrispinClient
-                    else:
-                        client_cls = CrispinClient
-                    """
-                    client_cls = CrispinClient
-
-            return client_cls(self.account_id, self.provider_info,
-                                   self.email_address, conn,
-                                   readonly=self.readonly)
-        except ValidationError, e:
-            log.error('Error validating',
-                      account_id=self.account_id,
-                      logstash_tag='mark_invalid')
-            with session_scope() as db_session:
-                account = db_session.query(Account).get(self.account_id)
-                account.mark_invalid()
-                account.update_sync_error(str(e))
-            raise
-        except Exception, e:
-            with session_scope() as db_session:
-                account = db_session.query(Account).get(self.account_id)
-                account.update_sync_error(str(e))
-            raise
+        conn = self._new_raw_connection()
+        return self.client_cls(self.account_id, self.provider_info,
+                               self.email_address, conn,
+                               readonly=self.readonly)
 
 
 def _exc_callback():
@@ -240,17 +241,13 @@ def _exc_callback():
     gevent.sleep(5)
 
 
-def _fail_callback():
-    log.error('Max retries reached. Aborting', exc_info=True)
-
-
 retry_crispin = functools.partial(
-    retry, retry_classes=CONN_DISCARD_EXC_CLASSES, exc_callback=_exc_callback,
-    fail_callback=_fail_callback, max_count=5, reset_interval=150)
+    retry, retry_classes=CONN_RETRY_EXC_CLASSES, exc_callback=_exc_callback)
 
 
 class CrispinClient(object):
-    """ Generic IMAP client wrapper.
+    """
+    Generic IMAP client wrapper.
 
     One thing to note about crispin clients is that *all* calls operate on
     the currently selected folder.
@@ -280,11 +277,8 @@ class CrispinClient(object):
         Open IMAP connection (should be already authed).
     readonly : bool
         Whether or not to open IMAP connections as readonly.
+
     """
-    PROVIDER = 'IMAP'
-    # NOTE: Be *careful* changing this! Downloading too much at once may
-    # cause memory errors that only pop up in extreme edge cases.
-    CHUNK_SIZE = 1
 
     def __init__(self, account_id, provider_info, email_address, conn,
                  readonly=True):
@@ -315,9 +309,7 @@ class CrispinClient(object):
         IMAPClient parses this response into a list of
         (flags, delimiter, name) tuples.
         """
-        folders = self.conn.list_folders()
-
-        return folders
+        return self.conn.list_folders()
 
     def select_folder(self, folder, uidvalidity_cb):
         """ Selects a given folder.
@@ -348,12 +340,12 @@ class CrispinClient(object):
             # want to make sure we keep track of different providers'
             # "nonexistent" messages, so log this event.
             log.error("IMAPClient error selecting folder. May be deleted",
-                           error=str(e))
+                      error=str(e))
             raise
 
         select_info['UIDVALIDITY'] = long(select_info['UIDVALIDITY'])
         self.selected_folder = (folder, select_info)
-        # don't propagate cached information from previous session
+        # Don't propagate cached information from previous session
         self._folder_names = None
         return uidvalidity_cb(self.account_id, folder, select_info)
 
@@ -369,67 +361,142 @@ class CrispinClient(object):
     def selected_uidvalidity(self):
         return or_none(self.selected_folder_info, lambda i: i['UIDVALIDITY'])
 
+    @property
+    def selected_uidnext(self):
+        return or_none(self.selected_folder_info, lambda i: i.get('UIDNEXT'))
+
+    @property
+    def folder_delimiter(self):
+        folders = self._fetch_folder_list()
+        _, delimiter, __ = folders[0]
+
+        return delimiter
+
     def sync_folders(self):
+        """
+        List of folders to sync, in order of sync priority. Currently, that
+        simply means inbox folder first.
+
+        In generic IMAP, the 'INBOX' folder is required.
+
+        Returns
+        -------
+        list
+            Folders to sync (as strings).
+
+        """
         to_sync = []
-        folders = self.folder_names()
-        for tag in ('inbox', 'drafts', 'sent', 'starred', 'important',
-                    'archive', 'extra', 'spam', 'trash'):
-            if tag == 'extra' and tag in folders:
-                to_sync.extend(folders['extra'])
-            elif tag in folders:
-                to_sync.append(folders[tag])
+        have_folders = self.folder_names()
+
+        assert 'inbox' in have_folders, \
+            "Missing required 'inbox' folder for account_id: {}".\
+            format(self.account_id)
+
+        # Sync inbox folder first, then others.
+        to_sync = have_folders['inbox']
+        for role, folder_names in have_folders.items():
+            if role == 'inbox':
+                continue
+            to_sync.extend(folder_names)
+
         return to_sync
 
     def folder_names(self, force_resync=False):
+        """
+        Return the folder names for the account as a mapping from
+        recognized role: list of folder names,
+        for example: 'sent': ['Sent Items', 'Sent'].
+
+        The list of recognized folder roles is in:
+        inbox/models/constants.py
+
+        Folders that do not belong to a recognized role are mapped to
+        None, for example: None: ['MyFolder', 'OtherFolder'].
+
+        The mapping is also cached in self._folder_names
+
+        Parameters:
+        -----------
+        force_resync: boolean
+            Return the cached mapping or return a refreshed mapping
+            (after refetching from the remote).
+
+        """
+        if force_resync or self._folder_names is None:
+            self._folder_names = defaultdict(list)
+
+            raw_folders = self.folders()
+            for f in raw_folders:
+                self._folder_names[f.role].append(f.display_name)
+
+        return self._folder_names
+
+    def folders(self):
+        """
+        Fetch the list of folders for the account from the remote, return as a
+        list of RawFolder objects.
+
+        NOTE:
+        Always fetches the list of folders from the remote.
+
+        """
+        raw_folders = []
+
+        folders = self._fetch_folder_list()
+        for flags, delimiter, name in folders:
+            if u'\\Noselect' in flags or u'\\NoSelect' in flags \
+                    or u'\\NonExistent' in flags:
+                # Special folders that can't contain messages
+                continue
+
+            raw_folder = self._process_folder(name, flags)
+            raw_folders.append(raw_folder)
+
+        return raw_folders
+
+    def _process_folder(self, display_name, flags):
+        """
+        Determine the role for the remote folder from its `name` and `flags`.
+
+        Returns
+        -------
+            RawFolder representing the folder
+
+        """
+        # TODO[[k]: Important/ Starred for generic IMAP?
+
         # Different providers have different names for folders, here
         # we have a default map for common name mapping, additional
         # mappings can be provided via the provider configuration file
-        default_folder_map = {'INBOX': 'inbox', 'DRAFTS': 'drafts',
-                              'DRAFT': 'drafts', 'JUNK': 'spam',
-                              'ARCHIVE': 'archive', 'SENT': 'sent',
-                              'TRASH': 'trash', 'SPAM': 'spam'}
-
-        # Some providers also provide flags to determine common folders
-        # Here we read these flags and apply the mapping
-        flag_to_folder_map = {'\\Trash': 'trash', '\\Sent': 'sent',
-                              '\\Drafts': 'drafts', '\\Junk': 'spam',
-                              '\\Inbox': 'inbox', '\\Spam': 'spam'}
+        default_folder_map = {
+            'inbox': 'inbox',
+            'drafts': 'drafts',
+            'draft': 'drafts',
+            'junk': 'spam',
+            'spam': 'spam',
+            'archive': 'archive',
+            'sent': 'sent',
+            'trash': 'trash'}
 
         # Additionally we provide a custom mapping for providers that
         # don't fit into the defaults.
         folder_map = self.provider_info.get('folder_map', {})
 
-        if force_resync or self._folder_names is None:
-            folders = self._fetch_folder_list()
-            self._folder_names = dict()
-            for flags, delimiter, name in folders:
-                if u'\\Noselect' in flags or u'\\NoSelect' in flags \
-                        or u'\\NonExistent' in flags:
-                    # special folders that can't contain messages
-                    pass
-                # TODO: internationalization support
-                elif name in folder_map:
-                    self._folder_names[folder_map[name]] = name
-                elif name.upper() in default_folder_map:
-                    self._folder_names[default_folder_map[name.upper()]] = name
-                else:
-                    matched = False
-                    for flag in flags:
-                        if flag in flag_to_folder_map:
-                            self._folder_names[flag_to_folder_map[flag]] = name
-                            matched = True
-                    if not matched:
-                        self._folder_names.setdefault(
-                            'extra', list()).append(name)
+        # Some providers also provide flags to determine common folders
+        # Here we read these flags and apply the mapping
+        flag_map = {'\\Trash': 'trash', '\\Sent': 'sent', '\\Drafts': 'drafts',
+                    '\\Junk': 'spam', '\\Inbox': 'inbox', '\\Spam': 'spam'}
 
-        # TODO: support subfolders
-        return self._folder_names
+        role = default_folder_map.get(display_name.lower())
 
-    def folder_status(self, folder):
-        status = [long(val) for val in self.conn.folder_status(
-            folder, ('UIDVALIDITY'))]
+        if not role:
+            role = folder_map.get(display_name)
 
-        return status
+        if not role:
+            for flag in flags:
+                role = flag_map.get(flag)
+
+        return RawFolder(display_name=display_name, role=role)
 
     def create_folder(self, name):
         try:
@@ -440,18 +507,23 @@ class CrispinClient(object):
                 self.conn.create_folder(name)
         return name
 
-    def search_uids(self, criteria):
-        """ Find not-deleted UIDs in this folder matching the criteria.
+    def condstore_supported(self):
+        # Technically QRESYNC implies CONDSTORE, although this is unlikely to
+        # matter in practice.
+        capabilities = self.conn.capabilities()
+        return 'CONDSTORE' in capabilities or 'QRESYNC' in capabilities
 
-        See http://tools.ietf.org/html/rfc3501.html#section-6.4.4 for valid
-        criteria.
+    def idle_supported(self):
+        return 'IDLE' in self.conn.capabilities()
+
+    def search_uids(self, criteria):
         """
-        full_criteria = ['NOT DELETED']
-        if isinstance(criteria, list):
-            full_criteria.extend(criteria)
-        else:
-            full_criteria.append(criteria)
-        return sorted([long(uid) for uid in self.conn.search(full_criteria)])
+        Find UIDs in this folder matching the criteria. See
+        http://tools.ietf.org/html/rfc3501.html#section-6.4.4 for valid
+        criteria.
+
+        """
+        return sorted([long(uid) for uid in self.conn.search(criteria)])
 
     def all_uids(self):
         """ Fetch all UIDs associated with the currently selected folder.
@@ -492,9 +564,9 @@ class CrispinClient(object):
 
         elapsed = time.time() - t
         log.debug('Requested all UIDs',
-                   selected_folder=self.selected_folder_name,
-                   search_time=elapsed,
-                   total_uids=len(fetch_result))
+                  selected_folder=self.selected_folder_name,
+                  search_time=elapsed,
+                  total_uids=len(fetch_result))
         return sorted([long(uid) for uid in fetch_result])
 
     def uids(self, uids):
@@ -505,10 +577,10 @@ class CrispinClient(object):
         for uid in uid_set:
             try:
                 raw_messages.update(self.conn.fetch(
-                    uid, ['BODY.PEEK[] INTERNALDATE FLAGS']))
+                    uid, ['BODY.PEEK[]', 'INTERNALDATE', 'FLAGS']))
             except imapclient.IMAPClient.Error as e:
                 if ('[UNAVAILABLE] UID FETCH Server error '
-                    'while fetching messages') in str(e):
+                        'while fetching messages') in str(e):
                     log.info('Got an exception while requesting an UID',
                              uid=uid, error=e,
                              logstash_tag='imap_download_exception')
@@ -525,10 +597,9 @@ class CrispinClient(object):
             if uid not in uid_set:
                 continue
             msg = raw_messages[uid]
-            if 'BODY[]' not in msg:
-                raise Exception(
-                    'No BODY[] element in IMAP response. Tags given: {}'
-                    .format(msg.keys()))
+            if msg.keys() == ['SEQ']:
+                log.error('No data returned for UID, skipping', uid=uid)
+                continue
 
             messages.append(RawMessage(uid=long(uid),
                                        internaldate=msg['INTERNALDATE'],
@@ -541,16 +612,17 @@ class CrispinClient(object):
         return messages
 
     def flags(self, uids):
-        data = self.conn.fetch(uids, ['FLAGS'])
+        if len(uids) > 100:
+            # Some backends abort the connection if you give them a really
+            # long sequence set of individual UIDs, so instead fetch flags for
+            # all UIDs greater than or equal to min(uids).
+            seqset = '{}:*'.format(min(uids))
+        else:
+            seqset = uids
+        data = self.conn.fetch(seqset, ['FLAGS'])
         uid_set = set(uids)
         return {uid: Flags(ret['FLAGS'])
                 for uid, ret in data.items() if uid in uid_set}
-
-    def copy_uids(self, uids, to_folder):
-        if not uids:
-            return
-        uids = [str(u) for u in uids]
-        self.conn.copy(uids, to_folder)
 
     def delete_uids(self, uids):
         uids = [str(u) for u in uids]
@@ -571,26 +643,32 @@ class CrispinClient(object):
             self.conn.add_flags(uids, ['\\Seen'])
 
     def save_draft(self, message, date=None):
-        assert self.selected_folder_name == self.folder_names()['drafts'], \
-            'Must select drafts folder first ({0})'.format(
-                self.selected_folder_name)
+        assert self.selected_folder_name in self.folder_names()['drafts'], \
+            'Must select a drafts folder first ({0})'.\
+            format(self.selected_folder_name)
 
         self.conn.append(self.selected_folder_name, message, ['\\Draft',
                                                               '\\Seen'], date)
 
     def create_message(self, message, date=None):
-        """Create a message on the server. Only used to fix server-side bugs,
-        like iCloud not saving Sent messages"""
-        assert self.selected_folder_name == self.folder_names()['sent'], \
-            'Must select sent folder first ({0})'.format(
-                self.selected_folder_name)
+        """
+        Create a message on the server. Only used to fix server-side bugs,
+        like iCloud not saving Sent messages.
 
-        self.conn.append(self.selected_folder_name, message, [], date)
+        """
+        assert self.selected_folder_name in self.folder_names()['sent'], \
+            'Must select sent folder first ({0})'.\
+            format(self.selected_folder_name)
+
+        return self.conn.append(self.selected_folder_name, message, [], date)
 
     def fetch_headers(self, uids):
-        """Fetch headers for the given uids. Chunked because certain providers
+        """
+        Fetch headers for the given uids. Chunked because certain providers
         fail with 'Command line too large' if you feed them too many uids at
-        once."""
+        once.
+
+        """
         headers = {}
         for uid_chunk in chunk(uids, 100):
             headers.update(self.conn.fetch(
@@ -617,70 +695,46 @@ class CrispinClient(object):
 
         return results
 
-    def delete_draft(self, inbox_uid, message_id_header):
-        """Delete a draft, as identified either by its X-Inbox-Id or by its
-        Message-Id header. We first delete the message from the Drafts folder,
-        and then also delete it from the Trash folder if necessary."""
-        drafts_folder_name = self.folder_names()['drafts']
-        trash_folder_name = self.folder_names()['trash']
-        self.conn.select_folder(drafts_folder_name)
-        self._delete_message(inbox_uid, message_id_header)
-        self.conn.select_folder(trash_folder_name)
-        self._delete_message(inbox_uid, message_id_header)
+    def delete_draft(self, message_id_header):
+        """
+        Delete a draft, as identified by its Message-Id header. We first delete
+        the message from the Drafts folder,
+        and then also delete it from the Trash folder if necessary.
 
-    def _delete_message(self, inbox_uid, message_id_header):
         """
-        Delete a message from the selected folder, using either the X-Inbox-Id
-        header or the Message-Id header to locate it. Does nothing if no
-        matching messages are found, or if more than one matching message is
-        found.
+        log.info('Trying to delete draft', message_id_header=message_id_header)
+        drafts_folder_name = self.folder_names()['drafts'][0]
+        self.conn.select_folder(drafts_folder_name)
+        draft_deleted = self._delete_message(message_id_header)
+        if draft_deleted:
+            trash_folder_name = self.folder_names()['trash'][0]
+            self.conn.select_folder(trash_folder_name)
+            self._delete_message(message_id_header)
+        return draft_deleted
+
+    def _delete_message(self, message_id_header):
         """
-        assert inbox_uid or message_id_header, 'Need at least one header'
-        if inbox_uid:
-            matching_uids = self.find_by_header('X-Inbox-Id', inbox_uid)
-        else:
-            matching_uids = self.find_by_header('Message-Id',
-                                                message_id_header)
+        Delete a message from the selected folder, using the Message-Id header
+        to locate it. Does nothing if no matching messages are found, or if
+        more than one matching message is found.
+
+        """
+        matching_uids = self.find_by_header('Message-Id', message_id_header)
         if not matching_uids:
             log.error('No remote messages found to delete',
-                      inbox_uid=inbox_uid,
                       message_id_header=message_id_header)
-            return
+            return False
         if len(matching_uids) > 1:
             log.error('Multiple remote messages found to delete',
-                      inbox_uid=inbox_uid,
                       message_id_header=message_id_header,
                       uids=matching_uids)
-            return
+            return False
         self.conn.delete_messages(matching_uids)
         self.conn.expunge()
+        return True
 
     def logout(self):
         self.conn.logout()
-
-
-class CondStoreCrispinClient(CrispinClient):
-    def select_folder(self, folder, uidvalidity_cb):
-        ret = super(CondStoreCrispinClient,
-                    self).select_folder(folder, uidvalidity_cb)
-        # We need to issue a STATUS command asking for HIGHESTMODSEQ
-        # because some servers won't enable CONDSTORE support otherwise
-        status = self.folder_status(folder)
-        if 'HIGHESTMODSEQ' in self.selected_folder_info:
-            self.selected_folder_info['HIGHESTMODSEQ'] = \
-                long(self.selected_folder_info['HIGHESTMODSEQ'])
-        elif 'HIGHESTMODSEQ' in status:
-            self.selected_folder_info['HIGHESTMODSEQ'] = \
-                status['HIGHESTMODSEQ']
-        return ret
-
-    def folder_status(self, folder):
-        status = self.conn.folder_status(
-            folder, ('UIDVALIDITY', 'HIGHESTMODSEQ', 'UIDNEXT'))
-        for param in status:
-            status[param] = long(status[param])
-
-        return status
 
     def idle(self, timeout):
         """Idle for up to `timeout` seconds. Make sure we take the connection
@@ -695,20 +749,13 @@ class CondStoreCrispinClient(CrispinClient):
         self.conn.idle_done()
         return r
 
-    @property
-    def selected_highestmodseq(self):
-        return or_none(self.selected_folder_info, lambda i: i['HIGHESTMODSEQ'])
-
-    @timed
-    def new_and_updated_uids(self, modseq):
-        resp = self.conn.fetch('1:*', ['FLAGS'],
+    def condstore_changed_flags(self, modseq):
+        data = self.conn.fetch('1:*', ['FLAGS'],
                                modifiers=['CHANGEDSINCE {}'.format(modseq)])
-        # TODO(emfree): It may be useful to hold on to the whole response here
-        # and/or fetch more metadata, not just return the UIDs.
-        return sorted(resp.keys())
+        return {uid: Flags(ret['FLAGS']) for uid, ret in data.items()}
 
 
-class GmailCrispinClient(CondStoreCrispinClient):
+class GmailCrispinClient(CrispinClient):
     PROVIDER = 'gmail'
 
     def _fetch_folder_list(self):
@@ -723,62 +770,80 @@ class GmailCrispinClient(CondStoreCrispinClient):
         return folders
 
     def sync_folders(self):
-        """ Gmail-specific list of folders to sync.
+        """
+        Gmail-specific list of folders to sync.
 
-        In Gmail, every message is a subset of All Mail, with the exception of
-        the Trash and Spam folders. So we only sync All Mail, Trash, Spam,
-        and Inbox (for quickly downloading initial inbox messages and
-        continuing to receive new Inbox messages while a large mail archive is
-        downloading).
+        In Gmail, every message is in `All Mail`, with the exception of
+        messages in the Trash and Spam folders. So we only sync the `All Mail`,
+        Trash and Spam folders.
 
         Returns
         -------
         list
             Folders to sync (as strings).
+
         """
-        required_folders = {'all': "All Mail"}
-        missing_folders = []
-        # All Mail is required to sync all mail.
-        for folder in required_folders:
-            if folder not in self.folder_names():
-                missing_folders.append(required_folders.get(folder))
-        if len(missing_folders) > 0:
+        present_folders = self.folder_names()
+
+        if 'all' not in present_folders:
             raise GmailSettingError(
-                "Account {} ({}) is missing the {} folder(s). This is "
+                "Account {} ({}) is missing the 'All Mail' folder. This is "
                 "probably due to 'Show in IMAP' being disabled. "
                 "Please enable at "
                 "https://mail.google.com/mail/#settings/labels"
-                .format(self.account_id, self.email_address,
-                        " and ".join(missing_folders)))
-        folders = [self.folder_names()['all']]
-        # Spam is non-essential, so don't error out if it's absent.
-        if 'spam' in self.folder_names():
-            folders.append(self.folder_names()['spam'])
-        # Trash is required for deletes, but don't require it.
-        if 'trash' in self.folder_names():
-            folders.append(self.folder_names()['trash'])
-        return folders
+                .format(self.account_id, self.email_address))
+
+        # If the account has Trash, Spam folders, sync those too.
+        to_sync = []
+        for folder in ['all', 'trash', 'spam']:
+            if folder in present_folders:
+                to_sync.append(present_folders[folder][0])
+        return to_sync
 
     def flags(self, uids):
-        """ Gmail-specific flags.
+        """
+        Gmail-specific flags.
 
         Returns
         -------
         dict
-            Mapping of `uid` (str) : GmailFlags.
+            Mapping of `uid` : GmailFlags.
+
         """
-        data = self.conn.fetch(uids, ['FLAGS X-GM-LABELS'])
+        data = self.conn.fetch(uids, ['FLAGS', 'X-GM-LABELS'])
         uid_set = set(uids)
-        return {uid: GmailFlags(ret['FLAGS'], ret['X-GM-LABELS'])
+        return {uid: GmailFlags(ret['FLAGS'],
+                                self._decode_labels(ret['X-GM-LABELS']))
                 for uid, ret in data.items() if uid in uid_set}
 
+    def condstore_changed_flags(self, modseq):
+        data = self.conn.fetch('1:*', ['FLAGS', 'X-GM-LABELS'],
+                               modifiers=['CHANGEDSINCE {}'.format(modseq)])
+        results = {}
+        for uid, ret in data.items():
+            if 'FLAGS' not in ret or 'X-GM-LABELS' not in ret:
+                # We might have gotten an unsolicited fetch response that
+                # doesn't have all the data we asked for -- if so, explicitly
+                # fetch flags and labels for that UID.
+                log.info('Got incomplete response in flags fetch', uid=uid,
+                         ret=str(ret))
+                data_for_uid = self.conn.fetch(uid, ['FLAGS', 'X-GM-LABELS'])
+                if not data_for_uid:
+                    continue
+                ret = data_for_uid[uid]
+            results[uid] = GmailFlags(ret['FLAGS'],
+                                      self._decode_labels(ret['X-GM-LABELS']))
+        return results
+
     def g_msgids(self, uids):
-        """ X-GM-MSGIDs for the given UIDs.
+        """
+        X-GM-MSGIDs for the given UIDs.
 
         Returns
         -------
         dict
             Mapping of `uid` (long) : `g_msgid` (long)
+
         """
         data = self.conn.fetch(uids, ['X-GM-MSGID'])
         uid_set = set(uids)
@@ -786,55 +851,94 @@ class GmailCrispinClient(CondStoreCrispinClient):
                 for uid, ret in data.items() if uid in uid_set}
 
     def folder_names(self, force_resync=False):
-        """ Parses out Gmail-specific folder names based on Gmail IMAP flags.
+        """
+        Return the folder names ( == label names for Gmail) for the account
+        as a mapping from recognized role: list of folder names in the
+        role, for example: 'sent': ['Sent Items', 'Sent'].
 
-        If the user's account is localized to a different language, it will
-        return the proper localized string.
+        The list of recognized categories is in:
+        inbox/models/constants.py
 
-        Caches the call since we use it all over the place and folders never
-        change names during a session.
+        Folders that do not belong to a recognized role are mapped to None, for
+        example: None: ['MyFolder', 'OtherFolder'].
+
+        The mapping is also cached in self._folder_names
+
+        Parameters:
+        -----------
+        force_resync: boolean
+            Return the cached mapping or return a refreshed mapping
+            (after refetching from the remote).
+
         """
         if force_resync or self._folder_names is None:
-            folders = self._fetch_folder_list()
-            self._folder_names = dict()
-            for flags, delimiter, name in folders:
-                if u'\\Noselect' in flags or u'\\NoSelect' in flags \
-                        or u'\\NonExistent' in flags:
-                    # special folders that can't contain messages, usually
-                    # just '[Gmail]'
-                    pass
-                elif '\\All' in flags:
-                    self._folder_names['all'] = name
-                elif name.lower() == 'inbox':
-                    self._folder_names[name.lower()] = name.capitalize()
-                    continue
-                else:
-                    for flag in ['\\Drafts', '\\Important', '\\Sent', '\\Junk',
-                                 '\\Flagged', '\\Trash']:
-                        # find localized names for Gmail's special folders
-                        if flag in flags:
-                            k = flag.replace('\\', '').lower()
-                            if k == 'flagged':
-                                self._folder_names['starred'] = name
-                            elif k == 'junk':
-                                self._folder_names['spam'] = name
-                            else:
-                                self._folder_names[k] = name
-                            break
-                    else:
-                        # everything else is a label
-                        self._folder_names.setdefault('labels', list())\
-                            .append(name)
-            if 'labels' in self._folder_names:
-                self._folder_names['labels'].sort()
-                # synonyms on Gmail
-                self._folder_names['extra'] = self._folder_names['labels']
+            self._folder_names = defaultdict(list)
+
+            raw_folders = self.folders()
+            for f in raw_folders:
+                self._folder_names[f.role].append(f.display_name)
+
         return self._folder_names
 
+    def folders(self):
+        """
+        Fetch the list of folders for the account from the remote, return as a
+        list of RawFolder objects.
+
+        NOTE:
+        Always fetches the list of folders from the remote.
+
+        """
+        raw_folders = []
+
+        folders = self._fetch_folder_list()
+        for flags, delimiter, name in folders:
+            if u'\\Noselect' in flags or u'\\NoSelect' in flags \
+                    or u'\\NonExistent' in flags:
+                # Special folders that can't contain messages, usually
+                # just '[Gmail]'
+                continue
+
+            raw_folder = self._process_folder(name, flags)
+            raw_folders.append(raw_folder)
+
+        return raw_folders
+
+    def _process_folder(self, display_name, flags):
+        """
+        Determine the canonical_name for the remote folder from its `name` and
+        `flags`.
+
+        Returns
+        -------
+            RawFolder representing the folder
+
+        """
+        flag_map = {'\\Drafts': 'drafts', '\\Important': 'important',
+                    '\\Sent': 'sent', '\\Junk': 'spam', '\\Flagged': 'starred',
+                    '\\Trash': 'trash'}
+
+        role = None
+        if '\\All' in flags:
+            role = 'all'
+        elif display_name.lower() == 'inbox':
+            # Special-case the display name here. In Gmail, the inbox
+            # folder shows up in the folder list as 'INBOX', and in sync as
+            # the label '\\Inbox'. We're just always going to give it the
+            # display name 'Inbox'.
+            role = 'inbox'
+            display_name = 'Inbox'
+        else:
+            for flag in flags:
+                if flag in flag_map:
+                    role = flag_map[flag]
+
+        return RawFolder(display_name=display_name, role=role)
+
     def uids(self, uids):
-        raw_messages = self.conn.fetch(uids, ['BODY.PEEK[] INTERNALDATE FLAGS',
-                                              'X-GM-THRID', 'X-GM-MSGID',
-                                              'X-GM-LABELS'])
+        raw_messages = self.conn.fetch(uids, ['BODY.PEEK[]', 'INTERNALDATE',
+                                              'FLAGS', 'X-GM-THRID',
+                                              'X-GM-MSGID', 'X-GM-LABELS'])
 
         messages = []
         uid_set = set(uids)
@@ -843,20 +947,19 @@ class GmailCrispinClient(CondStoreCrispinClient):
             if uid not in uid_set:
                 continue
             msg = raw_messages[uid]
-            messages.append(RawMessage(uid=long(uid),
-                                       internaldate=msg['INTERNALDATE'],
-                                       flags=msg['FLAGS'],
-                                       body=msg['BODY[]'],
-                                       g_thrid=long(msg['X-GM-THRID']),
-                                       g_msgid=long(msg['X-GM-MSGID']),
-                                       g_labels=msg['X-GM-LABELS']))
+            messages.append(
+                RawMessage(uid=long(uid),
+                           internaldate=msg['INTERNALDATE'],
+                           flags=msg['FLAGS'],
+                           body=msg['BODY[]'],
+                           g_thrid=long(msg['X-GM-THRID']),
+                           g_msgid=long(msg['X-GM-MSGID']),
+                           g_labels=self._decode_labels(msg['X-GM-LABELS'])))
         return messages
 
     def g_metadata(self, uids):
-        """ Download Gmail MSGIDs and THRIDs for the given messages.
-
-        NOTE: only UIDs are guaranteed to be unique to a folder, X-GM-MSGID
-        and X-GM-THRID may not be.
+        """
+        Download Gmail MSGIDs, THRIDs, and message sizes for the given uids.
 
         Parameters
         ----------
@@ -866,138 +969,34 @@ class GmailCrispinClient(CondStoreCrispinClient):
         Returns
         -------
         dict
-            uid: GMetadata(msgid, thrid)
+            uid: GMetadata(msgid, thrid, size)
         """
-        log.debug('fetching X-GM-MSGID and X-GM-THRID',
-                  uid_count=len(uids))
         # Super long sets of uids may fail with BAD ['Could not parse command']
         # In that case, just fetch metadata for /all/ uids.
-        if len(uids) > 1e6:
-            data = self.conn.fetch('1:*', ['X-GM-MSGID', 'X-GM-THRID'])
-        else:
-            data = self.conn.fetch(uids, ['X-GM-MSGID', 'X-GM-THRID'])
+        seqset = uids if len(uids) < 1e6 else '1:*'
+        data = self.conn.fetch(seqset, ['X-GM-MSGID', 'X-GM-THRID',
+                                        'RFC822.SIZE'])
         uid_set = set(uids)
-        return {uid: GMetadata(ret['X-GM-MSGID'], ret['X-GM-THRID'])
+        return {uid: GMetadata(ret['X-GM-MSGID'], ret['X-GM-THRID'],
+                               ret['RFC822.SIZE'])
                 for uid, ret in data.items() if uid in uid_set}
 
     def expand_thread(self, g_thrid):
-        """ Find all message UIDs in this account with X-GM-THRID equal to
+        """
+        Find all message UIDs in the selected folder with X-GM-THRID equal to
         g_thrid.
-
-        Requires the "All Mail" folder to be selected.
 
         Returns
         -------
         list
-            All Mail UIDs (as integers), sorted most-recent first.
         """
-        assert self.selected_folder_name == self.folder_names()['all'], \
-            "must select All Mail first ({})".format(
-                self.selected_folder_name)
-        criterion = 'X-GM-THRID {}'.format(g_thrid)
-        uids = [long(uid) for uid in self.conn.search(['NOT DELETED',
-                                                       criterion])]
+        uids = [long(uid) for uid in
+                self.conn.search(['X-GM-THRID', g_thrid])]
         # UIDs ascend over time; return in order most-recent first
         return sorted(uids, reverse=True)
 
-    def find_messages(self, g_thrid):
-        """ Get UIDs for the [sub]set of messages belonging to the given thread
-            that are in the current folder.
-        """
-        criteria = 'X-GM-THRID {}'.format(g_thrid)
-        return sorted([long(uid) for uid in
-                       self.conn.search(['NOT DELETED', criteria])])
-
-    # -----------------------------------------
-    # following methods WRITE to IMAP account!
-    # -----------------------------------------
-
-    def archive_thread(self, g_thrid):
-        assert self.selected_folder_name == self.folder_names()['inbox'], \
-            "must select INBOX first ({0})".format(self.selected_folder_name)
-        uids = self.find_messages(g_thrid)
-        # delete from inbox == archive for Gmail
-        if uids:
-            self.conn.delete_messages(uids)
-
-    def copy_thread(self, g_thrid, to_folder):
-        """ NOTE: Does nothing if the thread isn't in the currently selected
-            folder.
-        """
-        uids = self.find_messages(g_thrid)
-        if uids:
-            self.conn.copy(uids, to_folder)
-
-    def add_label(self, g_thrid, label_name):
-        """
-        NOTE: Does nothing if the thread isn't in the currently selected
-        folder.
-
-        """
-        uids = self.find_messages(g_thrid)
-        self.conn.add_gmail_labels(uids, [label_name])
-
-    def remove_label(self, g_thrid, label_name):
-        """
-        NOTE: Does nothing if the thread isn't in the currently selected
-        folder.
-
-        """
-        # Gmail won't even include the label of the selected folder (when the
-        # selected folder is a label) in the list of labels for a UID, FYI.
-        assert self.selected_folder_name != label_name, \
-            "Gmail doesn't support removing a selected label"
-        uids = self.find_messages(g_thrid)
-        self.conn.remove_gmail_labels(uids, [label_name])
-
-    def get_labels(self, g_thrid):
-        uids = self.find_messages(g_thrid)
-        labels = self.conn.get_gmail_labels(uids)
-
-        # the complicated list comprehension below simply flattens the list
-        unique_labels = set([item for sublist in labels.values()
-                             for item in sublist])
-        return list(unique_labels)
-
-    def set_unread(self, g_thrid, unread):
-        uids = self.find_messages(g_thrid)
-        if unread:
-            self.conn.remove_flags(uids, ['\\Seen'])
-        else:
-            self.conn.add_flags(uids, ['\\Seen'])
-
-    def set_starred(self, g_thrid, starred):
-        uids = self.find_messages(g_thrid)
-        if starred:
-            self.conn.add_flags(uids, ['\\Flagged'])
-        else:
-            self.conn.remove_flags(uids, ['\\Flagged'])
-
-    def delete(self, g_thrid, folder_name):
-        """
-        Permanent delete i.e. remove the corresponding label and add the
-        `Trash` flag. We currently only allow this for Drafts, all other
-        non-All Mail deletes are archives.
-
-        """
-        uids = self.find_messages(g_thrid)
-
-        if folder_name == self.folder_names()['drafts']:
-            # Remove Gmail's `Draft` label
-            self.conn.remove_gmail_labels(uids, ['\Draft'])
-
-            # Move to Gmail's `Trash` folder
-            self.conn.delete_messages(uids)
-            self.conn.expunge()
-
-            # Delete from `Trash`
-            self.conn.select_folder(self.folder_names()['trash'])
-
-            trash_uids = self.find_messages(g_thrid)
-            self.conn.delete_messages(trash_uids)
-            self.conn.expunge()
-
     def find_by_header(self, header_name, header_value):
-        criteria = ['NOT DELETED',
-                    'HEADER {} {}'.format(header_name, header_value)]
-        return self.conn.search(criteria)
+        return self.conn.search(['HEADER', header_name, header_value])
+
+    def _decode_labels(self, labels):
+        return map(imapclient.imap_utf7.decode, labels)

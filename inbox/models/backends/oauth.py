@@ -4,16 +4,17 @@ refresh tokens.
 """
 from datetime import datetime, timedelta
 
-from sqlalchemy import Column, Integer, ForeignKey
+from sqlalchemy import Column, ForeignKey
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declared_attr
 
 from inbox.models.secret import Secret
-from inbox.log import get_logger
+from nylas.logging import get_logger
 log = get_logger()
 
 
 class TokenManager(object):
+
     def __init__(self):
         self._tokens = {}
 
@@ -38,13 +39,15 @@ token_manager = TokenManager()
 
 class OAuthAccount(object):
     # Secret
+
     @declared_attr
     def refresh_token_id(cls):
-        return Column(Integer, ForeignKey(Secret.id), nullable=False)
+        return Column(ForeignKey(Secret.id), nullable=False)
 
     @declared_attr
     def secret(cls):
-        return relationship('Secret', cascade='all', uselist=False)
+        return relationship('Secret', cascade='all', uselist=False,
+                            lazy='joined')
 
     @property
     def refresh_token(self):

@@ -1,15 +1,13 @@
 import datetime
 import getpass
-from imapclient import IMAPClient
+from backports import ssl
+from imapclient import IMAPClient, create_default_context
 import socket
 
-import sqlalchemy.orm.exc
-
-from inbox.log import get_logger
+from nylas.logging import get_logger
 log = get_logger()
 
-from inbox.auth.base import AuthHandler
-import inbox.auth.starttls
+from inbox.auth.base import AuthHandler, account_or_none
 from inbox.basicauth import ValidationError, UserRecoverableConfigError
 from inbox.models import Namespace
 from inbox.models.backends.generic import GenericAccount
@@ -21,18 +19,29 @@ AUTH_HANDLER_CLS = 'GenericAuthHandler'
 
 
 class GenericAuthHandler(AuthHandler):
-    def create_account(self, db_session, email_address, response):
-        try:
-            account = db_session.query(GenericAccount).filter_by(
-                email_address=email_address).one()
-        except sqlalchemy.orm.exc.NoResultFound:
-            namespace = Namespace()
-            account = GenericAccount(namespace=namespace)
 
+    def get_account(self, target, email_address, response):
+        account = account_or_none(target, GenericAccount, email_address)
+        if not account:
+            account = self.create_account(email_address, response)
+        account = self.update_account(account, response)
+        return account
+
+    def create_account(self, email_address, response):
+        # This method assumes that the existence of an account for the
+        # provider and email_address has been checked by the caller;
+        # callers may have different methods of performing the check
+        # (redwood auth versus get_account())
+        namespace = Namespace()
+        account = GenericAccount(namespace=namespace)
+        return self.update_account(account, response)
+
+    def update_account(self, account, response):
         account.email_address = response['email']
+        if response.get('name'):
+            account.name = response['name']
         account.password = response['password']
         account.date = datetime.datetime.utcnow()
-
         provider_name = self.provider_name
         account.provider = provider_name
         if provider_name == 'custom':
@@ -42,14 +51,13 @@ class GenericAuthHandler(AuthHandler):
             account.smtp_endpoint = (response['smtp_server_host'],
                                      response['smtp_server_port'],
                                      True)
-
         # Ensure account has sync enabled after authing.
         account.enable_sync()
-
         return account
 
     def connect_account(self, account):
-        """Returns an authenticated IMAP connection for the given account.
+        """
+        Returns an authenticated IMAP connection for the given account.
 
         Raises
         ------
@@ -57,8 +65,19 @@ class GenericAuthHandler(AuthHandler):
             If IMAP LOGIN failed because of invalid username/password
         imapclient.IMAPClient.Error, socket.error
             If other errors occurred establishing the connection or logging in.
+
         """
-        conn = self.connect_to_imap(account)
+        host, port, is_secure = account.imap_endpoint
+        try:
+            conn = create_imap_connection(host, port, is_secure)
+        except (IMAPClient.Error, socket.error) as exc:
+            log.error('Error instantiating IMAP connection',
+                      account_id=account.id,
+                      email=account.email_address,
+                      host=host,
+                      port=port,
+                      error=exc)
+            raise
 
         try:
             conn.login(account.imap_username, account.password)
@@ -95,11 +114,14 @@ class GenericAuthHandler(AuthHandler):
         return conn
 
     def _supports_condstore(self, conn):
-        """Check if the connection supports CONDSTORE
+        """
+        Check if the connection supports CONDSTORE
+
         Returns
         -------
         True: If the account supports CONDSTORE
         False otherwise
+
         """
         capabilities = conn.capabilities()
         if "CONDSTORE" in capabilities:
@@ -108,13 +130,15 @@ class GenericAuthHandler(AuthHandler):
         return False
 
     def verify_account(self, account):
-        """Verifies a generic IMAP account by logging in and logging out.
+        """
+        Verifies a generic IMAP account by logging in and logging out.
 
         Note: Raises exceptions from connect_account() on error.
 
         Returns
         -------
         True: If the client can successfully connect.
+
         """
         conn = self.connect_account(account)
         info = account.provider_info
@@ -179,7 +203,25 @@ def _auth_is_invalid(exc):
         '[authenticationfailed]',
         'incorrect username or password',
         'login failed',
-        'invalid login or password'
+        'invalid login or password',
+        'login login error password error',
+        '[auth] authentication failed.'
     )
     return any(exc.message.lower().startswith(msg) for msg in
                AUTH_INVALID_PREFIXES)
+
+
+def create_imap_connection(host, port, is_secure=True):
+    use_ssl = port == 993
+
+    # TODO: certificate pinning for well known sites
+    context = create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+
+    conn = IMAPClient(host, port=port, use_uid=True,
+                      ssl=use_ssl, ssl_context=context, timeout=600)
+    if is_secure and not use_ssl:
+        # Raises an exception if TLS can't be established
+        conn.starttls(context)
+    return conn

@@ -19,7 +19,7 @@ from inbox.models.message import Message
 from inbox.models.when import Time, TimeSpan, Date, DateSpan
 from inbox.events.util import parse_rrule_datetime
 
-from inbox.log import get_logger
+from nylas.logging import get_logger
 log = get_logger()
 
 TITLE_MAX_LEN = 1024
@@ -68,13 +68,8 @@ class FlexibleDateTime(TypeDecorator):
 class Event(MailSyncBase, HasRevisions, HasPublicID):
     """Data for events."""
     API_OBJECT_NAME = 'event'
-
-    # Don't surface 'remote' events in the transaction log since
-    # they're an implementation detail we don't want our customers
-    # to worry about.
-    @property
-    def should_suppress_transaction_creation(self):
-        return self.source == 'remote'
+    API_MODIFIABLE_FIELDS = ['title', 'description', 'location',
+                             'when', 'participants', 'busy']
 
     namespace_id = Column(ForeignKey(Namespace.id, ondelete='CASCADE'),
                           nullable=False)
@@ -134,6 +129,10 @@ class Event(MailSyncBase, HasRevisions, HasPublicID):
     participants = Column(MutableList.as_mutable(BigJSON), default=[],
                           nullable=True)
 
+    # This is only used by the iCalendar invite code. The sequence number
+    # stores the version number of the invite.
+    sequence_number = Column(Integer, nullable=True)
+
     discriminator = Column('type', String(30))
     __mapper_args__ = {'polymorphic_on': discriminator,
                        'polymorphic_identity': 'event'}
@@ -176,15 +175,15 @@ class Event(MailSyncBase, HasRevisions, HasPublicID):
     def _merge_participant_attributes(self, left, right):
         """Merge right into left. Right takes precedence unless it's null."""
         for attribute in right.keys():
-                # Special cases:
-                if right[attribute] is None:
-                    continue
-                elif right[attribute] == '':
-                    continue
-                elif right['status'] == 'noreply':
-                    continue
-                else:
-                    left[attribute] = right[attribute]
+            # Special cases:
+            if right[attribute] is None:
+                continue
+            elif right[attribute] == '':
+                continue
+            elif right['status'] == 'noreply':
+                continue
+            else:
+                left[attribute] = right[attribute]
 
         return left
 
@@ -206,8 +205,8 @@ class Event(MailSyncBase, HasRevisions, HasPublicID):
         # hash only if the email is None.
         self_hash = {}
         for participant in self.participants:
-            email = participant['email']
-            name = participant['name']
+            email = participant.get('email')
+            name = participant.get('name')
             if email is not None:
                 self_hash[email] = participant
             elif name is not None:
@@ -215,8 +214,8 @@ class Event(MailSyncBase, HasRevisions, HasPublicID):
                 self_hash[name] = participant
 
         for participant in event.participants:
-            email = participant['email']
-            name = participant['name']
+            email = participant.get('email')
+            name = participant.get('name')
 
             # This is the tricky part --- we only want to store one entry per
             # participant --- we check if there's an email we already know, if
@@ -227,15 +226,15 @@ class Event(MailSyncBase, HasRevisions, HasPublicID):
             if email is not None:
                 if email in self_hash:
                     self_hash[email] =\
-                     self._merge_participant_attributes(self_hash[email],
-                                                        participant)
+                        self._merge_participant_attributes(self_hash[email],
+                                                           participant)
                 else:
                     self_hash[email] = participant
             elif name is not None:
                 if name in self_hash:
                     self_hash[name] =\
-                     self._merge_participant_attributes(self_hash[name],
-                                                        participant)
+                        self._merge_participant_attributes(self_hash[name],
+                                                           participant)
                 else:
                     self_hash[name] = participant
 
@@ -270,6 +269,9 @@ class Event(MailSyncBase, HasRevisions, HasPublicID):
         self.message = event.message
         self.status = event.status
 
+        if event.sequence_number is not None:
+            self.sequence_number = event.sequence_number
+
     @property
     def recurring(self):
         if self.recurrence and self.recurrence != '':
@@ -278,8 +280,9 @@ class Event(MailSyncBase, HasRevisions, HasPublicID):
                 if isinstance(r, str):
                     r = [r]
                 return r
-            except ValueError:
-                log.warn('Invalid RRULE entry for event', event_id=self.id)
+            except (ValueError, SyntaxError):
+                log.warn('Invalid RRULE entry for event', event_id=self.id,
+                         raw_rrule=self.recurrence)
                 return []
         return []
 
@@ -332,7 +335,7 @@ class RecurringEvent(Event):
     __mapper_args__ = {'polymorphic_identity': 'recurringevent'}
     __table_args__ = None
 
-    id = Column(Integer, ForeignKey('event.id', ondelete='CASCADE'),
+    id = Column(ForeignKey('event.id', ondelete='CASCADE'),
                 primary_key=True)
     rrule = Column(String(RECURRENCE_MAX_LEN))
     exdate = Column(Text)  # There can be a lot of exception dates
@@ -387,16 +390,25 @@ class RecurringEvent(Event):
             overrides = overrides.filter(RecurringEventOverride.start > start)
         if end:
             overrides = overrides.filter(RecurringEventOverride.end < end)
+
+        # Google calendar events have the same uid __globally_. This means
+        # that if I created an event, shared it with you and that I also
+        # shared my calendar with you, override to this events for calendar B
+        # may show up in a query for calendar A.
+        # (https://phab.nylas.com/T3420)
+        overrides = overrides.filter(
+            RecurringEventOverride.calendar_id == self.calendar_id)
+
         events = list(overrides)
-        uids = [e.uid for e in events]
+        overridden_starts = [e.original_start_time for e in events]
         # Remove cancellations from the override set
         events = filter(lambda e: not e.cancelled, events)
         # If an override has not changed the start time for an event, including
         # if the override is a cancellation, the RRULE doesn't include an
         # exception for it. Filter out unnecessary inflated events
-        # to cover this case: they will have the same UID.
+        # to cover this case by checking the start time.
         for e in self.inflate(start, end):
-            if e.uid not in uids:
+            if e.start not in overridden_starts:
                 events.append(e)
         return sorted(events, key=lambda e: e.start)
 
@@ -413,18 +425,19 @@ class RecurringEventOverride(Event):
     """ Represents an individual one-off instance of a recurring event,
         including cancelled events.
     """
-    id = Column(Integer, ForeignKey('event.id', ondelete='CASCADE'),
+    id = Column(ForeignKey('event.id', ondelete='CASCADE'),
                 primary_key=True)
     __mapper_args__ = {'polymorphic_identity': 'recurringeventoverride',
                        'inherit_condition': (id == Event.id)}
     __table_args__ = None
 
-    master_event_id = Column(ForeignKey('event.id'))
+    master_event_id = Column(ForeignKey('event.id', ondelete='CASCADE'))
     master_event_uid = Column(String(767, collation='ascii_general_ci'),
                               index=True)
     original_start_time = Column(FlexibleDateTime)
     master = relationship(RecurringEvent, foreign_keys=[master_event_id],
-                          backref=backref('overrides', lazy="dynamic"))
+                          backref=backref('overrides', lazy="dynamic",
+                                          cascade='all, delete-orphan'))
 
     def update(self, event):
         super(RecurringEventOverride, self).update(event)
@@ -465,6 +478,17 @@ class InflatedEvent(Event):
         super(InflatedEvent, self).update(master)
         self.namespace_id = master.namespace_id
         self.calendar_id = master.calendar_id
+
+        # Our calendar autoimport code sometimes creates recurring events.
+        # When expanding those events, their inflated events are associated
+        # with an existing message. Because of this, SQLAlchemy tries
+        # to flush them, which we forbid.
+        # There's no real good way to prevent this, so we set to None
+        # the reference to message. API users can still look up
+        # the master event if they want to know the message associated with
+        # this recurring event.
+        self.message_id = None
+        self.message = None
 
 
 def insert_warning(mapper, connection, target):

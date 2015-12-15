@@ -1,30 +1,40 @@
+import os
 from datetime import datetime
 
-from sqlalchemy import (Column, Integer, String, DateTime, Boolean, ForeignKey,
-                        Enum)
+from sqlalchemy import (Column, BigInteger, String, DateTime, Boolean,
+                        ForeignKey, Enum, inspect, bindparam, Index)
 from sqlalchemy.orm import relationship
-from sqlalchemy.sql.expression import true, false
+from sqlalchemy.sql.expression import false
 
-from inbox.sqlalchemy_ext.util import JSON, MutableDict
+from inbox.sqlalchemy_ext.util import JSON, MutableDict, bakery
 from inbox.util.file import Lock
 
-from inbox.models.mixins import HasPublicID, HasEmailAddress, HasRunState
+from inbox.models.mixins import (HasPublicID, HasEmailAddress, HasRunState,
+                                 HasRevisions)
 from inbox.models.base import MailSyncBase
-from inbox.models.folder import Folder
 from inbox.models.calendar import Calendar
 from inbox.providers import provider_info
 
 
-class Account(MailSyncBase, HasPublicID, HasEmailAddress, HasRunState):
+class Account(MailSyncBase, HasPublicID, HasEmailAddress, HasRunState,
+              HasRevisions):
+    API_OBJECT_NAME = 'account'
+
     @property
     def provider(self):
-        """ A constant, unique lowercase identifier for the account provider
+        """
+        A constant, unique lowercase identifier for the account provider
         (e.g., 'gmail', 'eas'). Subclasses should override this.
 
-        We prefix provider folders with this string when we expose them as
-        tags through the API. E.g., a 'jobs' folder/label on a Gmail
-        backend is exposed as 'gmail-jobs'. Any value returned here
-        should also be in Tag.RESERVED_PROVIDER_NAMES.
+        """
+        raise NotImplementedError
+
+    @property
+    def category_type(self):
+        """
+        Whether the account is organized by folders or labels
+        ('folder'/ 'label'), depending on the provider.
+        Subclasses should override this.
 
         """
         raise NotImplementedError
@@ -49,11 +59,9 @@ class Account(MailSyncBase, HasPublicID, HasEmailAddress, HasRunState):
     # If True, throttle initial sync to reduce resource load
     throttled = Column(Boolean, server_default=false())
 
-    # local flags & data
-    save_raw_messages = Column(Boolean, server_default=true())
-
-    # if True we sync contacts/events
+    # if True we sync contacts/events/email
     # NOTE: these columns are meaningless for EAS accounts
+    sync_email = Column(Boolean, nullable=False, default=True)
     sync_contacts = Column(Boolean, nullable=False, default=False)
     sync_events = Column(Boolean, nullable=False, default=False)
 
@@ -62,64 +70,7 @@ class Account(MailSyncBase, HasPublicID, HasEmailAddress, HasRunState):
     # DEPRECATED
     last_synced_events = Column(DateTime, nullable=True)
 
-    # Folder mappings for the data we sync back to the account backend.  All
-    # account backends will not provide all of these. This may mean that Inbox
-    # creates some folders on the remote backend, for example to provide
-    # "archive" functionality on non-Gmail remotes.
-    inbox_folder_id = Column(Integer,
-                             ForeignKey(Folder.id, ondelete='SET NULL'),
-                             nullable=True)
-    inbox_folder = relationship('Folder', post_update=True,
-                                foreign_keys=[inbox_folder_id])
-    sent_folder_id = Column(Integer,
-                            ForeignKey(Folder.id, ondelete='SET NULL'),
-                            nullable=True)
-    sent_folder = relationship('Folder', post_update=True,
-                               foreign_keys=[sent_folder_id])
-
-    drafts_folder_id = Column(Integer,
-                              ForeignKey(Folder.id, ondelete='SET NULL'),
-                              nullable=True)
-    drafts_folder = relationship('Folder', post_update=True,
-                                 foreign_keys=[drafts_folder_id])
-
-    spam_folder_id = Column(Integer,
-                            ForeignKey(Folder.id, ondelete='SET NULL'),
-                            nullable=True)
-    spam_folder = relationship('Folder', post_update=True,
-                               foreign_keys=[spam_folder_id])
-
-    trash_folder_id = Column(Integer,
-                             ForeignKey(Folder.id, ondelete='SET NULL'),
-                             nullable=True)
-    trash_folder = relationship('Folder', post_update=True,
-                                foreign_keys=[trash_folder_id])
-
-    archive_folder_id = Column(Integer,
-                               ForeignKey(Folder.id, ondelete='SET NULL'),
-                               nullable=True)
-    archive_folder = relationship('Folder', post_update=True,
-                                  foreign_keys=[archive_folder_id])
-
-    all_folder_id = Column(Integer,
-                           ForeignKey(Folder.id, ondelete='SET NULL'),
-                           nullable=True)
-    all_folder = relationship('Folder', post_update=True,
-                              foreign_keys=[all_folder_id])
-
-    starred_folder_id = Column(Integer,
-                               ForeignKey(Folder.id, ondelete='SET NULL'),
-                               nullable=True)
-    starred_folder = relationship('Folder', post_update=True,
-                                  foreign_keys=[starred_folder_id])
-
-    important_folder_id = Column(Integer,
-                                 ForeignKey(Folder.id, ondelete='SET NULL'),
-                                 nullable=True)
-    important_folder = relationship('Folder', post_update=True,
-                                    foreign_keys=[important_folder_id])
-
-    emailed_events_calendar_id = Column(Integer,
+    emailed_events_calendar_id = Column(BigInteger,
                                         ForeignKey('calendar.id',
                                                    ondelete='SET NULL',
                                                    use_alter=True,
@@ -192,12 +143,34 @@ class Account(MailSyncBase, HasPublicID, HasEmailAddress, HasRunState):
     def sync_error(self):
         return self._sync_status.get('sync_error')
 
+    @property
+    def initial_sync_start(self):
+        if len(self.folders) == 0 or \
+           any([f.initial_sync_start is None for f in self.folders]):
+            return None
+        return min([f.initial_sync_start for f in self.folders])
+
+    @property
+    def initial_sync_end(self):
+        if len(self.folders) == 0 \
+           or any([f.initial_sync_end is None for f in self.folders]):
+            return None
+        return max([f.initial_sync_end for f in self.folders])
+
+    @property
+    def initial_sync_duration(self):
+        if not self.initial_sync_start or not self.initial_sync_end:
+            return None
+        return (self.initial_sync_end - self.initial_sync_end).total_seconds()
+
     def update_sync_error(self, error=None):
         self._sync_status['sync_error'] = error
 
     def sync_started(self):
-        """ Record transition to started state. Should be called after the
-            sync is actually started, not when the request to start it is made.
+        """
+        Record transition to started state. Should be called after the
+        sync is actually started, not when the request to start it is made.
+
         """
         current_time = datetime.utcnow()
 
@@ -219,25 +192,43 @@ class Account(MailSyncBase, HasPublicID, HasEmailAddress, HasRunState):
         if sync_host is not None:
             self.sync_host = sync_host
 
-    def disable_sync(self, reason=None):
+    def disable_sync(self, reason):
         """ Tell the monitor that this account should stop syncing. """
         self.sync_should_run = False
         if reason:
             self._sync_status['sync_disabled_reason'] = reason
         elif 'sync_disabled_reason' in self._sync_status:
             del self._sync_status['sync_disabled_reason']
+        self._sync_status['sync_disabled_on'] = datetime.utcnow()
+        self._sync_status['sync_disabled_by'] = os.environ.get('USER',
+                                                               'unknown')
 
-    def mark_invalid(self, reason='invalid credentials'):
-        """ In the event that the credentials for this account are invalid,
-            update the status and sync flag accordingly. Should only be called
-            after trying to re-authorize / get new token.
+    def mark_invalid(self, reason='invalid credentials', scope='mail'):
         """
-        self.disable_sync(reason)
-        self.sync_state = 'invalid'
+        In the event that the credentials for this account are invalid,
+        update the status and sync flag accordingly. Should only be called
+        after trying to re-authorize / get new token.
+
+        """
+        if scope == 'calendar':
+            self.sync_events = False
+        elif scope == 'contacts':
+            self.sync_contacts = False
+        else:
+            self.disable_sync(reason)
+            self.sync_state = 'invalid'
+
+    def mark_deleted(self):
+        """
+        Soft-delete the account.
+        """
+        self.disable_sync('account deleted')
 
     def sync_stopped(self, reason=None):
-        """ Record transition to stopped state. Should be called after the
-            sync is actually stopped, not when the request to stop it is made.
+        """
+        Record transition to stopped state. Should be called after the
+        sync is actually stopped, not when the request to stop it is made.
+
         """
         if self.sync_state == 'running':
             self.sync_state = 'stopped'
@@ -252,14 +243,22 @@ class Account(MailSyncBase, HasPublicID, HasEmailAddress, HasRunState):
 
     @classmethod
     def _get_lock_object(cls, account_id, lock_for=dict()):
-        """ Make sure we only create one lock per account per process.
+        """
+        Make sure we only create one lock per account per process.
 
         (Default args are initialized at import time, so `lock_for` acts as a
         module-level memory cache.)
+
         """
         return lock_for.setdefault(account_id,
                                    Lock(cls._sync_lockfile_name(account_id),
                                         block=False))
+
+    @classmethod
+    def get(cls, id_, session):
+        q = bakery(lambda session: session.query(cls))
+        q += lambda q: q.filter(cls.id == bindparam('id_'))
+        return q(session).params(id_=id_).first()
 
     @classmethod
     def _sync_lockfile_name(cls, account_id):
@@ -286,7 +285,7 @@ class Account(MailSyncBase, HasPublicID, HasEmailAddress, HasRunState):
 
     @property
     def is_deleted(self):
-        return self.sync_state == 'stopped' and \
+        return self.sync_state in ('stopped', 'killed', 'invalid') and \
             self.sync_should_run is False and \
             self._sync_status.get('sync_disabled_reason') == 'account deleted'
 
@@ -294,6 +293,17 @@ class Account(MailSyncBase, HasPublicID, HasEmailAddress, HasRunState):
     def is_sync_locked(self):
         return self._sync_lock.locked()
 
+    @property
+    def should_suppress_transaction_creation(self):
+        # Only version if new or the `sync_state` has changed.
+        obj_state = inspect(self)
+        return not (obj_state.pending or
+                    inspect(self).attrs.sync_state.history.has_changes())
+
     discriminator = Column('type', String(16))
     __mapper_args__ = {'polymorphic_identity': 'account',
                        'polymorphic_on': discriminator}
+
+
+Index('ix_account_sync_should_run_sync_host', Account.sync_should_run,
+      Account.sync_host, mysql_length={'sync_host': 191})

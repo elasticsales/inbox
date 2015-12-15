@@ -9,7 +9,7 @@ import click
 from inbox.models.account import Account
 from inbox.models.session import session_scope as mailsync_session_scope
 from inbox.mailsync.service import SyncService
-from inbox.log import get_logger
+from nylas.logging import get_logger
 
 # Warning! Since it is not easy to determine the number of CPUs on remote
 # boxes without (1) storing it in the db or (2) sshing into boxes
@@ -42,7 +42,7 @@ def main(from_host, to_host, num_accounts, from_core):
             sys.exit(0)
 
         for account in accounts_to_move:
-            account.disable_sync()
+            account.disable_sync(reason='Migrating')
 
         mailsync_session.commit()
 

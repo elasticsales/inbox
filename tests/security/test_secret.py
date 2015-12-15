@@ -2,9 +2,9 @@
 import pytest
 
 from inbox.auth.gmail import GmailAuthHandler
-from inbox.models.backends.gmail import GmailAccount
 from inbox.models.secret import Secret
 
+SHARD_ID = 0
 ACCOUNT_ID = 1
 
 
@@ -73,7 +73,7 @@ def test_token(db, config, encrypt):
             'hd': ''}
     g = GmailAuthHandler('gmail')
     g.verify_config = lambda x: True
-    account = g.create_account(db.session, email, resp)
+    account = g.get_account(SHARD_ID, email, resp)
 
     db.session.add(account)
     db.session.commit()
@@ -93,6 +93,14 @@ def test_token(db, config, encrypt):
     assert decrypted_secret == token and \
         account.refresh_token == decrypted_secret, \
         'token not decrypted correctly'
+
+    # Remove auth credentials row, else weird things
+    # happen when we try to read both encrypted and
+    # unencrypted data from the database.
+    for ac in account.auth_credentials:
+        db.session.delete(ac)
+    # db.session.delete(account.auth_credentials[0])
+    db.session.commit()
 
 
 @pytest.mark.parametrize('encrypt', [True, False])

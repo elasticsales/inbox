@@ -1,18 +1,13 @@
 # XXX(dlitz): Most of this is deployment-related stuff that belongs outside the
 # main Python invocation.
-import gc
 import os
 import sys
 import json
 import time
 
-import sqlalchemy
-from alembic.script import ScriptDirectory
-from alembic.config import Config as alembic_config
-
 from inbox.config import config
 
-from inbox.log import get_logger
+from nylas.logging import get_logger
 log = get_logger()
 
 
@@ -21,69 +16,40 @@ def _absolute_path(relative_path):
                         relative_path)
 
 
-def check_db():
-    """ Checks the database revision against the known alembic migrations. """
-    from inbox.ignition import main_engine
-    inbox_db_engine = main_engine(pool_size=1, max_overflow=0)
-
-    # top-level, with setup.sh
-    alembic_ini_path = os.environ.get("ALEMBIC_INI_PATH",
-                                      _absolute_path('../../alembic.ini'))
-    alembic_cfg = alembic_config(alembic_ini_path)
-
-    alembic_basedir = os.path.dirname(alembic_ini_path)
-    alembic_script_dir = os.path.join(
-        alembic_basedir,
-        alembic_cfg.get_main_option("script_location")
-    )
-
-    assert os.path.isdir(alembic_script_dir), \
-        'Must have migrations directory at {}'.format(alembic_script_dir)
-
-    try:
-        inbox_db_engine.dialect.has_table(inbox_db_engine, 'alembic_version')
-    except sqlalchemy.exc.OperationalError:
-        sys.exit("Databases don't exist! Run bin/create-db")
-
-    if inbox_db_engine.dialect.has_table(inbox_db_engine, 'alembic_version'):
-        res = inbox_db_engine.execute(
-            'SELECT version_num from alembic_version')
-        current_revision = [r for r in res][0][0]
-        assert current_revision, \
-            'Need current revision in alembic_version table...'
-
-        script = ScriptDirectory(alembic_script_dir)
-        head_revision = script.get_current_head()
-        log.info('Head database revision: {0}'.format(head_revision))
-        log.info('Current database revision: {0}'.format(current_revision))
-        # clean up a ton (8) of idle database connections
-        del script
-        gc.collect()
-
-        if current_revision != head_revision:
-            raise Exception(
-                'Outdated database! Migrate using `alembic upgrade head`')
-        else:
-            log.info('[OK] Database scheme matches latest')
-    else:
-        raise Exception(
-            'Un-stamped database! Run `bin/create-db`. bailing.')
-
-
 def check_sudo():
     if os.getuid() == 0:
         raise Exception("Don't run Inbox as root!")
 
 
+# TODO(menno) - It's good to have all servers use UTC for general
+# sanity, but the IMAPClient concern mentioned in the warning text
+# below can be avoided. When an IMAPClient instance's
+# `normalise_times` attribute is set to False IMAPClient will return
+# unnormalised, timezone-aware timestamps. Changing this is probably
+# non-trival because timezone and non-timezone-aware timestamps don't
+# mix. Some care will be required to ensure that only timezone-aware
+# timestamps are used where they might mix with timestamps originating
+# from IMAPClient.
+
+_TZ_ERROR_TEXT = """
+WARNING!
+
+System time is not set to UTC! This is a problem because
+imapclient will normalize INTERNALDATE responses to the 'local'
+timezone. \n\nYou can fix this by running
+
+$ echo 'UTC' | sudo tee /etc/timezone
+
+and then checking that it worked with
+
+$ sudo dpkg-reconfigure --frontend noninteractive tzdata
+
+"""
+
+
 def check_tz():
     if time.tzname[time.daylight] != 'UTC':
-        sys.exit("\nWARNING!\n\n"
-            "System time is not set to UTC! This is a problem because " +
-            "imapclient will normalize INTERNALDATE responses to the 'local' "+
-            "timezone. \n\nYou can fix this by running \n\n" +
-            "$ echo 'UTC' | sudo tee /etc/timezone \n\n" +
-            "and then checking that it worked with \n\n"+
-            "$ sudo dpkg-reconfigure --frontend noninteractive tzdata\n\n")
+        sys.exit(_TZ_ERROR_TEXT)
 
 
 def load_overrides(file_path):
@@ -111,7 +77,6 @@ def load_overrides(file_path):
 
 def preflight():
     check_sudo()
-    check_db()
     check_tz()
 
     # Print a traceback when the process receives signal SIGSEGV, SIGFPE,

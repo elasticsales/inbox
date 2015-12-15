@@ -1,23 +1,21 @@
 """Provide Google contacts."""
-
 import posixpath
+import random
+import gevent
 from datetime import datetime
 
 import gdata.auth
 import gdata.client
 import gdata.contacts.client
 
-from inbox.log import get_logger
+from nylas.logging import get_logger
 logger = get_logger()
-from inbox.basicauth import ConnectionError, ValidationError, PermissionsError
+from inbox.basicauth import ConnectionError, ValidationError
 from inbox.basicauth import OAuthError
 from inbox.models.session import session_scope
 from inbox.models import Contact
-from inbox.models.backends.gmail import GmailAccount
-from inbox.models.backends.oauth import token_manager
-from inbox.auth.gmail import (OAUTH_CLIENT_ID,
-                              OAUTH_CLIENT_SECRET,
-                              OAUTH_SCOPE)
+from inbox.models.backends.gmail import GmailAccount, g_token_manager
+from inbox.models.backends.gmail import GmailAuthCredentials
 
 SOURCE_APP_NAME = 'Nilas Sync Engine'
 
@@ -55,40 +53,37 @@ class GoogleContactsProvider(object):
         """Return the Google API client."""
         # TODO(emfree) figure out a better strategy for refreshing OAuth
         # credentials as needed
-        with session_scope() as db_session:
+        with session_scope(self.namespace_id) as db_session:
             try:
                 account = db_session.query(GmailAccount).get(self.account_id)
-                client_id = account.client_id or OAUTH_CLIENT_ID
-                client_secret = (account.client_secret or
-                                 OAUTH_CLIENT_SECRET)
-                access_token = token_manager.get_token(account)
+                access_token, auth_creds_id = \
+                    g_token_manager.get_token_and_auth_creds_id_for_contacts(
+                        account)
+                auth_creds = db_session.query(GmailAuthCredentials) \
+                    .get(auth_creds_id)
+
                 two_legged_oauth_token = gdata.gauth.OAuth2Token(
-                    client_id=client_id,
-                    client_secret=client_secret,
-                    scope=OAUTH_SCOPE,
+                    client_id=auth_creds.client_id,
+                    client_secret=auth_creds.client_secret,
+                    scope=auth_creds.scopes,  # FIXME: string not list?
                     user_agent=SOURCE_APP_NAME,
                     access_token=access_token,
-                    refresh_token=account.refresh_token)
+                    refresh_token=auth_creds.refresh_token)
                 google_client = gdata.contacts.client.ContactsClient(
                     source=SOURCE_APP_NAME)
                 google_client.auth_token = two_legged_oauth_token
                 return google_client
-            except (gdata.client.BadAuthentication, OAuthError) as e:
-                self.log.debug('Invalid user credentials given: {}'
-                               .format(e), logstash_tag='mark_invalid',
-                               account_id=account.id)
-                account.mark_invalid()
-                db_session.add(account)
-                db_session.commit()
+            except (gdata.client.BadAuthentication,
+                    gdata.client.Unauthorized, OAuthError):
 
                 if not retry_conn_errors:  # end of the line
                     raise ValidationError
 
-                try:
-                    token_manager.get_token(account, force_refresh=True)
-                    return self._get_google_client(retry_conn_errors=False)
-                except OAuthError as e:
-                    raise ValidationError
+                # If there are no valid refresh_tokens, will raise an
+                # OAuthError, stopping the sync
+                g_token_manager.get_token_for_contacts(
+                    account, force_refresh=True)
+                return self._google_client(retry_conn_errors=False)
 
             except ConnectionError:
                 self.log.error('Connection error')
@@ -123,15 +118,16 @@ class GoogleContactsProvider(object):
             # We only want the <uid> part.
             raw_google_id = google_contact.id.text
             _, g_id = posixpath.split(raw_google_id)
-            name = (google_contact.name.full_name.text if (google_contact.name
-                    and google_contact.name.full_name) else None)
+            name = (google_contact.name.full_name.text
+                    if (google_contact.name and google_contact.name.full_name)
+                    else None)
             email_address = (email_addresses[0].address if email_addresses else
                              None)
 
             # The entirety of the raw contact data in XML string
             # representation.
             raw_data = google_contact.to_string()
-        except AttributeError, e:
+        except AttributeError as e:
             self.log.error('Something is wrong with contact',
                            contact=google_contact)
             raise e
@@ -162,7 +158,7 @@ class GoogleContactsProvider(object):
 
         Raises
         ------
-        ValidationError, PermissionsError
+        ValidationError
             If no data could be fetched because of invalid credentials or
             insufficient permissions, respectively.
 
@@ -176,12 +172,22 @@ class GoogleContactsProvider(object):
         if sync_from_dt:
             query.updated_min = datetime.isoformat(sync_from_dt) + 'Z'
         query.showdeleted = True
-        google_client = self._get_google_client()
-        try:
-            results = google_client.GetContacts(q=query).entry
-            return [self._parse_contact_result(result) for result in results]
-        except gdata.client.RequestError as e:
-            # This is nearly always because we authed with Google OAuth
-            # credentials for which the contacts API is not enabled.
-            self.log.info('contact sync request failure', message=e)
-            raise PermissionsError('contact sync request failure')
+        while True:
+            try:
+                google_client = self._get_google_client()
+                results = google_client.GetContacts(q=query).entry
+                return [self._parse_contact_result(result) for result in
+                        results]
+            except gdata.client.RequestError as e:
+                self.log.info('contact sync request failure; retrying',
+                              message=e)
+                gevent.sleep(30 + random.randrange(0, 60))
+            except gdata.client.Unauthorized:
+                self.log.warning(
+                    'Invalid access token; refreshing and retrying')
+                # Raises an OAuth error if no valid token exists
+                with session_scope(self.namespace_id) as db_session:
+                    account = db_session.query(GmailAccount).get(
+                        self.account_id)
+                    g_token_manager.get_token_for_contacts(
+                        account, force_refresh=True)

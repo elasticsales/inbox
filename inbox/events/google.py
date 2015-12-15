@@ -1,16 +1,21 @@
 """Provide Google Calendar events."""
 import datetime
 import json
+import random
 import urllib
 import gevent
 import requests
+import uuid
+import arrow
 
+from inbox.auth.oauth import OAuthRequestsWrapper
 from inbox.basicauth import AccessNotEnabledError
-from inbox.log import get_logger
+from inbox.config import config
+from nylas.logging import get_logger
 from inbox.models import Calendar, Account
 from inbox.models.event import Event, EVENT_STATUSES
 from inbox.models.session import session_scope
-from inbox.models.backends.oauth import token_manager
+from inbox.models.backends.gmail import g_token_manager
 from inbox.events.util import (google_to_event_time, parse_google_time,
                                parse_datetime, CalendarSyncResponse)
 
@@ -19,6 +24,17 @@ log = get_logger()
 CALENDARS_URL = 'https://www.googleapis.com/calendar/v3/users/me/calendarList'
 STATUS_MAP = {'accepted': 'yes', 'needsAction': 'noreply',
               'declined': 'no', 'tentative': 'maybe'}
+
+URL_PREFIX = config.get('API_URL', 'https://api.nylas.com')
+
+PUSH_ENABLED_CLIENT_IDS = config.get('PUSH_ENABLED_CLIENT_IDS', [])
+
+CALENDAR_LIST_WEBHOOK_URL = URL_PREFIX + '/w/calendar_list_update/{}'
+EVENTS_LIST_WEHOOK_URL = URL_PREFIX + '/w/calendar_update/{}'
+
+WATCH_CALENDARS_URL = CALENDARS_URL + '/watch'
+WATCH_EVENTS_URL = \
+    'https://www.googleapis.com/calendar/v3/calendars/{}/events/watch'
 
 
 class GoogleEventsProvider(object):
@@ -79,7 +95,12 @@ class GoogleEventsProvider(object):
         items = self._get_raw_events(calendar_uid, sync_from_time)
         read_only_calendar = self.calendars_table.get(calendar_uid, True)
         for item in items:
-            updates.append(parse_event_response(item, read_only_calendar))
+            try:
+                parsed = parse_event_response(item, read_only_calendar)
+                updates.append(parsed)
+            except arrow.parser.ParserError:
+                log.warning('Skipping unparseable event', exc_info=True,
+                            raw=item)
 
         return updates
 
@@ -119,12 +140,13 @@ class GoogleEventsProvider(object):
             else:
                 raise
 
-    def _get_access_token(self):
-        with session_scope() as db_session:
+    def _get_access_token(self, force_refresh=False):
+        with session_scope(self.namespace_id) as db_session:
             acc = db_session.query(Account).get(self.account_id)
             # This will raise OAuthError if OAuth access was revoked. The
             # BaseSyncMonitor loop will catch this, clean up, and exit.
-            return token_manager.get_token(acc)
+            return g_token_manager.get_token_for_calendars(
+                acc, force_refresh=force_refresh)
 
     def _get_resource_list(self, url, **params):
         """Handles response pagination."""
@@ -135,14 +157,23 @@ class GoogleEventsProvider(object):
         while True:
             if next_page_token is not None:
                 params['pageToken'] = next_page_token
-            r = requests.get(url, params=params, auth=OAuth(token))
-            if r.status_code == 200:
+            try:
+                r = requests.get(url, params=params,
+                                 auth=OAuthRequestsWrapper(token))
+                r.raise_for_status()
                 data = r.json()
                 items += data['items']
                 next_page_token = data.get('nextPageToken')
                 if next_page_token is None:
                     return items
-            else:
+
+            except requests.exceptions.SSLError:
+                self.log.warning(
+                    'SSLError making Google Calendar API requestl retrying',
+                    url=url, exc_info=True)
+                gevent.sleep(30 + random.randrange(0, 60))
+                continue
+            except requests.HTTPError:
                 self.log.warning(
                     'HTTP error making Google Calendar API request', url=r.url,
                     response=r.content, status=r.status_code)
@@ -150,11 +181,11 @@ class GoogleEventsProvider(object):
                     self.log.warning(
                         'Invalid access token; refreshing and retrying',
                         url=r.url, response=r.content, status=r.status_code)
-                    token = self._get_access_token()
+                    token = self._get_access_token(force_refresh=True)
                     continue
                 elif r.status_code in (500, 503):
                     log.warning('Backend error in calendar API; retrying')
-                    gevent.sleep(30)
+                    gevent.sleep(30 + random.randrange(0, 60))
                     continue
                 elif r.status_code == 403:
                     try:
@@ -165,13 +196,13 @@ class GoogleEventsProvider(object):
                         r.raise_for_status()
                     if reason == 'userRateLimitExceeded':
                         log.warning('API request was rate-limited; retrying')
-                        gevent.sleep(30)
+                        gevent.sleep(30 + random.randrange(0, 60))
                         continue
                     elif reason == 'accessNotConfigured':
                         log.warning('API not enabled; returning empty result')
                         raise AccessNotEnabledError()
                 # Unexpected error; raise.
-                r.raise_for_status()
+                raise
 
     def _make_event_request(self, method, calendar_uid, event_uid=None,
                             **kwargs):
@@ -181,28 +212,53 @@ class GoogleEventsProvider(object):
               'calendars/{}/events/{}'.format(urllib.quote(calendar_uid),
                                               urllib.quote(event_uid))
         token = self._get_access_token()
-        response = requests.request(method, url, auth=OAuth(token), **kwargs)
+        response = requests.request(method, url,
+                                    auth=OAuthRequestsWrapper(token),
+                                    **kwargs)
         return response
 
-    def create_remote_event(self, event):
+    def create_remote_event(self, event, **kwargs):
         data = _dump_event(event)
+        params = {}
+
+        if kwargs.get('notify_participants') is True:
+            params["sendNotifications"] = "true"
+        else:
+            params["sendNotifications"] = "false"
+
         response = self._make_event_request('post', event.calendar.uid,
-                                            json=data)
+                                            json=data, params=params)
 
         # All non-200 statuses are considered errors
         response.raise_for_status()
         return response.json()
 
-    def update_remote_event(self, event):
+    def update_remote_event(self, event, **kwargs):
         data = _dump_event(event)
+        params = {}
+
+        if kwargs.get('notify_participants') is True:
+            params["sendNotifications"] = "true"
+        else:
+            params["sendNotifications"] = "false"
+
         response = self._make_event_request('put', event.calendar.uid,
-                                            event.uid, json=data)
+                                            event.uid, json=data,
+                                            params=params)
 
         # All non-200 statuses are considered errors
         response.raise_for_status()
 
-    def delete_remote_event(self, calendar_uid, event_uid):
-        response = self._make_event_request('delete', calendar_uid, event_uid)
+    def delete_remote_event(self, calendar_uid, event_uid, **kwargs):
+        params = {}
+
+        if kwargs.get('notify_participants') is True:
+            params["sendNotifications"] = "true"
+        else:
+            params["sendNotifications"] = "false"
+
+        response = self._make_event_request('delete', calendar_uid, event_uid,
+                                            params=params)
 
         if response.status_code == 410:
             # The Google API returns an 'HTTPError: 410 Client Error: Gone'
@@ -212,6 +268,138 @@ class GoogleEventsProvider(object):
         else:
             # All other non-200 statuses are considered errors
             response.raise_for_status()
+
+    # -------- logic for push notification subscriptions -------- #
+
+    def _get_access_token_for_push_notifications(self,
+                                                 account,
+                                                 force_refresh=False):
+        # Raises an OAuthError if no such token exists
+        return g_token_manager.get_token_for_calendars_restrict_ids(
+            account, PUSH_ENABLED_CLIENT_IDS, force_refresh)
+
+    def push_notifications_enabled(self, account):
+        push_enabled_creds = next(
+            (creds for creds in account.valid_auth_credentials
+             if creds.client_id in PUSH_ENABLED_CLIENT_IDS),
+            None)
+        return push_enabled_creds is not None
+
+    def watch_calendar_list(self, account):
+        """
+        Subscribe to google push notifications for the calendar list.
+
+        Returns the expiration of the notification channel (as a
+        Unix timestamp in ms)
+
+        Raises an OAuthError if no credentials are authorized to
+        set up push notifications for this account.
+
+        Raises an AccessNotEnabled error if calendar sync is not enabled
+        """
+        token = self._get_access_token_for_push_notifications(account)
+        receiving_url = CALENDAR_LIST_WEBHOOK_URL.format(
+            urllib.quote(account.public_id))
+        data = {
+            "id": uuid.uuid4().hex,
+            "type": "web_hook",
+            "address": receiving_url,
+        }
+        headers = {
+            'content-type': 'application/json'
+        }
+        r = requests.post(WATCH_CALENDARS_URL,
+                          data=json.dumps(data),
+                          headers=headers,
+                          auth=OAuthRequestsWrapper(token))
+
+        if r.status_code == 200:
+            data = r.json()
+            return data.get('expiration')
+        else:
+            self.handle_watch_errors(r)
+            return None
+
+    def watch_calendar(self, account, calendar):
+        """
+        Subscribe to google push notifications for a calendar.
+
+        Returns the expiration of the notification channel (as a
+        Unix timestamp in ms)
+
+        Raises an OAuthError if no credentials are authorized to
+        set up push notifications for this account.
+
+        Raises an AccessNotEnabled error if calendar sync is not enabled
+
+        Raises an HTTPError if google gives us a 404 (which implies the
+        calendar was deleted)
+        """
+        token = self._get_access_token_for_push_notifications(account)
+        watch_url = WATCH_EVENTS_URL.format(urllib.quote(calendar.uid))
+        receiving_url = EVENTS_LIST_WEHOOK_URL.format(
+            urllib.quote(calendar.public_id))
+        data = {
+            "id": uuid.uuid4().hex,
+            "type": "web_hook",
+            "address": receiving_url,
+        }
+        headers = {
+            'content-type': 'application/json'
+        }
+        try:
+            r = requests.post(watch_url,
+                              data=json.dumps(data),
+                              headers=headers,
+                              auth=OAuthRequestsWrapper(token))
+        except requests.exceptions.SSLError:
+            self.log.warning(
+                'SSLError subscribing to Google push notifications',
+                url=watch_url, exc_info=True)
+            return
+
+        if r.status_code == 200:
+            data = r.json()
+            return data.get('expiration')
+        else:
+            self.handle_watch_errors(r)
+            return
+
+    def handle_watch_errors(self, r):
+        self.log.warning(
+            'Error subscribing to Google push notifications', url=r.url,
+            response=r.content, status=r.status_code)
+
+        if r.status_code == 401:
+            self.log.warning(
+                'Invalid: could be invalid auth credentials',
+                url=r.url, response=r.content, status=r.status_code)
+
+        elif r.status_code in (500, 503):
+            log.warning('Backend error in calendar API; retrying')
+            gevent.sleep(30 + random.randrange(0, 60))
+
+        elif r.status_code == 403:
+            try:
+                reason = r.json()['error']['errors'][0]['reason']
+            except (KeyError, ValueError):
+                log.error("Couldn't parse API error response",
+                          response=r.content, status=r.status_code)
+
+            if reason == 'userRateLimitExceeded':
+                log.warning('API request was rate-limited; retrying')
+                gevent.sleep(30 + random.randrange(0, 60))
+            elif reason == 'accessNotConfigured':
+                log.warning('API not enabled; returning empty result')
+                raise AccessNotEnabledError()
+
+        elif r.status_code == 404:
+            # resource deleted!
+            r.raise_for_status()
+
+        else:
+            self.log.warning('Unexpected error', response=r.content,
+                             status=r.status_code)
 
 
 def parse_calendar_response(calendar):
@@ -276,6 +464,7 @@ def parse_event_response(event, read_only_calendar):
     description = event.get('description')
     location = event.get('location')
     busy = event.get('transparency') != 'transparent'
+    sequence = event.get('sequence', 0)
 
     # We're lucky because event statuses follow the icalendar
     # spec.
@@ -337,7 +526,7 @@ def parse_event_response(event, read_only_calendar):
                  master_event_uid=master_uid,
                  cancelled=cancelled,
                  status=event_status,
-                 # TODO(emfree): remove after data cleanup
+                 sequence_number=sequence,
                  source='local')
 
 
@@ -378,13 +567,3 @@ def _dump_event(event):
                 dump['attendees'].append(attendee)
 
     return dump
-
-
-class OAuth(requests.auth.AuthBase):
-    """Helper class for setting the Authorization header on HTTP requests."""
-    def __init__(self, token):
-        self.token = token
-
-    def __call__(self, r):
-        r.headers['Authorization'] = 'Bearer {}'.format(self.token)
-        return r

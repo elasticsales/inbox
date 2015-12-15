@@ -18,14 +18,14 @@ def folder_sync_engine(db):
     # methods.
     email = "inboxapptest1@fastmail.fm"
     account = GenericAuthHandler('fastmail').create_account(
-        db.session, email, {"email": email, "password": "BLAH"})
+        email, {"email": email, "password": "BLAH"})
     db.session.add(account)
     db.session.commit()
 
     engine = None
-    engine = FolderSyncEngine(account.id, "Inbox", 0,
+    engine = FolderSyncEngine(account.id, account.namespace.id, "Inbox", 0,
                               email, "fastmail",
-                              3200, None, 20, [])
+                              None)
     return engine
 
 
@@ -33,8 +33,10 @@ def test_generic_grouping(db, default_account):
     thread = add_fake_thread(db.session, default_account.namespace.id)
     message = add_fake_message(db.session, default_account.namespace.id,
                                thread, subject="Golden Gate Park next Sat")
+    folder = Folder(account=default_account, name='Inbox',
+                    canonical_name='inbox')
     ImapUid(message=message, account_id=default_account.id,
-            msg_uid=2222, folder=default_account.inbox_folder)
+            msg_uid=2222, folder=folder)
 
     thread = add_fake_thread(db.session, default_account.namespace.id)
 
@@ -53,20 +55,13 @@ def test_generic_grouping(db, default_account):
 def test_threading_limit(db, folder_sync_engine, monkeypatch):
     """Test that custom threading doesn't produce arbitrarily long threads,
     which eventually break things."""
-    from inbox.models import Message, Thread, Account
+    from inbox.models import Message, Thread
     # Shorten bound to make test faster
     MAX_THREAD_LENGTH = 10
     monkeypatch.setattr(
         'inbox.mailsync.backends.imap.generic.MAX_THREAD_LENGTH',
         MAX_THREAD_LENGTH)
     namespace_id = folder_sync_engine.namespace_id
-    account = db.session.query(Account).get(folder_sync_engine.account_id)
-    account.namespace.create_canonical_tags()
-
-    account.inbox_folder = Folder(account=account,
-                                  name='Inbox',
-                                  canonical_name='inbox')
-    folder = account.inbox_folder
 
     msg = MockRawMessage([])
     for i in range(3 * MAX_THREAD_LENGTH):
@@ -80,10 +75,8 @@ def test_threading_limit(db, folder_sync_engine, monkeypatch):
         m.to_addr = [("Eben Freeman", "eben@nilas.com")]
         m.snippet = ''
         m.subject = 'unique subject'
-        uid = ImapUid(message=m, account=account, msg_uid=2222 + i,
-                      folder=folder)
-        folder_sync_engine.add_message_attrs(db.session, uid, msg)
         db.session.add(m)
+        folder_sync_engine.add_message_to_thread(db.session, m, msg)
         db.session.commit()
     new_threads = db.session.query(Thread). \
         filter(Thread.subject == 'unique subject').all()

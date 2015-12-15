@@ -1,117 +1,158 @@
-from collections import defaultdict
-from sqlalchemy import asc, or_
+import json
+from datetime import datetime
+
+from sqlalchemy import asc, desc
 from sqlalchemy.orm import joinedload
 from gevent import Greenlet, sleep
 
-from inbox.log import get_logger
+from inbox.ignition import engine_manager
+from inbox.util.itert import partition
+from inbox.models import Transaction, Contact
+from inbox.util.stats import statsd_client
+from inbox.models.session import session_scope_by_shard_id
+from inbox.models.search import ContactSearchIndexCursor
+from inbox.contacts.search import (get_doc_service, DOC_UPLOAD_CHUNK_SIZE,
+                                   cloudsearch_contact_repr)
+
+from nylas.logging import get_logger
+from nylas.logging.sentry import log_uncaught_errors
+
 log = get_logger()
-from inbox.api.kellogs import encode
-from inbox.models import Transaction
-from inbox.models.session import session_scope
-from inbox.models.util import transaction_objects
-from inbox.models.search import SearchIndexCursor
-from inbox.search.adaptor import NamespaceSearchEngine
 
 
-class SearchIndexService(Greenlet):
+class ContactSearchIndexService(Greenlet):
     """
-    Poll the transaction log for message, thread operations
+    Poll the transaction log for contact operations
     (inserts, updates, deletes) for all namespaces and perform the
-    corresponding Elasticsearch index operations.
+    corresponding CloudSearch index operations.
 
     """
-    def __init__(self, poll_interval=30, chunk_size=100):
+
+    def __init__(self, poll_interval=30, chunk_size=DOC_UPLOAD_CHUNK_SIZE):
         self.poll_interval = poll_interval
         self.chunk_size = chunk_size
-        self.transaction_pointer = None
+        self.transaction_pointers = {}
 
-        self.log = log.new(component='search-index')
+        self.log = log.new(component='contact-search-index')
         Greenlet.__init__(self)
+
+    def _report_batch_upload(self):
+        metric_names = [
+            "inbox-contacts-search.transactions.batch_upload",
+        ]
+
+        for metric in metric_names:
+            statsd_client.incr(metric)
+
+    def _report_transactions_latency(self, latency):
+        metric_names = [
+            "inbox-contacts-search.transactions.latency",
+        ]
+
+        for metric in metric_names:
+            statsd_client.timing(metric, latency)
 
     def _run(self):
         """
-        Index into Elasticsearch the threads, messages of all namespaces.
+        Index into CloudSearch the contacts of all namespaces.
 
         """
-        with session_scope() as db_session:
-            pointer = db_session.query(SearchIndexCursor).first()
-            self.transaction_pointer = pointer.transaction_id if pointer else 0
+        try:
+            for key in engine_manager.engines:
+                with session_scope_by_shard_id(key) as db_session:
+                    pointer = db_session.query(
+                        ContactSearchIndexCursor).first()
+                    if pointer:
+                        self.transaction_pointers[key] = pointer.transaction_id
+                    else:
+                        # Never start from 0; if the service hasn't
+                        # run before start from the latest
+                        # transaction, with the expectation that a
+                        # backfill will be run separately.
+                        latest_transaction = db_session.query(Transaction). \
+                            order_by(desc(Transaction.created_at)).first()
+                        if latest_transaction:
+                            self.transaction_pointers[
+                                key] = latest_transaction.id
+                        else:
+                            self.transaction_pointers[key] = 0
 
-        self.log.info('Starting search-index service',
-                      transaction_pointer=self.transaction_pointer)
+            self.log.info('Starting contact-search-index service',
+                          transaction_pointers=self.transaction_pointers)
 
-        while True:
-            with session_scope() as db_session:
-                transactions = db_session.query(Transaction). \
-                    filter(Transaction.id > self.transaction_pointer,
-                           or_(Transaction.object_type == 'message',
-                               Transaction.object_type == 'thread')). \
-                    order_by(asc(Transaction.id)). \
-                    limit(self.chunk_size). \
-                    options(joinedload(Transaction.namespace)).all()
+            while True:
+                for key in engine_manager.engines:
+                    with session_scope_by_shard_id(key) as db_session:
+                        transactions = db_session.query(Transaction). filter(
+                            Transaction.id > self.transaction_pointers[key],
+                            Transaction.object_type == 'contact') \
+                            .with_hint(
+                                Transaction,
+                                "USE INDEX (ix_transaction_table_name)") \
+                            .order_by(asc(Transaction.id)) \
+                            .limit(self.chunk_size) \
+                            .options(joinedload(Transaction.namespace)).all()
 
-                # TODO[k]: We ideally want to index chunk_size at a time.
-                # This currently indexes <= chunk_size, and it varies each
-                # time.
-                if transactions:
-                    self.index(transactions, db_session)
-                    new_pointer = transactions[-1].id
-                    self.update_pointer(new_pointer, db_session)
-                else:
-                    sleep(self.poll_interval)
-                db_session.commit()
+                        # index up to chunk_size transactions
+                        should_sleep = False
+                        if transactions:
+                            self.index(transactions, db_session)
+                            oldest_transaction = min(
+                                transactions, key=lambda t: t.created_at)
+                            current_timestamp = datetime.utcnow()
+                            latency = (current_timestamp -
+                                       oldest_transaction.created_at).seconds
+                            self._report_transactions_latency(latency)
+                            new_pointer = transactions[-1].id
+                            self.update_pointer(new_pointer, key, db_session)
+                            db_session.commit()
+                        else:
+                            should_sleep = True
+                    if should_sleep:
+                        log.info('sleeping')
+                        sleep(self.poll_interval)
+        except Exception:
+            log_uncaught_errors(log)
 
     def index(self, transactions, db_session):
         """
-        Translate database operations to Elasticsearch index operations
+        Translate database operations to CloudSearch index operations
         and perform them.
 
         """
-        namespace_map = defaultdict(lambda: defaultdict(list))
+        docs = []
+        doc_service = get_doc_service()
+        add_txns, delete_txns = partition(
+            lambda trx: trx.command == 'delete', transactions)
+        delete_docs = [{'type': 'delete', 'id': txn.record_id}
+                       for txn in delete_txns]
+        add_record_ids = [txn.record_id for txn in add_txns]
+        add_records = db_session.query(Contact).options(
+            joinedload("phone_numbers")).filter(
+                Contact.id.in_(add_record_ids))
+        add_docs = [{'type': 'add', 'id': obj.id,
+                     'fields': cloudsearch_contact_repr(obj)}
+                    for obj in add_records]
+        docs = delete_docs + add_docs
 
-        for trx in transactions:
-            namespace_id = trx.namespace.public_id
-            type_ = trx.object_type
-            if trx.command == 'delete':
-                operation = 'delete'
-                api_repr = {'id': trx.object_public_id}
-            else:
-                operation = 'index'
-                object_cls = transaction_objects()[trx.object_type]
-                obj = db_session.query(object_cls).get(trx.record_id)
-                if obj is None:
-                    continue
-                api_repr = encode(obj, namespace_public_id=namespace_id)
+        if docs:
+            doc_service.upload_documents(
+                documents=json.dumps(docs),
+                contentType='application/json')
+            self._report_batch_upload()
 
-            namespace_map[namespace_id][type_].append((operation, api_repr))
+        self.log.info('docs indexed', adds=len(add_docs),
+                      deletes=len(delete_docs))
 
-        self.log.info('namespaces to index count', count=len(namespace_map))
-
-        for namespace_id in namespace_map:
-            engine = NamespaceSearchEngine(namespace_id, create_index=True)
-
-            messages = namespace_map[namespace_id]['message']
-            message_count = engine.messages.bulk_index(messages) if messages \
-                else 0
-
-            threads = namespace_map[namespace_id]['thread']
-            thread_count = engine.threads.bulk_index(threads) if threads \
-                else 0
-
-            self.log.info('per-namespace index counts',
-                          namespace_id=namespace_id,
-                          message_count=message_count,
-                          thread_count=thread_count)
-
-    def update_pointer(self, new_pointer, db_session):
+    def update_pointer(self, new_pointer, shard_key, db_session):
         """
         Persist transaction pointer to support restarts, update
         self.transaction_pointer.
 
         """
-        pointer = db_session.query(SearchIndexCursor).first()
+        pointer = db_session.query(ContactSearchIndexCursor).first()
         if pointer is None:
-            pointer = SearchIndexCursor()
+            pointer = ContactSearchIndexCursor()
             db_session.add(pointer)
         pointer.transaction_id = new_pointer
-        self.transaction_pointer = new_pointer
+        self.transaction_pointers[shard_key] = new_pointer

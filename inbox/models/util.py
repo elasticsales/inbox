@@ -23,7 +23,7 @@ def reconcile_message(new_message, session):
         existing_message = session.query(Message).filter(
             Message.namespace_id == new_message.namespace_id,
             Message.inbox_uid == new_message.inbox_uid,
-            Message.is_created == True).first()
+            Message.is_created).first()
         version = None
     else:
         # new_message has the new X-Inbox-Id format <public_id>-<version>
@@ -35,15 +35,16 @@ def reconcile_message(new_message, session):
         existing_message = session.query(Message).filter(
             Message.namespace_id == new_message.namespace_id,
             Message.public_id == expected_public_id,
-            Message.is_created == True).first()
+            Message.is_created).first()
 
     if existing_message is None:
         return None
 
     if version is None or int(version) == existing_message.version:
         existing_message.message_id_header = new_message.message_id_header
-        existing_message.full_body = new_message.full_body
         existing_message.references = new_message.references
+        # Non-persisted instance attribute used by EAS.
+        existing_message.parsed_body = new_message.parsed_body
 
     return existing_message
 
@@ -55,8 +56,8 @@ def transaction_objects():
     models that implement the HasRevisions mixin).
 
     """
-    from inbox.models import (Calendar, Contact, Message, Event, Block, Tag,
-                              Thread)
+    from inbox.models import (Calendar, Contact, Message, Event, Block,
+                              Category, Thread, Account)
 
     return {
         'calendar': Calendar,
@@ -65,12 +66,14 @@ def transaction_objects():
         'event': Event,
         'file': Block,
         'message': Message,
-        'tag': Tag,
-        'thread': Thread
+        'thread': Thread,
+        'label': Category,
+        'folder': Category,
+        'account': Account
     }
 
 
-def delete_namespace(account_id, namespace_id):
+def delete_namespace(account_id, namespace_id, dry_run=False):
     """
     Delete all the data associated with a namespace from the database.
     USE WITH CAUTION.
@@ -81,12 +84,12 @@ def delete_namespace(account_id, namespace_id):
     """
     from inbox.models.session import session_scope
     from inbox.models import Account
-    from inbox.ignition import main_engine
+    from inbox.ignition import engine_manager
 
     # Bypass the ORM for performant bulk deletion;
     # we do /not/ want Transaction records created for these deletions,
     # so this is okay.
-    engine = main_engine()
+    engine = engine_manager.get_for_id(namespace_id)
 
     # Chunk delete for tables that might have a large concurrent write volume
     # to prevent those transactions from blocking.
@@ -96,10 +99,10 @@ def delete_namespace(account_id, namespace_id):
     filters = OrderedDict()
 
     for table in ['message', 'block', 'thread', 'transaction', 'actionlog',
-                  'contact', 'event']:
+                  'contact', 'event', 'dataprocessingcache']:
         filters[table] = ('namespace_id', namespace_id)
 
-    with session_scope() as db_session:
+    with session_scope(namespace_id) as db_session:
         account = db_session.query(Account).get(account_id)
         if account.discriminator != 'easaccount':
             filters['imapuid'] = ('account_id', account_id)
@@ -110,34 +113,48 @@ def delete_namespace(account_id, namespace_id):
             filters['easfoldersyncstatus'] = ('account_id', account_id)
 
     for cls in filters:
-        _batch_delete(engine, cls, filters[cls])
+        _batch_delete(engine, cls, filters[cls], dry_run=dry_run)
 
-    # Use a single delete for the other tables
+    # Use a single delete for the other tables. Rows from tables which contain
+    # cascade-deleted foreign keys to other tables deleted here (or above)
+    # are also not always explicitly deleted, except where needed for
+    # performance.
+    #
     # NOTE: Namespace, Account are deleted at the end too.
 
     query = 'DELETE FROM {} WHERE {}={};'
 
-    for table in ['folder', 'calendar', 'tag', 'namespace', 'account']:
-        if table in ['calendar', 'tag']:
-            filter_ = ('namespace_id', namespace_id)
-        elif table in ['folder']:
-            filter_ = ('account_id', account_id)
-        elif table in ['namespace']:
-            filter_ = ('id', namespace_id)
-        elif table in ['account']:
-            filter_ = ('id', account_id)
+    filters = OrderedDict()
+    for table in ('category', 'calendar'):
+        filters[table] = ('namespace_id', namespace_id)
+    for table in ('folder', 'label'):
+        filters[table] = ('account_id', account_id)
+    filters['namespace'] = ('id', namespace_id)
 
+    for table, (column, id_) in filters.iteritems():
         print 'Performing bulk deletion for table: {}'.format(table)
         start = time.time()
 
-        engine.execute(query.format(table, filter_[0], filter_[1]))
+        if not dry_run:
+            engine.execute(query.format(table, column, id_))
+        else:
+            print query.format(table, column, id_)
 
         end = time.time()
         print 'Completed bulk deletion for table: {}, time taken: {}'.\
             format(table, end - start)
 
+    # Delete the account object manually to get rid of the various objects
+    # associated with it (e.g: secrets, tokens, etc.)
+    with session_scope(account_id) as db_session:
+        account = db_session.query(Account).get(account_id)
+        if dry_run is False:
+            db_session.delete(account)
+            db_session.commit()
 
-def _batch_delete(engine, table, (column, id_)):
+
+def _batch_delete(engine, table, xxx_todo_changeme, dry_run=False):
+    (column, id_) = xxx_todo_changeme
     count = engine.execute(
         'SELECT COUNT(*) FROM {} WHERE {}={};'.format(table, column, id_)).\
         scalar()
@@ -148,14 +165,16 @@ def _batch_delete(engine, table, (column, id_)):
 
     batches = int(math.ceil(float(count) / CHUNK_SIZE))
 
-    print 'Starting batch deletion for table: {}, number of batches: {}'.\
-          format(table, batches)
+    print 'Starting batch deletion for table: {}, rows: {} number of batches: {}'.\
+          format(table, count, batches)
     start = time.time()
 
     query = 'DELETE FROM {} WHERE {}={} LIMIT 1000;'.format(table, column, id_)
 
     for i in range(0, batches):
-        engine.execute(query)
+        print query
+        if dry_run is False:
+            engine.execute(query)
 
     end = time.time()
     print 'Completed batch deletion for table: {}, time taken: {}'.\

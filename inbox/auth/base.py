@@ -1,15 +1,17 @@
 from abc import ABCMeta, abstractmethod
-from imapclient import IMAPClient
+
+from sqlalchemy.orm.exc import NoResultFound
+
+from inbox.models.session import session_scope
 from inbox.providers import providers
 from inbox.basicauth import NotSupportedError
-from inbox.log import get_logger
 import socket
 from socket import gaierror, error as socket_error
-log = get_logger()
 
 
 def handler_from_provider(provider_name):
-    """Return an authentication handler for the given provider.
+    """
+    Return an authentication handler for the given provider.
 
     Parameters
     ----------
@@ -22,6 +24,7 @@ def handler_from_provider(provider_name):
     Returns
     -------
     An object that implements the AuthHandler interface.
+
     """
     from inbox.auth import module_registry
     auth_mod = module_registry.get(provider_name)
@@ -42,41 +45,79 @@ def handler_from_provider(provider_name):
     return auth_handler
 
 
+def account_or_none(target, cls, email_address):
+    """
+    Query the target shard to determine if an account with the given provider
+    (as determined by the model cls to query) and email_address exists.
+
+    Parameters
+    ----------
+        cls:
+            Account model to query.
+            (GenericAccount/ GmailAccount/ EASAccount)
+        email_address:
+            Email address to query for.
+
+    Returns
+    -------
+        The Account if such an account exists, else None.
+
+    """
+    shard_id = target << 48
+    with session_scope(shard_id) as db_session:
+        try:
+            account = db_session.query(cls).filter(
+                cls.email_address == email_address).one()
+        except NoResultFound:
+            return
+        db_session.expunge(account)
+    return account
+
+
 class AuthHandler(object):
     __metaclass__ = ABCMeta
 
     def __init__(self, provider_name):
         self.provider_name = provider_name
 
-    def connect_to_imap(self, account, read_timeout=300):
-        host, port, is_secure = account.imap_endpoint
-        try:
-            conn = IMAPClient(host, port=port, use_uid=True, ssl=(port == 993),
-                              read_timeout=read_timeout)
-            if is_secure and port != 993:
-                # Raises an exception if TLS can't be established
-                conn._imap.starttls()
-        except (IMAPClient.Error, socket.error) as exc:
-            log.error('Error instantiating IMAP connection',
-                      account_id=account.id,
-                      email=account.email_address,
-                      host=host,
-                      port=port,
-                      error=exc)
-            raise
-        return conn
-
-    # optional
+    # Optional
     def connect_account(self, account):
-        """Return an authenticated IMAPClient instance for the given account.
+        """
+        Return an authenticated IMAPClient instance for the given account.
 
         This is an optional interface, which is only needed for accounts that
         are synced using IMAP.
+
         """
         raise NotImplementedError
 
     @abstractmethod
-    def create_account(self, db_session, email_address, response):
+    def get_account(self, target, email_address, response):
+        """
+        Return an account for the provider and email_address.
+        This method is a wrapper around create_account() and update_account();
+        it creates a new account if necessary, else updates the existing one.
+
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def create_account(self, email_address, response):
+        """
+        Create a new account.
+        This method does NOT check for the existence of an account for a
+        provider and email_address. That should be done by the caller.
+
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_account(self, account, response):
+        """
+        Update an existing account with the params in response.
+        This method assumes the existence of the account passed in.
+
+        """
         raise NotImplementedError
 
     @abstractmethod

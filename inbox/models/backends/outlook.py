@@ -1,13 +1,13 @@
-from sqlalchemy import Column, Integer, String, ForeignKey
+from sqlalchemy import Column, String, ForeignKey
 
 from inbox.models.backends.imap import ImapAccount
 from inbox.models.backends.oauth import OAuthAccount
 
-PROVIDER = 'outlook'
+PROVIDER = '_outlook'
 
 
 class OutlookAccount(ImapAccount, OAuthAccount):
-    id = Column(Integer, ForeignKey(ImapAccount.id, ondelete='CASCADE'),
+    id = Column(ForeignKey(ImapAccount.id, ondelete='CASCADE'),
                 primary_key=True)
 
     __mapper_args__ = {'polymorphic_identity': 'outlookaccount'}
@@ -28,6 +28,10 @@ class OutlookAccount(ImapAccount, OAuthAccount):
     @property
     def provider(self):
         return PROVIDER
+
+    @property
+    def category_type(self):
+        return 'folder'
 
     @property
     def thread_cls(self):

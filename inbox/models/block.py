@@ -1,5 +1,5 @@
-from sqlalchemy import (Column, Integer, String, Boolean,
-                        Enum, ForeignKey, event)
+from sqlalchemy import (Column, Integer, String, Boolean, Enum, ForeignKey,
+                        event)
 from sqlalchemy.orm import reconstructor, relationship, backref
 from sqlalchemy.schema import UniqueConstraint
 from sqlalchemy.sql.expression import false
@@ -32,7 +32,9 @@ class Block(Blob, MailSyncBase, HasRevisions, HasPublicID):
     """ Metadata for any file that we store """
     API_OBJECT_NAME = 'file'
 
+    @property
     def should_suppress_transaction_creation(self):
+        # Only version attachments
         return not any(part.is_attachment for part in self.parts)
 
     from inbox.models.namespace import Namespace
@@ -48,8 +50,7 @@ class Block(Blob, MailSyncBase, HasRevisions, HasPublicID):
         self.size = 0
         MailSyncBase.__init__(self, *args, **kwargs)
 
-    namespace_id = Column(Integer,
-                          ForeignKey(Namespace.id, ondelete='CASCADE'),
+    namespace_id = Column(ForeignKey(Namespace.id, ondelete='CASCADE'),
                           nullable=False)
     namespace = relationship('Namespace',
                              backref=backref('blocks',
@@ -79,14 +80,14 @@ class Part(MailSyncBase):
     """ Part is a section of a specific message. This includes message bodies
         as well as attachments.
     """
-    block_id = Column(Integer, ForeignKey(Block.id, ondelete='CASCADE'))
+    block_id = Column(ForeignKey(Block.id, ondelete='CASCADE'))
     block = relationship(Block,
                          backref=backref("parts",
                                          passive_deletes=True,
                                          cascade="all,delete,delete-orphan"),
                          load_on_pending=True)
 
-    message_id = Column(Integer, ForeignKey(Message.id, ondelete='CASCADE'))
+    message_id = Column(ForeignKey(Message.id, ondelete='CASCADE'))
     message = relationship('Message',
                            backref=backref("parts",
                                            passive_deletes=True,

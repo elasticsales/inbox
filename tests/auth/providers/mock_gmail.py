@@ -1,22 +1,23 @@
-""" Mock provider which triggers failure at a specific step of the
-    authentication process depending on email entered.
-    Note that this uses live Gmail authentication, so auth should be called
-    using real email addresses with + parameters, eg.
-    foobar+no_all_mail@gmail.com.
-
-    * Gmail All Mail folder missing
-    * Gmail Trash folder missing
-    * OAuth error during scope acceptance
 """
+Mock provider which triggers failure at a specific step of the
+authentication process depending on email entered.
+Note that this uses live Gmail authentication, so auth should be called
+using real email addresses with + parameters, eg.
+foobar+no_all_mail@gmail.com.
 
+* Gmail All Mail folder missing
+* Gmail Trash folder missing
+* OAuth error during scope acceptance
+
+"""
 from inbox.models import Namespace
 from inbox.models.backends.gmail import GmailAccount
 
 from inbox.auth.gmail import GmailAuthHandler
-from inbox.crispin import GmailSettingError
-from inbox.basicauth import OAuthError, UserRecoverableConfigError
+from inbox.basicauth import (OAuthError, UserRecoverableConfigError,
+                             GmailSettingError, ImapSupportDisabledError)
 
-from inbox.log import get_logger
+from nylas.logging import get_logger
 log = get_logger()
 
 PROVIDER = 'gmail'  # Uses the default gmail provider info from providers.py
@@ -27,6 +28,10 @@ def raise_setting_error(folder):
     raise GmailSettingError(folder)
 
 
+def raise_imap_disabled_error(*args):
+    raise ImapSupportDisabledError()
+
+
 def raise_oauth_error(e):
     raise OAuthError(e)
 
@@ -34,13 +39,13 @@ def raise_oauth_error(e):
 fake_responses = {
     'no_all_mail': raise_setting_error,
     'no_trash': raise_setting_error,
-    'oauth_fail': raise_oauth_error
+    'oauth_fail': raise_oauth_error,
+    'imap_disabled': raise_imap_disabled_error
 }
 
 
 class MockGmailAuthHandler(GmailAuthHandler):
-
-    def create_account(self, db_session, email_address, response):
+    def create_account(self, email_address, response):
         # Override create_account to persist the 'login hint' email_address
         # rather than the canonical email that is contained in response.
         # This allows us to trigger errors by authing with addresses of the

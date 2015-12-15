@@ -2,7 +2,7 @@ from datetime import datetime
 import time
 import json
 
-from inbox.log import get_logger
+from nylas.logging import get_logger
 log = get_logger()
 from inbox.heartbeat.config import (CONTACTS_FOLDER_ID, EVENTS_FOLDER_ID,
                                     get_redis_client)
@@ -69,9 +69,6 @@ class HeartbeatStatusProxy(object):
         self.store = HeartbeatStore.store()
         self.value = {}
         self.email_address = email_address
-        self.publish(email_address=email_address,
-                     provider_name=provider_name,
-                     folder_name=folder_name)
 
     @safe_failure
     def publish(self, **kwargs):
@@ -221,6 +218,19 @@ class HeartbeatStore(object):
 
     def get_account_folders(self, account_id, timestamp_threshold=None):
         return self.get_index(account_id, timestamp_threshold)
+
+    def get_accounts_folders(self, account_ids, timestamp_threshold=None):
+        # Preferred method of querying for multiple accounts. Uses pipelining
+        # to reduce the number of requests to redis.
+        pipe = self.client.pipeline()
+        if not timestamp_threshold:
+            for index in account_ids:
+                pipe.zrange(index, 0, -1, withscores=True)
+        else:
+            for index in account_ids:
+                lower_bound = time.time() - timestamp_threshold
+                pipe.zrangebyscore(index, lower_bound, '+inf', withscores=True)
+        return pipe.execute()
 
     def get_single_folder(self, account_id):
         try:

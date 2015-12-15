@@ -1,6 +1,5 @@
-import os
 import base64
-import email.header
+import os
 import uuid
 import gevent
 import time
@@ -9,53 +8,56 @@ from datetime import datetime
 from flask import request, g, Blueprint, make_response, Response
 from flask import jsonify as flask_jsonify
 from flask.ext.restful import reqparse
-from sqlalchemy import asc, or_, func
+from sqlalchemy import asc, func
 from sqlalchemy.orm.exc import NoResultFound
 
+from nylas.logging import get_logger
+log = get_logger()
 from inbox.models import (Message, Block, Part, Thread, Namespace,
-                          Tag, Contact, Calendar, Event, Transaction,
-                          DataProcessingCache)
+                          Contact, Calendar, Event, Transaction,
+                          DataProcessingCache, Category, MessageCategory)
+from inbox.models.event import RecurringEvent, RecurringEventOverride
+from inbox.models.backends.generic import GenericAccount
 from inbox.api.sending import send_draft, send_raw_mime
+from inbox.api.update import update_message, update_thread
 from inbox.api.kellogs import APIEncoder
 from inbox.api import filtering
-from inbox.api.validation import (get_tags, get_attachments, get_calendar,
+from inbox.api.validation import (get_attachments, get_calendar,
                                   get_recipients, get_draft, valid_public_id,
                                   valid_event, valid_event_update, timestamp,
                                   bounded_str, view, strict_parse_args,
                                   limit, offset, ValidatableArgument,
                                   strict_bool, validate_draft_recipients,
-                                  validate_search_query,
-                                  validate_search_sort,
-                                  valid_delta_object_types)
+                                  valid_delta_object_types, valid_display_name,
+                                  noop_event_update)
+from inbox.config import config
 from inbox.contacts.algorithms import (calculate_contact_scores,
                                        calculate_group_scores,
                                        calculate_group_counts, is_stale)
 import inbox.contacts.crud
-from inbox.sendmail.base import (create_draft, update_draft, delete_draft,
-                                 create_draft_from_mime)
-from inbox.log import get_logger
-from inbox.models.constants import MAX_INDEXABLE_LENGTH
+from inbox.contacts.search import ContactSearchClient
+from inbox.sendmail.base import (create_message_from_json, update_draft,
+                                 delete_draft, create_draft_from_mime,
+                                 SendMailException)
+from inbox.ignition import engine_manager
 from inbox.models.action_log import schedule_action
-from inbox.models.session import InboxSession, session_scope
-from inbox.search.adaptor import NamespaceSearchEngine, SearchEngineError
+from inbox.models.session import new_session, session_scope
+from inbox.search.base import get_search_client, SearchBackendException
 from inbox.transactions import delta_sync
-
-from inbox.api.err import (err, APIException, NotFoundError, InputError,
-                           ConflictError)
-
-from inbox.ignition import main_engine
-engine = main_engine()
-
+from inbox.api.err import err, APIException, NotFoundError, InputError
+from inbox.events.ical import (generate_icalendar_invite, send_invite,
+                               generate_rsvp, send_rsvp)
+from inbox.util.blockstore import get_from_blockstore
 
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 1000
 LONG_POLL_REQUEST_TIMEOUT = 120
-
+SEND_TIMEOUT = 60
 
 app = Blueprint(
     'namespace_api',
     __name__,
-    url_prefix='/n/<namespace_public_id>')
+    url_prefix='')
 
 # Configure mimetype -> extension map
 # TODO perhaps expand to encompass non-standard mimetypes too
@@ -74,26 +76,29 @@ with open(mt_path, 'r') as f:
         common_extensions[mime_type.lower()] = extensions[0]
 
 
+if config.get('DEBUG_PROFILING_ON'):
+    from inbox.util.debug import attach_pyinstrument_profiler
+    attach_pyinstrument_profiler()
+
+
 @app.url_value_preprocessor
 def pull_lang_code(endpoint, values):
-    g.namespace_public_id = values.pop('namespace_public_id')
+    if 'namespace_public_id' in values:
+        values.pop('namespace_public_id')
+        g.legacy_nsid = True
+    else:
+        g.legacy_nsid = False
 
 
 @app.before_request
 def start():
-    g.db_session = InboxSession(engine)
-
-    g.log = get_logger()
-    try:
-        valid_public_id(g.namespace_public_id)
-        g.namespace = g.db_session.query(Namespace) \
-            .filter(Namespace.public_id == g.namespace_public_id).one()
-
-        g.encoder = APIEncoder(g.namespace.public_id)
-    except NoResultFound:
-        raise NotFoundError("Couldn't find namespace  `{0}` ".format(
-            g.namespace_public_id))
-
+    engine = engine_manager.get_for_id(g.namespace_id)
+    g.db_session = new_session(engine)
+    g.namespace = Namespace.get(g.namespace_id, g.db_session)
+    g.encoder = APIEncoder(g.namespace.public_id,
+                           legacy_nsid=g.legacy_nsid)
+    g.log = log.new(endpoint=request.endpoint,
+                    account_id=g.namespace.account_id)
     g.parser = reqparse.RequestParser(argument_class=ValidatableArgument)
     g.parser.add_argument('limit', default=DEFAULT_LIMIT, type=limit,
                           location='args')
@@ -102,9 +107,10 @@ def start():
 
 @app.after_request
 def finish(response):
-    if response.status_code == 200:
+    if response.status_code == 200 and hasattr(g, 'db_session'):  # be cautions
         g.db_session.commit()
-    g.db_session.close()
+    if hasattr(g, 'db_session'):
+        g.db_session.close()
     return response
 
 
@@ -124,11 +130,24 @@ def handle_input_error(error):
     return response
 
 
-#
-# General namespace info
-#
-@app.route('/')
-def index():
+# TODO remove legacy_nsid
+@app.route('/n/<namespace_id>')
+def single_namespace(namespace_id):
+    if not namespace_id == g.namespace.public_id:
+        return err(404, "Unknown namespace ID")
+    valid_public_id(namespace_id)
+
+    try:
+        f = g.db_session.query(Namespace).filter(
+            Namespace.public_id == namespace_id).one()
+        return APIEncoder(namespace_id, legacy_nsid=True).jsonify(f)
+    except NoResultFound:
+        raise NotFoundError("Couldn't find namespace {0} "
+                            .format(namespace_id))
+
+
+@app.route('/account')
+def one_account():
     return g.encoder.jsonify(g.namespace)
 
 #
@@ -151,142 +170,6 @@ def status():
     })
 
 
-##
-# Tags
-##
-@app.route('/tags/')
-def tag_query_api():
-    g.parser.add_argument('tag_name', type=bounded_str, location='args')
-    g.parser.add_argument('tag_id', type=valid_public_id, location='args')
-    g.parser.add_argument('view', type=view, location='args')
-
-    args = strict_parse_args(g.parser, request.args)
-
-    if args['view'] == 'count':
-        query = g.db_session.query(func.count(Tag.id))
-    elif args['view'] == 'ids':
-        query = g.db_session.query(Tag.public_id)
-    else:
-        query = g.db_session.query(Tag)
-
-    query = query.filter(Tag.namespace_id == g.namespace.id)
-
-    if args['tag_name']:
-        query = query.filter_by(name=args['tag_name'])
-
-    if args['tag_id']:
-        query = query.filter_by(public_id=args['tag_id'])
-
-    if args['view'] == 'count':
-        return g.encoder.jsonify({"count": query.one()[0]})
-
-    query = query.order_by(Tag.id)
-    query = query.limit(args['limit'])
-    if args['offset']:
-        query = query.offset(args['offset'])
-
-    if args['view'] == 'ids':
-        results = [x[0] for x in query.all()]
-    else:
-        results = query.all()
-    return g.encoder.jsonify(results)
-
-
-@app.route('/tags/<public_id>', methods=['GET'])
-def tag_read_api(public_id):
-    try:
-        valid_public_id(public_id)
-        tag = g.db_session.query(Tag).filter(
-            Tag.public_id == public_id,
-            Tag.namespace_id == g.namespace.id).one()
-    except NoResultFound:
-        raise NotFoundError('No tag found')
-
-    unread_tag = g.db_session.query(Tag).filter_by(
-        namespace_id=g.namespace.id,
-        name='unread').first()
-    if unread_tag:
-        tag.unread_count = tag.intersection(unread_tag.id, g.db_session)
-        tag.thread_count = tag.count_threads()
-    return g.encoder.jsonify(tag)
-
-
-@app.route('/tags/<public_id>', methods=['PUT'])
-def tag_update_api(public_id):
-    try:
-        valid_public_id(public_id)
-        tag = g.db_session.query(Tag).filter(
-            Tag.public_id == public_id,
-            Tag.namespace_id == g.namespace.id).one()
-    except NoResultFound:
-        raise NotFoundError('No tag found')
-
-    data = request.get_json(force=True)
-    if not ('name' in data.keys() and isinstance(data['name'], basestring)):
-        raise InputError('Malformed tag update request')
-    if 'namespace_id' in data.keys():
-        ns_id = data['namespace_id']
-        valid_public_id(ns_id)
-        if ns_id != g.namespace.public_id:
-            raise InputError('Cannot change the namespace on a tag.')
-    if not tag.user_created:
-        raise InputError('Cannot modify tag {}'.format(public_id))
-    # Lowercase tag name, regardless of input casing.
-    new_name = data['name'].lower()
-
-    if new_name != tag.name:  # short-circuit rename to same value
-        if not Tag.name_available(new_name, g.namespace.id, g.db_session):
-            return err(409, 'Tag name already used')
-        tag.name = new_name
-        g.db_session.commit()
-
-    return g.encoder.jsonify(tag)
-
-
-@app.route('/tags/', methods=['POST'])
-def tag_create_api():
-    data = request.get_json(force=True)
-    if not ('name' in data.keys() and isinstance(data['name'], basestring)):
-        raise InputError('Malformed tag request')
-    if 'namespace_id' in data.keys():
-        ns_id = data['namespace_id']
-        if ns_id is not None:
-            valid_public_id(ns_id)
-            if ns_id != g.namespace.public_id:
-                raise InputError('Cannot change the namespace on a tag.')
-    # Lowercase tag name, regardless of input casing.
-    tag_name = data['name'].lower()
-    if not Tag.name_available(tag_name, g.namespace.id, g.db_session):
-        return err(409, 'Tag name not available')
-    if len(tag_name) > MAX_INDEXABLE_LENGTH:
-        raise InputError('Tag name is too long.')
-
-    tag = Tag(name=tag_name, namespace=g.namespace, user_created=True)
-    g.db_session.commit()
-    return g.encoder.jsonify(tag)
-
-
-@app.route('/tags/<public_id>', methods=['DELETE'])
-def tag_delete_api(public_id):
-    try:
-        valid_public_id(public_id)
-        t = g.db_session.query(Tag).filter(
-            Tag.public_id == public_id,
-            Tag.namespace_id == g.namespace.id).one()
-
-        if not t.user_created:
-            raise InputError('delete non user-created tag.')
-
-        g.db_session.delete(t)
-        g.db_session.commit()
-
-        # This is essentially what our other API endpoints do after deleting.
-        # Effectively no error == success
-        return g.encoder.jsonify(None)
-    except NoResultFound:
-        raise NotFoundError('No tag found')
-
-
 #
 # Threads
 #
@@ -306,11 +189,24 @@ def thread_query_api():
     g.parser.add_argument('last_message_after', type=timestamp,
                           location='args')
     g.parser.add_argument('filename', type=bounded_str, location='args')
+    g.parser.add_argument('in', type=bounded_str, location='args')
     g.parser.add_argument('thread_id', type=valid_public_id, location='args')
-    g.parser.add_argument('tag', type=bounded_str, location='args')
+    g.parser.add_argument('unread', type=strict_bool, location='args')
+    g.parser.add_argument('starred', type=strict_bool, location='args')
     g.parser.add_argument('view', type=view, location='args')
 
+    # For backwards-compatibility -- remove after deprecating tags API.
+    g.parser.add_argument('tag', type=bounded_str, location='args')
+
     args = strict_parse_args(g.parser, request.args)
+
+    # For backwards-compatibility -- remove after deprecating tags API.
+    if args['tag'] == 'unread':
+        unread = True
+        in_ = None
+    else:
+        in_ = args['in'] or args['tag']
+        unread = args['unread']
 
     threads = filtering.threads(
         namespace_id=g.namespace.id,
@@ -327,39 +223,42 @@ def thread_query_api():
         last_message_before=args['last_message_before'],
         last_message_after=args['last_message_after'],
         filename=args['filename'],
-        tag=args['tag'],
+        unread=unread,
+        starred=args['starred'],
+        in_=in_,
         limit=args['limit'],
         offset=args['offset'],
         view=args['view'],
         db_session=g.db_session)
 
     # Use a new encoder object with the expand parameter set.
-    encoder = APIEncoder(g.namespace.public_id, args['view'] == 'expanded')
+    encoder = APIEncoder(g.namespace.public_id,
+                         args['view'] == 'expanded',
+                         legacy_nsid=g.legacy_nsid)
     return encoder.jsonify(threads)
 
 
-@app.route('/threads/search', methods=['POST'])
+@app.route('/threads/search', methods=['GET'])
 def thread_search_api():
+    g.parser.add_argument('q', type=bounded_str, location='args')
     args = strict_parse_args(g.parser, request.args)
-    data = request.get_json(force=True)
+    if not args['q']:
+        err_string = ('GET HTTP method must include query'
+                      ' url parameter')
+        g.log.error(err_string)
+        return err(400, err_string)
 
-    query = data.get('query')
-    validate_search_query(query)
-
-    sort = data.get('sort')
-    validate_search_sort(sort)
-
+    search_client = get_search_client(g.namespace.account)
     try:
-        search_engine = NamespaceSearchEngine(g.namespace_public_id)
-        results = search_engine.threads.search(query=query,
-                                               sort=sort,
-                                               max_results=args.limit,
-                                               offset=args.offset)
-    except SearchEngineError as e:
-        g.log.error('Search error: {0}'.format(e))
-        return err(501, 'Search error')
-
-    return g.encoder.jsonify(results)
+        results = search_client.search_threads(g.db_session, args['q'],
+                                               offset=args['offset'],
+                                               limit=args['limit'])
+        return g.encoder.jsonify(results)
+    except SearchBackendException as exc:
+        kwargs = {}
+        if exc.server_error:
+            kwargs['server_error'] = exc.server_error
+        return err(exc.http_code, exc.message, **kwargs)
 
 
 @app.route('/threads/<public_id>')
@@ -367,7 +266,8 @@ def thread_api(public_id):
     g.parser.add_argument('view', type=view, location='args')
     args = strict_parse_args(g.parser, request.args)
     # Use a new encoder object with the expand parameter set.
-    encoder = APIEncoder(g.namespace.public_id, args['view'] == 'expanded')
+    encoder = APIEncoder(g.namespace.public_id, args['view'] == 'expanded',
+                         legacy_nsid=g.legacy_nsid)
     try:
         valid_public_id(public_id)
         thread = g.db_session.query(Thread).filter(
@@ -391,43 +291,9 @@ def thread_api_update(public_id):
     except NoResultFound:
         raise NotFoundError("Couldn't find thread `{0}` ".format(public_id))
     data = request.get_json(force=True)
-    if not set(data).issubset({'add_tags', 'remove_tags', 'version'}):
-        raise InputError('Can only add or remove tags from thread.')
-    if (data.get('version') is not None and data.get('version') !=
-            thread.version):
-        raise ConflictError('Thread {} has been updated to version {}'.
-                            format(thread.public_id, thread.version))
-
-    removals = data.get('remove_tags', [])
-
-    for tag_identifier in removals:
-        tag = g.db_session.query(Tag).filter(
-            Tag.namespace_id == g.namespace.id,
-            or_(Tag.public_id == tag_identifier,
-                Tag.name == tag_identifier)).first()
-        if tag is None:
-            raise NotFoundError("Couldn't find tag {}".format(tag_identifier))
-        if not tag.user_removable:
-            raise InputError('Cannot remove read-only tag {}'.
-                             format(tag_identifier))
-
-        thread.remove_tag(tag, execute_action=True)
-
-    additions = data.get('add_tags', [])
-    for tag_identifier in additions:
-        tag = g.db_session.query(Tag).filter(
-            Tag.namespace_id == g.namespace.id,
-            or_(Tag.public_id == tag_identifier,
-                Tag.name == tag_identifier)).first()
-        if tag is None:
-            raise NotFoundError("Couldn't find tag {}".format(tag_identifier))
-        if not tag.user_addable:
-            raise InputError('Cannot add read-only tag {}'.
-                             format(tag_identifier))
-
-        thread.apply_tag(tag, execute_action=True)
-
-    g.db_session.commit()
+    if not isinstance(data, dict):
+        raise InputError('Invalid request body')
+    update_thread(thread, data, g.db_session)
     return g.encoder.jsonify(thread)
 
 
@@ -457,13 +323,27 @@ def message_query_api():
                           location='args')
     g.parser.add_argument('last_message_after', type=timestamp,
                           location='args')
+    g.parser.add_argument('received_before', type=timestamp,
+                          location='args')
+    g.parser.add_argument('received_after', type=timestamp,
+                          location='args')
     g.parser.add_argument('filename', type=bounded_str, location='args')
+    g.parser.add_argument('in', type=bounded_str, location='args')
     g.parser.add_argument('thread_id', type=valid_public_id, location='args')
-    g.parser.add_argument('tag', type=bounded_str, location='args')
+    g.parser.add_argument('unread', type=strict_bool, location='args')
+    g.parser.add_argument('starred', type=strict_bool, location='args')
     g.parser.add_argument('view', type=view, location='args')
+
+    # For backwards-compatibility -- remove after deprecating tags API.
+    g.parser.add_argument('tag', type=bounded_str, location='args')
     args = strict_parse_args(g.parser, request.args)
-    messages = filtering.messages(
+
+    # For backwards-compatibility -- remove after deprecating tags API.
+    in_ = args['in'] or args['tag']
+
+    messages = filtering.messages_or_drafts(
         namespace_id=g.namespace.id,
+        drafts=False,
         subject=args['subject'],
         thread_public_id=args['thread_id'],
         to_addr=args['to'],
@@ -475,70 +355,75 @@ def message_query_api():
         started_after=args['started_after'],
         last_message_before=args['last_message_before'],
         last_message_after=args['last_message_after'],
+        received_before=args['received_before'],
+        received_after=args['received_after'],
         filename=args['filename'],
-        tag=args['tag'],
+        in_=in_,
+        unread=args['unread'],
+        starred=args['starred'],
         limit=args['limit'],
         offset=args['offset'],
         view=args['view'],
         db_session=g.db_session)
 
     # Use a new encoder object with the expand parameter set.
-    encoder = APIEncoder(g.namespace.public_id, args['view'] == 'expanded')
+    encoder = APIEncoder(g.namespace.public_id, args['view'] == 'expanded',
+                         legacy_nsid=g.legacy_nsid)
     return encoder.jsonify(messages)
 
 
-@app.route('/messages/search', methods=['POST'])
+@app.route('/messages/search', methods=['GET'])
 def message_search_api():
+    g.parser.add_argument('q', type=bounded_str, location='args')
     args = strict_parse_args(g.parser, request.args)
-    data = request.get_json(force=True)
-    query = data.get('query')
+    if not args['q']:
+        err_string = ('GET HTTP method must include query'
+                      ' url parameter')
+        g.log.error(err_string)
+        return err(400, err_string)
 
-    validate_search_query(query)
-
-    sort = data.get('sort')
-    validate_search_sort(sort)
-
+    search_client = get_search_client(g.namespace.account)
     try:
-        search_engine = NamespaceSearchEngine(g.namespace_public_id)
-        results = search_engine.messages.search(query=query,
-                                                sort=sort,
-                                                max_results=args.limit,
-                                                offset=args.offset)
-    except SearchEngineError as e:
-        g.log.error('Search error: {0}'.format(e))
-        return err(501, 'Search error')
-
-    return g.encoder.jsonify(results)
+        results = search_client.search_messages(g.db_session, args['q'],
+                                                offset=args['offset'],
+                                                limit=args['limit'])
+        return g.encoder.jsonify(results)
+    except SearchBackendException as exc:
+        kwargs = {}
+        if exc.server_error:
+            kwargs['server_error'] = exc.server_error
+        return err(exc.http_code, exc.message, **kwargs)
 
 
 @app.route('/messages/<public_id>', methods=['GET'])
 def message_read_api(public_id):
     g.parser.add_argument('view', type=view, location='args')
     args = strict_parse_args(g.parser, request.args)
-    encoder = APIEncoder(g.namespace.public_id, args['view'] == 'expanded')
+    encoder = APIEncoder(g.namespace.public_id, args['view'] == 'expanded',
+                         legacy_nsid=g.legacy_nsid)
+
     try:
         valid_public_id(public_id)
-        message = g.db_session.query(Message).filter(
-            Message.public_id == public_id,
-            Message.namespace_id == g.namespace.id).one()
+        message = Message.from_public_id(public_id, g.namespace.id,
+                                         g.db_session)
     except NoResultFound:
-        raise NotFoundError("Couldn't find message {0} ".format(public_id))
+        raise NotFoundError("Couldn't find message {0}".format(public_id))
+
     if request.headers.get('Accept', None) == 'message/rfc822':
-        if message.full_body is not None:
-            return Response(message.full_body.data,
-                            mimetype='message/rfc822')
+        raw_message = get_from_blockstore(message.data_sha256)
+        if raw_message is not None:
+            return Response(raw_message, mimetype='message/rfc822')
         else:
-            g.log.error("Message without full_body attribute: id='{0}'"
-                        .format(message.id))
+            g.log.error('Missing raw MIME message', id=message.id)
             raise NotFoundError(
-                "Couldn't find raw contents for message `{0}` "
+                "Couldn't find raw contents for message `{0}`"
                 .format(public_id))
+
     return encoder.jsonify(message)
 
 
 @app.route('/messages/<public_id>', methods=['PUT'])
 def message_update_api(public_id):
-    data = request.get_json(force=True)
     try:
         valid_public_id(public_id)
         message = g.db_session.query(Message).filter(
@@ -546,56 +431,270 @@ def message_update_api(public_id):
             Message.namespace_id == g.namespace.id).one()
     except NoResultFound:
         raise NotFoundError("Couldn't find message {0} ".format(public_id))
-    if data.keys() != ['unread'] or not isinstance(data['unread'], bool):
-        raise InputError('Can only change the unread attribute of a '
-                         'message')
-
-    # TODO(emfree): Shouldn't allow this on messages that are actually
-    # drafts.
-
-    unread_tag = message.namespace.tags['unread']
-    unseen_tag = message.namespace.tags['unseen']
-    if data['unread']:
-        message.is_read = False
-        message.thread.apply_tag(unread_tag)
-    else:
-        message.is_read = True
-        message.thread.remove_tag(unseen_tag)
-        if all(m.is_read for m in message.thread.messages):
-            message.thread.remove_tag(unread_tag)
+    data = request.get_json(force=True)
+    if not isinstance(data, dict):
+        raise InputError('Invalid request body')
+    update_message(message, data, g.db_session)
     return g.encoder.jsonify(message)
 
 
-# TODO Deprecate this endpoint once API usage falls off
-@app.route('/messages/<public_id>/rfc2822', methods=['GET'])
-def raw_message_api(public_id):
-    try:
-        valid_public_id(public_id)
-        message = g.db_session.query(Message).filter(
-            Message.public_id == public_id,
-            Message.namespace_id == g.namespace.id).one()
-    except NoResultFound:
-        raise NotFoundError("Couldn't find message {0}".format(public_id))
-
-    if message.full_body is None:
-        raise NotFoundError("Couldn't find message {0}".format(public_id))
-
-    if message.full_body is not None:
-        b64_contents = base64.b64encode(message.full_body.data)
+# Folders / Labels
+@app.route('/folders')
+@app.route('/labels')
+def folders_labels_query_api():
+    g.parser.add_argument('view', type=bounded_str, location='args')
+    args = strict_parse_args(g.parser, request.args)
+    if args['view'] == 'count':
+        results = g.db_session.query(func.count(Category.id))
+    elif args['view'] == 'ids':
+        results = g.db_session.query(Category.public_id)
     else:
-        g.log.error("Message without full_body attribute: id='{0}'"
-                    .format(message.id))
-        raise NotFoundError(
-                    "Couldn't find raw contents for message `{0}` "
-                    .format(public_id))
-    return g.encoder.jsonify({"rfc2822": b64_contents})
+        results = g.db_session.query(Category)
+
+    results = results.filter(Category.namespace_id == g.namespace.id,
+                             Category.deleted_at == None)  # noqa
+    results = results.order_by(asc(Category.id))
+
+    if args['view'] == 'count':
+        return g.encoder.jsonify({"count": results.scalar()})
+
+    results = results.limit(args['limit']).offset(args['offset']).all()
+    if args['view'] == 'ids':
+        return g.encoder.jsonify([r for r, in results])
+    return g.encoder.jsonify(results)
 
 
-##
+@app.route('/folders/<public_id>')
+def folder_api(public_id):
+    return folders_labels_api_impl(public_id)
+
+
+@app.route('/labels/<public_id>')
+def label_api(public_id):
+    return folders_labels_api_impl(public_id)
+
+
+def folders_labels_api_impl(public_id):
+    valid_public_id(public_id)
+    try:
+        category = g.db_session.query(Category).filter(
+            Category.namespace_id == g.namespace.id,
+            Category.public_id == public_id,
+            Category.deleted_at == None).one()  # noqa
+    except NoResultFound:
+        raise NotFoundError('Object not found')
+    return g.encoder.jsonify(category)
+
+
+@app.route('/folders', methods=['POST'])
+@app.route('/labels', methods=['POST'])
+def folders_labels_create_api():
+    category_type = g.namespace.account.category_type
+    data = request.get_json(force=True)
+    display_name = data.get('display_name')
+
+    valid_display_name(g.namespace.id, category_type, display_name,
+                       g.db_session)
+
+    # We do not allow creating a category with the same name as a
+    # deleted category /until/ the corresponding folder/label
+    # delete syncback is performed. This is a limitation but is the
+    # simplest way to prevent the creation of categories with duplicate
+    # names; it also hinders creation in the one case only (namely,
+    # delete category with display_name "x" via the API -> quickly
+    # try to create a category with the same display_name).
+    category = g.db_session.query(Category).filter(
+        Category.namespace_id == g.namespace.id,
+        Category.name == None,  # noqa
+        Category.display_name == display_name,
+        Category.type_ == category_type).first()
+
+    if category:
+        return err(403, "{} with name {} already exists".
+                        format(category_type, display_name))
+
+    category = Category.find_or_create(g.db_session, g.namespace.id,
+                                       name=None, display_name=display_name,
+                                       type_=category_type)
+    if category.deleted_at:
+        category = Category(namespace_id=g.namespace.id, name=None,
+                            display_name=display_name, type_=category_type)
+        g.db_session.add(category)
+    g.db_session.flush()
+
+    if category_type == 'folder':
+        schedule_action('create_folder', category, g.namespace.id,
+                        g.db_session)
+    else:
+        schedule_action('create_label', category, g.namespace.id, g.db_session)
+
+    return g.encoder.jsonify(category)
+
+
+@app.route('/folders/<public_id>', methods=['PUT'])
+@app.route('/labels/<public_id>', methods=['PUT'])
+def folder_label_update_api(public_id):
+    category_type = g.namespace.account.category_type
+    valid_public_id(public_id)
+    try:
+        category = g.db_session.query(Category).filter(
+            Category.namespace_id == g.namespace.id,
+            Category.public_id == public_id,
+            Category.deleted_at == None).one()  # noqa
+    except NoResultFound:
+        raise InputError("Couldn't find {} {}".format(
+            category_type, public_id))
+    if category.name is not None:
+        raise InputError("Cannot modify a standard {}".format(category_type))
+
+    data = request.get_json(force=True)
+    display_name = data.get('display_name')
+    valid_display_name(g.namespace.id, category_type, display_name,
+                       g.db_session)
+
+    current_name = category.display_name
+    category.display_name = display_name
+    g.db_session.flush()
+
+    if category_type == 'folder':
+        schedule_action('update_folder', category, g.namespace.id,
+                        g.db_session, old_name=current_name)
+    else:
+        schedule_action('update_label', category, g.namespace.id,
+                        g.db_session, old_name=current_name)
+
+    # TODO[k]: Update corresponding folder/ label once syncback is successful,
+    # rather than waiting for sync to pick it up?
+
+    return g.encoder.jsonify(category)
+
+
+@app.route('/folders/<public_id>', methods=['DELETE'])
+@app.route('/labels/<public_id>', methods=['DELETE'])
+def folder_label_delete_api(public_id):
+    category_type = g.namespace.account.category_type
+    valid_public_id(public_id)
+    try:
+        category = g.db_session.query(Category).filter(
+            Category.namespace_id == g.namespace.id,
+            Category.public_id == public_id,
+            Category.deleted_at == None).one()  # noqa
+    except NoResultFound:
+        raise InputError("Couldn't find {} {}".format(
+            category_type, public_id))
+    if category.name is not None:
+        raise InputError("Cannot modify a standard {}".format(category_type))
+
+    if category.type_ == 'folder':
+        messages_with_category = g.db_session.query(MessageCategory).filter(
+            MessageCategory.category_id == category.id).exists()
+        messages_exist = g.db_session.query(messages_with_category).scalar()
+        if messages_exist:
+            return err(403, "Folder {} cannot be deleted because it contains "
+                            "messages.".format(public_id))
+
+        deleted_at = datetime.utcnow()
+        category.deleted_at = deleted_at
+        folders = category.folders if g.namespace.account.discriminator != 'easaccount' \
+            else category.easfolders
+        for folder in folders:
+            folder.deleted_at = deleted_at
+
+        schedule_action('delete_folder', category, g.namespace.id,
+                        g.db_session)
+    else:
+        deleted_at = datetime.utcnow()
+        category.deleted_at = deleted_at
+        for label in category.labels:
+            label.deleted_at = deleted_at
+
+        schedule_action('delete_label', category, g.namespace.id,
+                        g.db_session)
+
+    g.db_session.commit()
+
+    return g.encoder.jsonify(None)
+
+
+# -- Begin tags API shim
+
+
+@app.route('/tags')
+def tag_query_api():
+    categories = g.db_session.query(Category). \
+        filter(Category.namespace_id == g.namespace.id)
+    resp = [
+        {'object': 'tag',
+         'name': obj.display_name,
+         'id': obj.name or obj.public_id,
+         'readonly': False} for obj in categories
+    ]
+    for item in resp:
+        if g.legacy_nsid:
+            item['namespace_id'] = g.namespace.public_id
+        else:
+            item['account_id'] = g.namespace.public_id
+    return g.encoder.jsonify(resp)
+
+
+@app.route('/tags/<public_id>')
+def tag_detail_api(public_id):
+    # Interpret former special public ids for 'canonical' tags.
+    if public_id in ('inbox', 'sent', 'archive', 'important', 'trash', 'spam',
+                     'all'):
+        category = g.db_session.query(Category). \
+            filter(Category.namespace_id == g.namespace.id,
+                   Category.name == public_id).first()
+    else:
+        category = g.db_session.query(Category). \
+            filter(Category.namespace_id == g.namespace.id,
+                   Category.public_id == public_id).first()
+    if category is None:
+        raise NotFoundError('Category {} not found'.format(public_id))
+
+    message_subquery = g.db_session.query(Message.thread_id). \
+        join(MessageCategory). \
+        filter(
+            Message.namespace_id == g.namespace.id,
+            MessageCategory.category_id == category.id).subquery()
+    thread_count = g.db_session.query(func.count(1)). \
+        select_from(Thread).filter(
+            Thread.id.in_(message_subquery)).scalar()
+
+    unread_subquery = g.db_session.query(Message.thread_id). \
+        join(MessageCategory). \
+        filter(
+            Message.namespace_id == g.namespace.id,
+            MessageCategory.category_id == category.id,
+            Message.is_read == False).subquery()  # noqa
+    unread_count = g.db_session.query(func.count(1)). \
+        select_from(Thread).filter(
+            Thread.id.in_(unread_subquery)).scalar()
+
+    to_ret = {
+        'object': 'tag',
+        'name': category.display_name,
+        'id': category.name or category.public_id,
+        'readonly': False,
+        'unread_count': unread_count,
+        'thread_count': thread_count
+    }
+
+    if g.legacy_nsid:
+        to_ret['namespace_id'] = g.namespace.public_id
+    else:
+        to_ret['account_id'] = g.namespace.public_id
+    return g.encoder.jsonify(to_ret)
+
+
+# -- End tags API shim
+
+
+#
 # Contacts
 ##
 @app.route('/contacts/', methods=['GET'])
-def contact_search_api():
+def contact_api():
     g.parser.add_argument('filter', type=bounded_str, default='',
                           location='args')
     g.parser.add_argument('view', type=bounded_str, location='args')
@@ -604,7 +703,7 @@ def contact_search_api():
     if args['view'] == 'count':
         results = g.db_session.query(func.count(Contact.id))
     elif args['view'] == 'ids':
-        results = g.db_session.query(Contact.id)
+        results = g.db_session.query(Contact.public_id)
     else:
         results = g.db_session.query(Contact)
 
@@ -612,12 +711,34 @@ def contact_search_api():
 
     if args['filter']:
         results = results.filter(Contact.email_address == args['filter'])
-    results = results.order_by(asc(Contact.id))
+    results = results.with_hint(
+        Contact, 'USE INDEX (ix_contact_ns_uid_provider_name)')\
+        .order_by(asc(Contact.created_at))
 
     if args['view'] == 'count':
-        return g.encoder.jsonify({"count": results.all()})
+        return g.encoder.jsonify({"count": results.scalar()})
 
     results = results.limit(args['limit']).offset(args['offset']).all()
+    if args['view'] == 'ids':
+        return g.encoder.jsonify([r for r, in results])
+
+    return g.encoder.jsonify(results)
+
+
+@app.route('/contacts/search', methods=['GET'])
+def contact_search_api():
+    g.parser.add_argument('q', type=bounded_str, location='args')
+    args = strict_parse_args(g.parser, request.args)
+    if not args['q']:
+        err_string = ('GET HTTP method must include query'
+                      ' url parameter')
+        g.log.error(err_string)
+        return err(400, err_string)
+
+    search_client = ContactSearchClient(g.namespace.id)
+    results = search_client.search_contacts(g.db_session, args['q'],
+                                            offset=args['offset'],
+                                            limit=args['limit'])
     return g.encoder.jsonify(results)
 
 
@@ -635,7 +756,7 @@ def contact_read_api(public_id):
 # Events
 ##
 @app.route('/events/', methods=['GET'])
-def event_search_api():
+def event_api():
     g.parser.add_argument('event_id', type=valid_public_id, location='args')
     g.parser.add_argument('calendar_id', type=valid_public_id, location='args')
     g.parser.add_argument('title', type=bounded_str, location='args')
@@ -650,6 +771,7 @@ def event_search_api():
     g.parser.add_argument('expand_recurring', type=strict_bool,
                           location='args')
     g.parser.add_argument('show_cancelled', type=strict_bool, location='args')
+
     args = strict_parse_args(g.parser, request.args)
 
     results = filtering.events(
@@ -676,6 +798,11 @@ def event_search_api():
 
 @app.route('/events/', methods=['POST'])
 def event_create_api():
+    g.parser.add_argument('notify_participants', type=strict_bool,
+                          location='args')
+    args = strict_parse_args(g.parser, request.args)
+    notify_participants = args['notify_participants']
+
     data = request.get_json(force=True)
     calendar = get_calendar(data.get('calendar_id'),
                             g.namespace, g.db_session)
@@ -716,12 +843,14 @@ def event_create_api():
         read_only=False,
         is_owner=True,
         participants=participants,
+        sequence_number=0,
         source='local')
     g.db_session.add(event)
     g.db_session.flush()
 
     schedule_action('create_event', event, g.namespace.id, g.db_session,
-                    calendar_uid=event.calendar.uid)
+                    calendar_uid=event.calendar.uid,
+                    notify_participants=notify_participants)
     return g.encoder.jsonify(event)
 
 
@@ -740,6 +869,11 @@ def event_read_api(public_id):
 
 @app.route('/events/<public_id>', methods=['PUT'])
 def event_update_api(public_id):
+    g.parser.add_argument('notify_participants', type=strict_bool,
+                          location='args')
+    args = strict_parse_args(g.parser, request.args)
+    notify_participants = args['notify_participants']
+
     valid_public_id(public_id)
     try:
         event = g.db_session.query(Event).filter(
@@ -749,8 +883,13 @@ def event_update_api(public_id):
         raise NotFoundError("Couldn't find event {0}".format(public_id))
     if event.read_only:
         raise InputError('Cannot update read_only event.')
+    if (isinstance(event, RecurringEvent) or
+            isinstance(event, RecurringEventOverride)):
+        raise InputError('Cannot update a recurring event yet.')
 
     data = request.get_json(force=True)
+    account = g.namespace.account
+
     valid_event_update(data, g.namespace, g.db_session)
 
     if 'participants' in data:
@@ -758,20 +897,33 @@ def event_update_api(public_id):
             if 'status' not in p:
                 p['status'] = 'noreply'
 
-    for attr in ['title', 'description', 'location', 'when', 'participants']:
+    # Don't update an event if we don't need to.
+    if noop_event_update(event, data):
+        return g.encoder.jsonify(event)
+
+    for attr in Event.API_MODIFIABLE_FIELDS:
         if attr in data:
             setattr(event, attr, data[attr])
 
+    event.sequence_number += 1
     g.db_session.commit()
 
-    schedule_action('update_event', event, g.namespace.id, g.db_session,
-                    calendar_uid=event.calendar.uid)
+    # Don't sync back updates to autoimported events.
+    if event.calendar != account.emailed_events_calendar:
+        schedule_action('update_event', event, g.namespace.id, g.db_session,
+                        calendar_uid=event.calendar.uid,
+                        notify_participants=notify_participants)
 
     return g.encoder.jsonify(event)
 
 
 @app.route('/events/<public_id>', methods=['DELETE'])
 def event_delete_api(public_id):
+    g.parser.add_argument('notify_participants', type=strict_bool,
+                          location='args')
+    args = strict_parse_args(g.parser, request.args)
+    notify_participants = args['notify_participants']
+
     valid_public_id(public_id)
     try:
         event = g.db_session.query(Event).filter_by(
@@ -786,14 +938,99 @@ def event_delete_api(public_id):
     # Set the local event status to 'cancelled' rather than deleting it,
     # in order to be consistent with how we sync deleted events from the
     # remote, and consequently return them through the events, delta sync APIs
+    event.sequence_number += 1
     event.status = 'cancelled'
     g.db_session.commit()
 
+    account = g.namespace.account
+
+    # FIXME @karim: do this in the syncback thread instead.
+    if notify_participants and account.provider != 'gmail':
+        ical_file = generate_icalendar_invite(event,
+                                              invite_type='cancel').to_ical()
+
+        send_invite(ical_file, event, account, invite_type='cancel')
+
     schedule_action('delete_event', event, g.namespace.id, g.db_session,
                     event_uid=event.uid, calendar_name=event.calendar.name,
-                    calendar_uid=event.calendar.uid)
+                    calendar_uid=event.calendar.uid,
+                    notify_participants=notify_participants)
 
     return g.encoder.jsonify(None)
+
+
+@app.route('/send-rsvp', methods=['POST'])
+def event_rsvp_api():
+    data = request.get_json(force=True)
+
+    event_id = data.get('event_id')
+    valid_public_id(event_id)
+    try:
+        event = g.db_session.query(Event).filter(
+            Event.public_id == event_id,
+            Event.namespace_id == g.namespace.id).one()
+    except NoResultFound:
+        raise NotFoundError("Couldn't find event {0}".format(event_id))
+
+    if event.message is None:
+        raise InputError('This is not a message imported '
+                         'from an iCalendar invite.')
+
+    status = data.get('status')
+    if not status:
+        raise InputError('You must define a status to RSVP.')
+
+    if status not in ['yes', 'no', 'maybe']:
+        raise InputError('Invalid status %s' % status)
+
+    comment = data.get('comment', '')
+
+    # Note: this assumes that the email invite was directly addressed to us
+    # (i.e: that there's no email alias to redirect ben.bitdiddle@nylas
+    #  to ben@nylas.)
+    participants = {p["email"]: p for p in event.participants}
+
+    account = g.namespace.account
+    email = account.email_address
+
+    if email not in participants:
+        raise InputError('Cannot find %s among the participants' % email)
+
+    participant = {"email": email, "status": status, "comment": comment}
+
+    body_text = comment
+    ical_data = generate_rsvp(event, participant, account)
+
+    if ical_data is None:
+        raise APIException("Couldn't parse the attached iCalendar invite")
+
+    try:
+        send_rsvp(ical_data, event, body_text, status, account)
+    except SendMailException as exc:
+        kwargs = {}
+        if exc.failures:
+            kwargs['failures'] = exc.failures
+        if exc.server_error:
+            kwargs['server_error'] = exc.server_error
+        return err(exc.http_code, exc.message, **kwargs)
+
+    # Update the participants status too.
+    new_participants = []
+    for participant in event.participants:
+        email = participant.get("email")
+        if email is not None and email == account.email_address:
+            participant["status"] = status
+            if comment != "":
+                participant["comment"] = comment
+
+        new_participants.append(participant)
+
+    event.participants = []
+    for participant in new_participants:
+        event.participants.append(participant)
+
+    g.db_session.commit()
+    return g.encoder.jsonify(event)
 
 
 #
@@ -807,6 +1044,7 @@ def files_api():
     g.parser.add_argument('view', type=view, location='args')
 
     args = strict_parse_args(g.parser, request.args)
+
     files = filtering.files(
         namespace_id=g.namespace.id,
         message_public_id=args['message_id'],
@@ -925,9 +1163,10 @@ def file_download_api(public_id):
     try:
         name = name.encode('latin-1')
     except UnicodeEncodeError:
-        name = email.header.Header(name, 'utf-8').encode()
+        name = '=?utf-8?b?' + base64.b64encode(name.encode('utf-8')) + '?='
     response.headers['Content-Disposition'] = \
         'attachment; filename={0}'.format(name)
+
     g.log.info(response.headers)
     return response
 
@@ -936,26 +1175,26 @@ def file_download_api(public_id):
 # Calendars
 ##
 @app.route('/calendars/', methods=['GET'])
-def calendar_search_api():
+def calendar_api():
     g.parser.add_argument('view', type=view, location='args')
 
     args = strict_parse_args(g.parser, request.args)
-    if view == 'count':
+    if args['view'] == 'count':
         query = g.db_session.query(func.count(Calendar.id))
-    elif view == 'ids':
-        query = g.db_session.query(Calendar.id)
+    elif args['view'] == 'ids':
+        query = g.db_session.query(Calendar.public_id)
     else:
         query = g.db_session.query(Calendar)
 
     results = query.filter(Calendar.namespace_id == g.namespace.id). \
         order_by(asc(Calendar.id))
 
-    if view == 'count':
-        return g.encoder.jsonify({"count": results.one()[0]})
+    if args['view'] == 'count':
+        return g.encoder.jsonify({"count": results.scalar()})
 
-    results = results.limit(args['limit'])
-
-    results = results.offset(args['offset']).all()
+    results = results.limit(args['limit']).offset(args['offset']).all()
+    if args['view'] == 'ids':
+        return g.encoder.jsonify([r for r, in results])
 
     return g.encoder.jsonify(results)
 
@@ -994,13 +1233,22 @@ def draft_query_api():
                           location='args')
     g.parser.add_argument('last_message_after', type=timestamp,
                           location='args')
+    g.parser.add_argument('received_before', type=timestamp,
+                          location='args')
+    g.parser.add_argument('received_after', type=timestamp,
+                          location='args')
     g.parser.add_argument('filename', type=bounded_str, location='args')
+    g.parser.add_argument('in', type=bounded_str, location='args')
     g.parser.add_argument('thread_id', type=valid_public_id, location='args')
-    g.parser.add_argument('tag', type=bounded_str, location='args')
+    g.parser.add_argument('unread', type=strict_bool, location='args')
+    g.parser.add_argument('starred', type=strict_bool, location='args')
     g.parser.add_argument('view', type=view, location='args')
+
     args = strict_parse_args(g.parser, request.args)
-    drafts = filtering.drafts(
+
+    drafts = filtering.messages_or_drafts(
         namespace_id=g.namespace.id,
+        drafts=True,
         subject=args['subject'],
         thread_public_id=args['thread_id'],
         to_addr=args['to'],
@@ -1012,8 +1260,12 @@ def draft_query_api():
         started_after=args['started_after'],
         last_message_before=args['last_message_before'],
         last_message_after=args['last_message_after'],
+        received_before=args['received_before'],
+        received_after=args['received_after'],
         filename=args['filename'],
-        tag=args['tag'],
+        in_=args['in'],
+        unread=args['unread'],
+        starred=args['starred'],
         limit=args['limit'],
         offset=args['offset'],
         view=args['view'],
@@ -1036,7 +1288,8 @@ def draft_get_api(public_id):
 @app.route('/drafts/', methods=['POST'])
 def draft_create_api():
     data = request.get_json(force=True)
-    draft = create_draft(data, g.namespace, g.db_session, syncback=True)
+    draft = create_message_from_json(data, g.namespace, g.db_session,
+                                     is_draft=True)
     return g.encoder.jsonify(draft)
 
 
@@ -1064,12 +1317,11 @@ def draft_update_api(public_id):
 
     subject = data.get('subject')
     body = data.get('body')
-    tags = get_tags(data.get('tags'), g.namespace.id, g.db_session)
     files = get_attachments(data.get('file_ids'), g.namespace.id, g.db_session)
 
     draft = update_draft(g.db_session, g.namespace.account, original_draft,
                          to, subject, body, files, cc, bcc, from_addr,
-                         reply_to, tags)
+                         reply_to)
     return g.encoder.jsonify(draft)
 
 
@@ -1086,26 +1338,37 @@ def draft_delete_api(public_id):
 
 @app.route('/send', methods=['POST'])
 def draft_send_api():
+    request_started = time.time()
+    account = g.namespace.account
     if request.content_type == "message/rfc822":
-        msg = create_draft_from_mime(g.namespace.account, request.data,
+        msg = create_draft_from_mime(account, request.data,
                                      g.db_session)
         validate_draft_recipients(msg)
-        resp = send_raw_mime(g.namespace.account, g.db_session, msg)
+        resp = send_raw_mime(account, g.db_session, msg)
         return resp
 
     data = request.get_json(force=True)
     draft_public_id = data.get('draft_id')
     if draft_public_id is not None:
-        draft = get_draft(draft_public_id, data.get('version'), g.namespace.id,
-                          g.db_session)
+        draft = get_draft(draft_public_id, data.get('version'),
+                          g.namespace.id, g.db_session)
         schedule_action('delete_draft', draft, draft.namespace.id,
                         g.db_session, inbox_uid=draft.inbox_uid,
                         message_id_header=draft.message_id_header)
     else:
-        draft = create_draft(data, g.namespace, g.db_session, syncback=False)
-
+        draft = create_message_from_json(data, g.namespace,
+                                         g.db_session, is_draft=False)
     validate_draft_recipients(draft)
-    resp = send_draft(g.namespace.account, draft, g.db_session)
+    if isinstance(account, GenericAccount):
+        schedule_action('save_sent_email', draft, draft.namespace.id,
+                        g.db_session)
+    if time.time() - request_started > SEND_TIMEOUT:
+        # Preemptively time out the request if we got stuck doing database work
+        # -- we don't want clients to disconnect and then still send the
+        # message.
+        return err(504, 'Request timed out.')
+
+    resp = send_draft(account, draft, g.db_session)
     return resp
 
 
@@ -1113,6 +1376,7 @@ def draft_send_api():
 # Client syncing
 ##
 @app.route('/delta')
+@app.route('/delta/longpoll')
 def sync_deltas():
     g.parser.add_argument('cursor', type=valid_public_id, location='args',
                           required=True)
@@ -1120,13 +1384,25 @@ def sync_deltas():
                           location='args')
     g.parser.add_argument('include_types', type=valid_delta_object_types,
                           location='args')
-    g.parser.add_argument('wait', type=bool, default=False,
-                          location='args')
-    # TODO(emfree): should support `expand` parameter in delta endpoints.
+    g.parser.add_argument('timeout', type=int,
+                          default=LONG_POLL_REQUEST_TIMEOUT, location='args')
+    g.parser.add_argument('view', type=view, location='args')
+    # - Begin shim -
+    # Remove after folders and labels exposed in the Delta API for everybody,
+    # right now, only expose for Edgehill.
+    g.parser.add_argument('exclude_folders', type=strict_bool, location='args')
+    # - End shim -
     args = strict_parse_args(g.parser, request.args)
     exclude_types = args.get('exclude_types')
     include_types = args.get('include_types')
+    expand = args.get('view') == 'expanded'
+    # - Begin shim -
+    exclude_folders = args.get('exclude_folders')
+    if exclude_folders is None:
+        exclude_folders = True
+    # - End shim -
     cursor = args['cursor']
+    timeout = args['timeout']
 
     if include_types and exclude_types:
         return err(400, "Invalid Request. Cannot specify both include_types"
@@ -1147,11 +1423,12 @@ def sync_deltas():
     poll_interval = 1
 
     start_time = time.time()
-    while time.time() - start_time < LONG_POLL_REQUEST_TIMEOUT:
-        with session_scope() as db_session:
+    while time.time() - start_time < timeout:
+        with session_scope(g.namespace.id) as db_session:
             deltas, end_pointer = delta_sync.format_transactions_after_pointer(
                 g.namespace, start_pointer, db_session, args['limit'],
-                exclude_types, include_types)
+                exclude_types, include_types, exclude_folders,
+                legacy_nsid=g.legacy_nsid, expand=expand)
 
         response = {
             'cursor_start': cursor,
@@ -1164,7 +1441,7 @@ def sync_deltas():
             return g.encoder.jsonify(response)
 
         # No changes. perhaps wait
-        elif args['wait']:
+        elif '/delta/longpoll' in request.url_rule.rule:
             gevent.sleep(poll_interval)
         else:  # Return immediately
             response['cursor_end'] = cursor
@@ -1176,6 +1453,7 @@ def sync_deltas():
     return g.encoder.jsonify(response)
 
 
+# TODO Deprecate this
 @app.route('/delta/generate_cursor', methods=['POST'])
 def generate_cursor():
     data = request.get_json(force=True)
@@ -1197,6 +1475,15 @@ def generate_cursor():
     return g.encoder.jsonify({'cursor': cursor})
 
 
+@app.route('/delta/latest_cursor', methods=['POST'])
+def latest_cursor():
+    cursor = delta_sync.get_transaction_cursor_near_timestamp(
+        g.namespace.id,
+        int(time.time()),
+        g.db_session)
+    return g.encoder.jsonify({'cursor': cursor})
+
+
 ##
 # Streaming
 ##
@@ -1210,12 +1497,26 @@ def stream_changes():
                           location='args')
     g.parser.add_argument('include_types', type=valid_delta_object_types,
                           location='args')
+    g.parser.add_argument('view', type=view, location='args')
+    # - Begin shim -
+    # Remove after folders and labels exposed in the Delta API for everybody,
+    # right now, only expose for Edgehill.
+    g.parser.add_argument('exclude_folders', type=strict_bool, location='args')
+    # - End shim -
+
     args = strict_parse_args(g.parser, request.args)
     timeout = args['timeout'] or 1800
     transaction_pointer = None
     cursor = args['cursor']
     exclude_types = args.get('exclude_types')
     include_types = args.get('include_types')
+    expand = args.get('view') == 'expanded'
+
+    # Begin shim #
+    exclude_folders = args.get('exclude_folders')
+    if exclude_folders is None:
+        exclude_folders = True
+    # End shim #
 
     if include_types and exclude_types:
         return err(400, "Invalid Request. Cannot specify both include_types"
@@ -1239,7 +1540,8 @@ def stream_changes():
     generator = delta_sync.streaming_change_generator(
         g.namespace, transaction_pointer=transaction_pointer,
         poll_interval=1, timeout=timeout, exclude_types=exclude_types,
-        include_types=include_types)
+        include_types=include_types, exclude_folders=exclude_folders,
+        legacy_nsid=g.legacy_nsid, expand=expand)
     return Response(generator, mimetype='text/event-stream')
 
 
@@ -1251,7 +1553,6 @@ def stream_changes():
 def groups_intrinsic():
     g.parser.add_argument('force_recalculate', type=strict_bool,
                           location='args')
-    g.parser.add_argument('alias', type=bounded_str, location='args')
     args = strict_parse_args(g.parser, request.args)
     try:
         dpcache = g.db_session.query(DataProcessingCache).filter(
@@ -1265,25 +1566,17 @@ def groups_intrinsic():
     use_cached_data = (not (is_stale(last_updated) or cached_data is None) and
                        args['force_recalculate'] is not True)
 
-    # With folders update, how we get these messages should change (?)
-    from_email = g.namespace.email_address
-
     if not use_cached_data:
         last_updated = None
 
     messages = filtering.messages_for_contact_scores(
-        g.db_session, g.namespace.id, from_email, last_updated)
-    if args['alias'] is not None:
-        messages.extend(
-            filtering.messages_for_contact_scores(
-                g.db_session, g.namespace.id, args['alias'], last_updated
-            )
-        )
+        g.db_session, g.namespace.id, last_updated)
+
+    from_email = g.namespace.email_address
 
     if use_cached_data:
         result = cached_data
         new_guys = calculate_group_counts(messages, from_email)
-        # result['use_cached_data'] = -1  # debug
         for k, v in new_guys.items():
             if k in result:
                 result[k] += v
@@ -1296,7 +1589,6 @@ def groups_intrinsic():
         g.db_session.commit()
 
     result = sorted(result.items(), key=lambda x: x[1], reverse=True)
-    # result.append(('total_messages_fetched', len(messages)))  # debug
     return g.encoder.jsonify(result)
 
 
@@ -1304,7 +1596,6 @@ def groups_intrinsic():
 def contact_rankings():
     g.parser.add_argument('force_recalculate', type=strict_bool,
                           location='args')
-    g.parser.add_argument('alias', type=bounded_str, location='args')
     args = strict_parse_args(g.parser, request.args)
     try:
         dpcache = g.db_session.query(DataProcessingCache).filter(
@@ -1318,25 +1609,15 @@ def contact_rankings():
     use_cached_data = (not (is_stale(last_updated) or cached_data is None) and
                        args['force_recalculate'] is not True)
 
-    # With folders update, how we get these messages should change (?)
-    from_email = g.namespace.email_address
-
     if not use_cached_data:
         last_updated = None
 
     messages = filtering.messages_for_contact_scores(
-        g.db_session, g.namespace.id, from_email, last_updated)
-    if args['alias'] is not None:
-        messages.extend(
-            filtering.messages_for_contact_scores(
-                g.db_session, g.namespace.id, args['alias'], last_updated
-            )
-        )
+        g.db_session, g.namespace.id, last_updated)
 
     if use_cached_data:
         new_guys = calculate_contact_scores(messages, time_dependent=False)
         result = cached_data
-        # result['use_cached_data'] = -1  # debug
         for k, v in new_guys.items():
             if k in result:
                 result[k] += v
@@ -1349,5 +1630,4 @@ def contact_rankings():
         g.db_session.commit()
 
     result = sorted(result.items(), key=lambda x: x[1], reverse=True)
-    # result.append(('total messages fetched', len(messages)))  # debug
     return g.encoder.jsonify(result)

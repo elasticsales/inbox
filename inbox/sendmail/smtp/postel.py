@@ -9,15 +9,17 @@ import smtplib
 
 import requests
 
-from inbox.log import get_logger
+from nylas.logging import get_logger
+log = get_logger()
 from inbox.models.session import session_scope
 from inbox.models.backends.imap import ImapAccount
-from inbox.models.backends.oauth import token_manager
+from inbox.models.backends.oauth import token_manager as default_token_manager
+from inbox.models.backends.gmail import g_token_manager
 from inbox.sendmail.base import generate_attachments, SendMailException
 from inbox.sendmail.message import create_email
 from inbox.basicauth import OAuthError
 from inbox.providers import provider_info
-log = get_logger()
+from inbox.util.blockstore import get_from_blockstore
 
 # TODO[k]: Other types (LOGIN, XOAUTH, PLAIN-CLIENTTOKEN, CRAM-MD5)
 AUTH_EXTNS = {'oauth2': 'XOAUTH2',
@@ -35,7 +37,21 @@ SMTP_OVER_SSL_TEST_PORT = 64465
 # https://support.google.com/a/answer/3726730?hl=en
 SMTP_AUTH_SUCCESS = 235
 SMTP_AUTH_CHALLENGE = 334
-SMTP_TEMP_AUTH_FAIL = 454
+SMTP_TEMP_AUTH_FAIL_CODES = (421, 454)
+
+
+class _TokenManagerWrapper:
+
+    def get_token(self, account, force_refresh=False):
+        if account.provider == 'gmail':
+            return g_token_manager.get_token_for_email(
+                account, force_refresh=force_refresh)
+        else:
+            return default_token_manager.get_token(
+                account, force_refresh=force_refresh)
+
+
+token_manager = _TokenManagerWrapper()
 
 
 def ssl_wrap_socket(sock, server_hostname):
@@ -67,6 +83,7 @@ class SMTP_SSL_VerifyCerts(smtplib.SMTP_SSL):
     """ Derived class which connects via SSL (not starttls) and actually
         verifies SSL certificates on Python 2.
     """
+
     def connect(self, host, port):
         self._server_hostname = host
         smtplib.SMTP_SSL.connect(self, host, port)
@@ -83,11 +100,32 @@ class SMTP_SSL_VerifyCerts(smtplib.SMTP_SSL):
         self.file = smtplib.SSLFakeFile(new_socket)
         return new_socket
 
+    def rset(self):
+        """Wrap rset() in order to correctly surface SMTP exceptions.
+        SMTP.sendmail() does e.g.:
+            # ...
+            (code, resp) = self.data(msg)
+            if code != 250:
+                self.rset()
+                raise SMTPDataError(code, resp)
+            # ...
+        But some servers will disconnect rather than respond to RSET, causing
+        SMTPServerDisconnected rather than SMTPDataError to be raised. This
+        basically obfuscates the actual server error.
+
+        See also http://bugs.python.org/issue16005
+        """
+        try:
+            smtplib.SMTP_SSL.rset(self)
+        except smtplib.SMTPServerDisconnected:
+            log.warning('Server disconnect during SMTP rset', exc_info=True)
+
 
 class SMTP_VerifyCerts(smtplib.SMTP):
     """ Derived class which connects via starttls and actually
         verifies SSL certificates on Python 2.
     """
+
     def connect(self, host, port):
         self._server_hostname = host
         smtplib.SMTP.connect(self, host, port)
@@ -114,8 +152,40 @@ class SMTP_VerifyCerts(smtplib.SMTP):
             self.does_esmtp = 0
         return (resp, reply)
 
+    def rset(self):
+        """Wrap rset() in order to correctly surface SMTP exceptions.
+        SMTP.sendmail() does e.g.:
+            # ...
+            (code, resp) = self.data(msg)
+            if code != 250:
+                self.rset()
+                raise SMTPDataError(code, resp)
+            # ...
+        But some servers will disconnect rather than respond to RSET, causing
+        SMTPServerDisconnected rather than SMTPDataError to be raised. This
+        basically obfuscates the actual server error.
+
+        See also http://bugs.python.org/issue16005
+        """
+        try:
+            smtplib.SMTP.rset(self)
+        except smtplib.SMTPServerDisconnected:
+            log.warning('Server disconnect during SMTP rset', exc_info=True)
+
+
+def _transform_ssl_error(strerror):
+    """ Clean up errors like:
+
+    _ssl.c:510: error:14090086:SSL routines:SSL3_GET_SERVER_CERTIFICATE:certificate verify failed  # noqa
+    """
+    if strerror.endswith('certificate verify failed'):
+        return 'SMTP server SSL certificate verify failed'
+    else:
+        return strerror
+
 
 class SMTPConnection(object):
+
     def __init__(self, account_id, email_address, auth_type,
                  auth_token, smtp_endpoint, log):
         self.account_id = account_id
@@ -143,13 +213,8 @@ class SMTPConnection(object):
         try:
             self.connection.connect(host, port)
         except socket.error as e:
-            # clean up errors like:
-            # _ssl.c:510: error:14090086:SSL routines:SSL3_GET_SERVER_CERTIFICATE:certificate verify failed
-            if e.strerror.endswith('certificate verify failed'):
-                msg = 'SSL certificate verify failed'
-            else:
-                # 'Connection refused', etc.
-                msg = e.strerror
+            # 'Connection refused', SSL errors for non-TLS connections, etc.
+            msg = _transform_ssl_error(e.strerror)
             raise SendMailException(msg, 503)
 
     def setup(self):
@@ -167,35 +232,23 @@ class SMTPConnection(object):
                 raise SendMailException('Required SMTP STARTTLS not '
                                         'supported.', 403)
             if has_starttls:
-                self.connection.starttls()
+                try:
+                    self.connection.starttls()
+                except ssl.SSLError as e:
+                    msg = _transform_ssl_error(e.strerror)
+                    raise SendMailException(msg, 503)
 
         # Auth the connection
         self.connection.ehlo()
-        self.auth_connection()
-
-    def auth_connection(self):
-        c = self.connection
-
-        # Auth mechanisms supported by the server
-        if not c.has_extn('auth'):
-            raise SendMailException('Required SMTP AUTH not supported.', 403)
-
-        supported_types = c.esmtp_features['auth'].strip().split()
-
-        # Auth mechanism needed for this account
-        if AUTH_EXTNS.get(self.auth_type) not in supported_types:
-            raise SendMailException(
-                'Required SMTP Auth mechanism not supported.', 403)
-
         auth_handler = self.auth_handlers.get(self.auth_type)
         auth_handler()
 
     # OAuth2 authentication
     def _smtp_oauth2_try_refresh(self):
-        with session_scope() as db_session:
+        with session_scope(self.account_id) as db_session:
             account = db_session.query(ImapAccount).get(self.account_id)
-            self.auth_token = token_manager.get_token(account,
-                                                      force_refresh=True)
+            self.auth_token = token_manager.get_token(
+                account, force_refresh=True)
 
     def _try_xoauth2(self):
         auth_string = 'user={0}\1auth=Bearer {1}\1\1'.\
@@ -220,9 +273,9 @@ class SMTPConnection(object):
             self._smtp_oauth2_try_refresh()
             code, resp = self._try_xoauth2()
             # Propagate known temporary authentication issues as such.
-            if code == SMTP_TEMP_AUTH_FAIL and resp.startswith('4.7.0'):
-                raise SendMailException('Temporary error authenticating with '
-                                        'the SMTP server', 503)
+            if code in SMTP_TEMP_AUTH_FAIL_CODES and resp.startswith('4.7.0'):
+                raise SendMailException('Temporary provider send throttling',
+                                        429)
         if code != SMTP_AUTH_SUCCESS:
             raise SendMailException(
                 'Could not authenticate with the SMTP server.', 403)
@@ -237,26 +290,37 @@ class SMTPConnection(object):
         if username is None:
             username = self.email_address
 
-        # Try to auth, but if it fails with the login function, try a manual
-        # AUTH LOGIN (see: http://www.harelmalka.com/?p=94 )
         try:
             c.login(username, password)
-        except smtplib.SMTPAuthenticationError, e:
-            try:
-                c.docmd("AUTH LOGIN", base64.b64encode(username))
-                c.docmd(base64.b64encode(password), "")
-            except smtplib.SMTPAuthenticationError as e:
-                self.log.error('SMTP Auth failed')
-                raise e
+        except smtplib.SMTPAuthenticationError as e:
+            self.log.error('SMTP login refused', exc=e)
+            raise SendMailException(
+                'Could not authenticate with the SMTP server.', 403)
+        except smtplib.SMTPException as e:
+            # Raised by smtplib if the server doesn't support the AUTH
+            # extension or doesn't support any of the implemented mechanisms.
+            # Shouldn't really happen normally.
+            self.log.error('SMTP auth failed due to unsupported mechanism',
+                           exc=e)
+            raise SendMailException(str(e), 403)
 
         self.log.info('SMTP Auth(Password) success')
 
     def sendmail(self, recipients, msg):
-        return self.connection.sendmail(self.email_address, recipients, msg)
+        try:
+            return self.connection.sendmail(
+                self.email_address, recipients, msg)
+        except UnicodeEncodeError:
+            self.log.error('Unicode error when trying to decode email',
+                           logstash_tag='sendmail_encode_error',
+                           email=self.email_address, recipients=recipients)
+            raise SendMailException(
+                'Invalid character in recipient address', 402)
 
 
 class SMTPClient(object):
     """ SMTPClient for Gmail and other IMAP providers. """
+
     def __init__(self, account):
         self.account_id = account.id
         self.log = get_logger()
@@ -350,6 +414,11 @@ class SMTPClient(object):
             raise SendMailException('Sending failed', http_code=503,
                                     server_error=str(err))
 
+    def send_generated_email(self, recipients, raw_message):
+        # A tiny wrapper over _send because the API differs
+        # between SMTP and EAS.
+        return self._send(recipients, raw_message)
+
     def send(self, draft):
         """
         Turn a draft object into a MIME message and send it.
@@ -405,7 +474,8 @@ class SMTPClient(object):
         recipient_emails = [email for name, email in itertools.chain(
             msg.bcc_addr, msg.cc_addr, msg.to_addr)]
 
-        mime_body = re.sub(r'Bcc: [^\r\n]*\r\n', '', msg.full_body.data)
+        raw_message = get_from_blockstore(msg.data_sha256)
+        mime_body = re.sub(r'Bcc: [^\r\n]*\r\n', '', raw_message)
         self._send(recipient_emails, mime_body)
 
         # Sent to all successfully

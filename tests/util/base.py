@@ -1,10 +1,9 @@
 import json
 import os
-import subprocess
 import uuid
 from datetime import datetime, timedelta
 from flanker import mime
-
+from inbox.util.testutils import setup_test_db
 from pytest import fixture, yield_fixture
 
 
@@ -18,8 +17,7 @@ def absolute_path(path):
         os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', path))
 
 
-@fixture(scope='session', autouse=True)
-def config():
+def make_config():
     from inbox.config import config
     assert 'INBOX_ENV' in os.environ and \
         os.environ['INBOX_ENV'] == 'test', \
@@ -27,57 +25,43 @@ def config():
     return config
 
 
-@fixture(scope='session')
-def log(request, config):
-    """
-    Returns root server logger. For others loggers, use this fixture
-    for setup but then call inbox.log.get_logger().
-
-    Testing log file is removed at the end of the test run!
-
-    """
-    import logging
-    from inbox.util.file import mkdirp
-    root_logger = logging.getLogger()
-    for handler in root_logger.handlers:
-        root_logger.removeHandler(handler)
-
-    logdir = config.get_required('LOGDIR')
-    mkdirp(logdir)
-    logfile = config.get_required('TEST_LOGFILE')
-    fileHandler = logging.FileHandler(logfile, encoding='utf-8')
-    root_logger.addHandler(fileHandler)
-    root_logger.setLevel(logging.DEBUG)
-
-    def remove_logs():
-        try:
-            os.remove(logfile)
-        except OSError:
-            pass
-    request.addfinalizer(remove_logs)
+@fixture(scope='session', autouse=True)
+def config():
+    return make_config()
 
 
 @fixture(scope='session')
 def dbloader(config):
-    return TestDB()
+    setup_test_db()
 
 
 @yield_fixture(scope='function')
 def db(dbloader):
-    from inbox.models.session import InboxSession
-    dbloader.session = InboxSession(dbloader.engine)
-    yield dbloader
-    dbloader.session.close()
+    from inbox.ignition import engine_manager
+    from inbox.models.session import new_session
+    engine = engine_manager.get_for_id(0)
+    # TODO(emfree): tests should really either instantiate their own sessions,
+    # or take a fixture that is itself a session.
+    engine.session = new_session(engine)
+    yield engine
+    engine.session.close()
 
 
-def mock_redis_client(*args, **kwargs):
-    return None
+@yield_fixture(scope='function')
+def empty_db(config):
+    from inbox.ignition import engine_manager
+    from inbox.models.session import new_session
+    setup_test_db()
+    engine = engine_manager.get_for_id(0)
+    engine.session = new_session(engine)
+    yield engine
+    engine.session.close()
 
 
 @fixture(autouse=True)
 def mock_redis(monkeypatch):
     monkeypatch.setattr("inbox.heartbeat.store.HeartbeatStore.__init__",
-                        mock_redis_client)
+                        lambda *args, **kwargs: None)
 
 
 @yield_fixture
@@ -89,80 +73,20 @@ def test_client(db):
 
 
 @yield_fixture
-def api_client(db, default_namespace):
+def webhooks_client(db):
     from inbox.api.srv import app
     app.config['TESTING'] = True
     with app.test_client() as c:
-        yield TestAPIClient(c, default_namespace.public_id)
+        yield TestWebhooksClient(c)
 
 
-class TestAPIClient(object):
-    """Provide more convenient access to the API for testing purposes."""
-    def __init__(self, test_client, default_ns_public_id):
+class TestWebhooksClient(object):
+    def __init__(self, test_client):
         self.client = test_client
-        self.default_ns_public_id = default_ns_public_id
 
-    def full_path(self, path, ns_public_id=None):
-        """ Replace a path such as `/tags` by `/n/<ns_public_id>/tags`.
-
-        If no `ns_public_id` is specified, uses the id of the first namespace
-        returned by a call to `/n/`.
-        """
-        if ns_public_id is None:
-            ns_public_id = self.default_ns_public_id
-
-        return '/n/{}'.format(ns_public_id) + path
-
-    def get_raw(self, short_path, ns_public_id=None):
-        path = self.full_path(short_path, ns_public_id)
-        return self.client.get(path)
-
-    def get_data(self, short_path, ns_public_id=None):
-        path = self.full_path(short_path, ns_public_id)
-        return json.loads(self.client.get(path).data)
-
-    def post_data(self, short_path, data, ns_public_id=None, headers=''):
-        path = self.full_path(short_path, ns_public_id)
+    def post_data(self, path, data, headers=''):
+        path = '/w' + path
         return self.client.post(path, data=json.dumps(data), headers=headers)
-
-    def post_raw(self, short_path, data, ns_public_id=None, headers=''):
-        path = self.full_path(short_path, ns_public_id)
-        return self.client.post(path, data=data, headers=headers)
-
-    def put_data(self, short_path, data, ns_public_id=None):
-        path = self.full_path(short_path, ns_public_id)
-        return self.client.put(path, data=json.dumps(data))
-
-    def delete(self, short_path, data=None, ns_public_id=None):
-        path = self.full_path(short_path, ns_public_id)
-        return self.client.delete(path, data=json.dumps(data))
-
-
-class TestDB(object):
-    def __init__(self):
-        from inbox.ignition import main_engine
-        engine = main_engine()
-        # Set up test database
-        self.engine = engine
-
-        # Populate with test data
-        self.setup()
-
-    def setup(self):
-        from inbox.ignition import init_db
-        """
-        Creates a new, empty test database with table structure generated
-        from declarative model classes.
-
-        """
-        db_invocation = 'DROP DATABASE IF EXISTS test; ' \
-                        'CREATE DATABASE IF NOT EXISTS test ' \
-                        'DEFAULT CHARACTER SET utf8mb4 DEFAULT COLLATE ' \
-                        'utf8mb4_general_ci'
-
-        subprocess.check_call('mysql -uinboxtest -pinboxtest '
-                              '-e "{}"'.format(db_invocation), shell=True)
-        init_db(self.engine)
 
 
 @fixture
@@ -189,11 +113,13 @@ def syncback_service():
     s.join()
 
 
-@fixture(scope='function')
-def default_account(db):
+def make_default_account(db, config):
     import platform
     from inbox.models.backends.gmail import GmailAccount
-    from inbox.models import Namespace, Folder
+    from inbox.models.backends.gmail import GmailAuthCredentials
+    from inbox.auth.gmail import OAUTH_SCOPE
+    from inbox.models import Namespace
+
     ns = Namespace()
     account = GmailAccount(
         sync_host=platform.node(),
@@ -201,21 +127,63 @@ def default_account(db):
     account.namespace = ns
     account.create_emailed_events_calendar()
     account.refresh_token = 'faketoken'
-    account.inbox_folder = Folder(canonical_name='inbox', name='Inbox',
-                                  account=account)
-    account.sent_folder = Folder(canonical_name='sent', name='[Gmail]/Sent',
-                                 account=account)
-    account.drafts_folder = Folder(canonical_name='drafts',
-                                   name='[Gmail]/Drafts',
-                                   account=account)
+
+    auth_creds = GmailAuthCredentials()
+    auth_creds.client_id = config.get_required('GOOGLE_OAUTH_CLIENT_ID')
+    auth_creds.client_secret = \
+        config.get_required('GOOGLE_OAUTH_CLIENT_SECRET')
+    auth_creds.refresh_token = 'faketoken'
+    auth_creds.g_id_token = 'foo'
+    auth_creds.created_at = datetime.utcnow()
+    auth_creds.updated_at = datetime.utcnow()
+    auth_creds.gmailaccount = account
+    auth_creds.scopes = OAUTH_SCOPE
+
+    db.session.add(account)
+    db.session.add(auth_creds)
+    db.session.commit()
+    return account
+
+
+@fixture(scope='function')
+def default_account(db, config):
+    return make_default_account(db, config)
+
+
+@fixture(scope='function')
+def default_namespace(db, default_account):
+    return default_account.namespace
+
+
+@fixture(scope='function')
+def generic_account(db):
+    import platform
+    from inbox.models.backends.generic import GenericAccount
+    from inbox.models import Namespace
+    ns = Namespace()
+    account = GenericAccount(
+        email_address='inboxapptest@example.com',
+        sync_host=platform.node(),
+        provider='custom')
+    account.namespace = ns
+    account.create_emailed_events_calendar()
+    account.password = 'bananagrams'
     db.session.add(account)
     db.session.commit()
     return account
 
 
 @fixture(scope='function')
-def default_namespace(db, default_account):
-    return default_account.namespace
+def gmail_account(db):
+    from inbox.models.backends.gmail import GmailAccount
+
+    account = db.session.query(GmailAccount).first()
+    if account is None:
+        return add_fake_gmail_account(db.session,
+                                      email_address='almondsunshine',
+                                      refresh_token='tearsofgold',
+                                      password='COyPtHmj9E9bvGdN')
+    return account
 
 
 @fixture(scope='function')
@@ -257,6 +225,12 @@ class ContactsProviderStub(object):
         return self._contacts
 
 
+def add_fake_folder(db, default_account):
+    from inbox.models.folder import Folder
+    return Folder.find_or_create(db.session, default_account,
+                                 'All Mail', 'all')
+
+
 def add_fake_account(db_session, email_address='test@nilas.com'):
     from inbox.models import Account, Namespace
     namespace = Namespace()
@@ -266,11 +240,34 @@ def add_fake_account(db_session, email_address='test@nilas.com'):
     return account
 
 
+def add_fake_gmail_account(db_session, email_address='test@nilas.com',
+                           refresh_token='tearsofgold',
+                           password='COyPtHmj9E9bvGdN'):
+    from inbox.models import Namespace
+    from inbox.models.backends.gmail import GmailAccount
+    import platform
+
+    with db_session.no_autoflush:
+        namespace = Namespace()
+
+        account = GmailAccount(
+            email_address=email_address,
+            refresh_token=refresh_token,
+            sync_host=platform.node(),
+            namespace=namespace)
+        account.password = password
+
+        db_session.add(account)
+        db_session.commit()
+        return account
+
+
 def add_fake_message(db_session, namespace_id, thread=None, from_addr=None,
                      to_addr=None, cc_addr=None, bcc_addr=None,
                      received_date=None, subject='',
-                     body='', snippet=''):
-    from inbox.models import Message
+                     body='', snippet='', g_msgid=None,
+                     add_sent_category=False):
+    from inbox.models import Message, Category
     from inbox.contacts.process_mail import update_contacts_from_message
     m = Message()
     m.namespace_id = namespace_id
@@ -281,9 +278,11 @@ def add_fake_message(db_session, namespace_id, thread=None, from_addr=None,
     m.received_date = received_date or datetime.utcnow()
     m.size = 0
     m.is_read = False
+    m.is_starred = False
     m.body = body
     m.snippet = snippet
     m.subject = subject
+    m.g_msgid = g_msgid
 
     if thread:
         thread.messages.append(m)
@@ -291,6 +290,14 @@ def add_fake_message(db_session, namespace_id, thread=None, from_addr=None,
 
         db_session.add(m)
         db_session.commit()
+
+    if add_sent_category:
+        category = Category.find_or_create(
+            db_session, namespace_id, 'sent', 'sent', type_='folder')
+        if category not in m.categories:
+            m.categories.add(category)
+        db_session.commit()
+
     return m
 
 
@@ -354,6 +361,29 @@ def add_fake_event(db_session, namespace_id, calendar=None,
     return event
 
 
+def add_fake_contact(db_session, namespace_id, name='Ben Bitdiddle',
+                     email_address='inboxapptest@gmail.com', uid='22'):
+    from inbox.models import Contact
+    contact = Contact(namespace_id=namespace_id,
+                      name=name,
+                      email_address=email_address,
+                      uid=uid)
+
+    db_session.add(contact)
+    db_session.commit()
+    return contact
+
+
+def add_fake_category(db_session, namespace_id, display_name, name=None):
+    from inbox.models import Category
+    category = Category(namespace_id=namespace_id,
+                        display_name=display_name,
+                        name=name)
+    db_session.add(category)
+    db_session.commit()
+    return category
+
+
 @fixture
 def new_account(db):
     return add_fake_account(db.session)
@@ -377,6 +407,18 @@ def folder(db, default_account):
 
 
 @fixture
+def label(db, default_account):
+    from inbox.models import Label
+    return Label.find_or_create(db.session, default_account,
+                                 'Inbox', 'inbox')
+
+
+@fixture
+def contact(db, default_account):
+    return add_fake_contact(db.session, default_account.namespace.id)
+
+
+@fixture
 def imapuid(db, default_account, message, folder):
     return add_fake_imapuid(db.session, default_account.id, message,
                             folder, 2222)
@@ -385,6 +427,29 @@ def imapuid(db, default_account, message, folder):
 @fixture(scope='function')
 def calendar(db, default_account):
     return add_fake_calendar(db.session, default_account.namespace.id)
+
+
+@fixture(scope='function')
+def other_calendar(db, default_account):
+    return add_fake_calendar(db.session, default_account.namespace.id,
+                             uid='uid2', name='Calendar 2')
+
+
+@fixture(scope='function')
+def event(db, default_account):
+    return add_fake_event(db.session, default_account.namespace.id)
+
+
+@fixture(scope='function')
+def imported_event(db, default_account, message):
+    ev = add_fake_event(db.session, default_account.namespace.id)
+    ev.message = message
+    message.from_addr = [['Mick Taylor', 'mick@example.com']]
+    ev.owner = 'Mick Taylor <mick@example.com>'
+    ev.participants = [{"email": "inboxapptest@gmail.com",
+                        "name": "Inbox Apptest", "status": "noreply"}]
+    db.session.commit()
+    return ev
 
 
 def full_path(relpath):
@@ -414,4 +479,27 @@ def new_message_from_synced(db, default_account, mime_message):
                                          received_date,
                                          mime_message.to_string())
     assert new_msg.received_date == received_date
+    new_msg.is_read = True
+    new_msg.is_starred = False
     return new_msg
+
+
+def add_fake_msg_with_calendar_part(db_session, account, ics_str, thread=None):
+    from inbox.models import Message
+    parsed = mime.create.multipart('mixed')
+    parsed.append(
+        mime.create.attachment('text/calendar',
+                               ics_str,
+                               disposition=None)
+    )
+    msg = Message.create_from_synced(
+        account, 22, '[Gmail]/All Mail', datetime.utcnow(), parsed.to_string())
+    msg.from_addr = [('Ben Bitdiddle', 'ben@inboxapp.com')]
+
+    if thread is None:
+        msg.thread = add_fake_thread(db_session, account.namespace.id)
+    else:
+        msg.thread = thread
+
+    assert msg.has_attached_events
+    return msg

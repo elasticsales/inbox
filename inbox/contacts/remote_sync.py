@@ -3,7 +3,7 @@ from collections import Counter
 
 from sqlalchemy.orm.exc import NoResultFound
 
-from inbox.log import get_logger
+from nylas.logging import get_logger
 logger = get_logger()
 from inbox.models import Contact, Account
 from inbox.sync.base_sync import BaseSyncMonitor
@@ -11,7 +11,6 @@ from inbox.contacts.google import GoogleContactsProvider
 from inbox.contacts.icloud import ICloudContactsProvider
 from inbox.util.debug import bind_context
 from inbox.models.session import session_scope
-from inbox.basicauth import ValidationError
 
 
 CONTACT_SYNC_PROVIDER_MAP = {'gmail': GoogleContactsProvider,
@@ -40,6 +39,7 @@ class ContactSync(BaseSyncMonitor):
         Logging handler.
 
     """
+
     def __init__(self, email_address, provider_name, account_id, namespace_id,
                  poll_frequency=300):
         bind_context(self, 'contactsync', account_id)
@@ -56,7 +56,7 @@ class ContactSync(BaseSyncMonitor):
                                  CONTACT_SYNC_FOLDER_NAME,
                                  provider_name,
                                  poll_frequency=poll_frequency,
-                                 retry_fail_classes=[ValidationError])
+                                 scope='contacts')
 
     def sync(self):
         """Query a remote provider for updates and persist them to the
@@ -67,7 +67,7 @@ class ContactSync(BaseSyncMonitor):
         # Grab timestamp so next sync gets deltas from now
         sync_timestamp = datetime.utcnow()
 
-        with session_scope() as db_session:
+        with session_scope(self.namespace_id) as db_session:
             account = db_session.query(Account).get(self.account_id)
             last_sync_dt = account.last_synced_contacts
 
@@ -80,6 +80,15 @@ class ContactSync(BaseSyncMonitor):
                 assert new_contact.uid is not None, \
                     'Got remote item with null uid'
                 assert isinstance(new_contact.uid, basestring)
+
+                if (not new_contact.deleted and
+                        db_session.query(Contact).filter(
+                            Contact.namespace == account.namespace,
+                            Contact.email_address == new_contact.email_address,
+                            Contact.name == new_contact.name).first()):
+                    # Skip creating a new contact if we've already imported one
+                    # (e.g., from mail).
+                    continue
 
                 try:
                     existing_contact = db_session.query(Contact).filter(
@@ -103,12 +112,11 @@ class ContactSync(BaseSyncMonitor):
                     db_session.add(new_contact)
                     change_counter['added'] += 1
 
-                # Flush every 100 objects for perf
-                if sum(change_counter.values()) % 100:
-                    db_session.flush()
+                if sum(change_counter.values()) % 10:
+                    db_session.commit()
 
         # Update last sync
-        with session_scope() as db_session:
+        with session_scope(self.namespace_id) as db_session:
             account = db_session.query(Account).get(self.account_id)
             account.last_synced_contacts = sync_timestamp
 

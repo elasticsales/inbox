@@ -1,18 +1,23 @@
 import urllib
-import requests
-from imapclient import IMAPClient
 import socket
 from simplejson import JSONDecodeError
+
+import requests
+from imapclient import IMAPClient
+
+from nylas.logging import get_logger
+log = get_logger()
 from inbox.auth.base import AuthHandler
+from inbox.auth.generic import create_imap_connection
 from inbox.basicauth import ConnectionError, OAuthError
 from inbox.models.backends.oauth import token_manager
-from inbox.log import get_logger
-log = get_logger()
 
 
 class OAuthAuthHandler(AuthHandler):
+
     def connect_account(self, account):
-        """Returns an authenticated IMAP connection for the given account.
+        """
+        Returns an authenticated IMAP connection for the given account.
 
         Raises
         ------
@@ -23,9 +28,27 @@ class OAuthAuthHandler(AuthHandler):
             If another error occurred when fetching an access token.
         imapclient.IMAPClient.Error, socket.error
             If errors occurred establishing the connection or logging in.
-        """
-        conn = self.connect_to_imap(account)
 
+        """
+        conn = self._get_IMAP_connection(account)
+        self._authenticate_IMAP_connection(account, conn)
+        return conn
+
+    def _get_IMAP_connection(self, account):
+        host, port, is_secure = account.imap_endpoint
+        try:
+            conn = create_imap_connection(host, port, is_secure)
+        except (IMAPClient.Error, socket.error) as exc:
+            log.error('Error instantiating IMAP connection',
+                      account_id=account.id,
+                      email=account.email_address,
+                      imap_host=host,
+                      imap_port=port,
+                      error=exc)
+            raise
+        return conn
+
+    def _authenticate_IMAP_connection(self, account, conn):
         try:
             # Raises ValidationError if the refresh token we have is invalid.
             token = token_manager.get_token(account)
@@ -36,7 +59,6 @@ class OAuthAuthHandler(AuthHandler):
                       email=account.email_address,
                       error=exc)
             raise
-        return conn
 
     def verify_account(self, account):
         """Verifies an IMAP account by logging in."""
@@ -81,6 +103,10 @@ class OAuthAuthHandler(AuthHandler):
                 # This is raised if the user has revoked access to the
                 # application (or if the refresh token is otherwise invalid).
                 raise OAuthError('invalid_grant')
+            elif session_dict['error'] == 'deleted_client':
+                # If the developer has outright deleted their Google OAuth app
+                # ID. We treat this too as a case of 'invalid credentials'.
+                raise OAuthError('deleted_client')
             else:
                 # You can also get e.g. {"error": "internal_failure"}
                 log.error('Error renewing access token',
@@ -139,3 +165,14 @@ class OAuthAuthHandler(AuthHandler):
             raise OAuthError()
 
         return userinfo_dict
+
+
+class OAuthRequestsWrapper(requests.auth.AuthBase):
+    """Helper class for setting the Authorization header on HTTP requests."""
+
+    def __init__(self, token):
+        self.token = token
+
+    def __call__(self, r):
+        r.headers['Authorization'] = 'Bearer {}'.format(self.token)
+        return r
