@@ -30,6 +30,7 @@ setup(
         "simplejson>=3.6.0",
         "icalendar>=3.8.2",
         "simplejson>=3.6.0",
+        "imapclient==0.13",
         "Flask>=0.10.1",
         "Flask-RESTful==0.3.2",
         "pynacl>=0.2.3",
@@ -41,14 +42,9 @@ setup(
         "arrow==0.5.4",
         "statsd>=3.1",
         "boto3>=1.1.4",
-        "Pympler==0.4.2",
-        "pyopenssl>=0.15.1",
-        "gevent_openssl==1.2",
-        "backports.ssl>=0.0.7"
+        "Pympler==0.4.2"
     ],
-    dependency_links=[
-        "git+https://github.com/alekstorm/backports.ssl.git#egg=backports.ssl"
-    ],
+    dependency_links=[],
 
     include_package_data=True,
     package_data={
@@ -73,7 +69,6 @@ setup(
              'bin/start-stop-account',
              'bin/inbox-auth',
              'bin/delete-account-data',
-             'bin/alive-dead-metrics',
              'bin/create-db',
              'bin/create-test-db',
              'bin/verify-db',

@@ -27,7 +27,7 @@ iconv==1.0
 pep8==1.4.6
 flake8==2.1.0
 pyflakes==0.7.3
-pylint==1.1.0
+pylint==1.5.1
 html2text==2014.9.8
 python-magic==0.4.6
 greenlet==0.4.2
@@ -54,6 +54,3 @@ hypothesis==1.10.3
 statsd==3.1
 boto3==1.1.4
 Pympler==0.4.2
-pyopenssl>=0.15.1
-gevent_openssl==1.2
-git+https://github.com/alekstorm/backports.ssl.git#egg=backports.ssl

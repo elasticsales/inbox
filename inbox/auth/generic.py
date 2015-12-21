@@ -1,13 +1,13 @@
 import datetime
 import getpass
-from backports import ssl
-from imapclient import IMAPClient, create_default_context
+from imapclient import IMAPClient
 import socket
 
 from nylas.logging import get_logger
 log = get_logger()
 
 from inbox.auth.base import AuthHandler, account_or_none
+import inbox.auth.starttls  # noqa
 from inbox.basicauth import ValidationError, UserRecoverableConfigError
 from inbox.models import Namespace
 from inbox.models.backends.generic import GenericAccount
@@ -42,9 +42,8 @@ class GenericAuthHandler(AuthHandler):
             account.name = response['name']
         account.password = response['password']
         account.date = datetime.datetime.utcnow()
-        provider_name = self.provider_name
-        account.provider = provider_name
-        if provider_name == 'custom':
+        account.provider = self.provider_name
+        if self.provider_name == 'custom':
             account.imap_endpoint = (response['imap_server_host'],
                                      response['imap_server_port'],
                                      True)
@@ -70,6 +69,9 @@ class GenericAuthHandler(AuthHandler):
         host, port, is_secure = account.imap_endpoint
         try:
             conn = create_imap_connection(host, port, is_secure)
+            if port != 993:
+                # Raises an exception if TLS can't be established
+                conn._imap.starttls()
         except (IMAPClient.Error, socket.error) as exc:
             log.error('Error instantiating IMAP connection',
                       account_id=account.id,
@@ -213,14 +215,8 @@ def _auth_is_invalid(exc):
 
 def create_imap_connection(host, port, is_secure=True):
     use_ssl = port == 993
-
-    # TODO: certificate pinning for well known sites
-    context = create_default_context()
-    context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE
-
     conn = IMAPClient(host, port=port, use_uid=True,
-                      ssl=use_ssl, ssl_context=context, timeout=600)
+                      ssl=use_ssl, timeout=600)
     if is_secure and not use_ssl:
         # Raises an exception if TLS can't be established
         conn.starttls(context)

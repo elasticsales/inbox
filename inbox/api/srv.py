@@ -10,7 +10,7 @@ from inbox.models.session import global_session_scope
 from inbox.api.validation import (bounded_str, ValidatableArgument,
                                   strict_parse_args, limit)
 from inbox.api.validation import valid_public_id
-from inbox.api.err import err, APIException, InputError
+from inbox.api.err import APIException, InputError
 
 from metrics_api import app as metrics_api
 from ns_api import app as ns_api
@@ -48,45 +48,31 @@ for code in default_exceptions.iterkeys():
 @app.before_request
 def auth():
     """ Check for account ID on all non-root URLS """
-    if request.path in ('/accounts', '/accounts/', '/', '/n', '/n/') \
-            or request.path.startswith('/w/') \
-            or request.path.startswith('/metrics'):
+    if request.path in ('/accounts', '/accounts/', '/') \
+                       or request.path.startswith('/w/') \
+                       or request.path.startswith('/metrics'):
         return
 
-    if request.path.startswith('/n/'):
-        ns_parts = filter(None, request.path.split('/'))
-        namespace_public_id = ns_parts[1]
-        valid_public_id(namespace_public_id)
+    if not request.authorization or not request.authorization.username:
+        return make_response((
+            "Could not verify access credential.", 401,
+            {'WWW-Authenticate': 'Basic realm="API '
+             'Access Token Required"'}))
 
-        with global_session_scope() as db_session:
-            try:
-                namespace = db_session.query(Namespace) \
-                    .filter(Namespace.public_id == namespace_public_id).one()
-                g.namespace_id = namespace.id
-            except NoResultFound:
-                return err(404, "Unknown namespace ID")
+    namespace_public_id = request.authorization.username
 
-    else:
-        if not request.authorization or not request.authorization.username:
+    with global_session_scope() as db_session:
+        try:
+            valid_public_id(namespace_public_id)
+            namespace = db_session.query(Namespace) \
+                .filter(Namespace.public_id == namespace_public_id).one()
+            g.namespace_id = namespace.id
+            g.account_id = namespace.account.id
+        except NoResultFound:
             return make_response((
                 "Could not verify access credential.", 401,
                 {'WWW-Authenticate': 'Basic realm="API '
                  'Access Token Required"'}))
-
-        namespace_public_id = request.authorization.username
-
-        with global_session_scope() as db_session:
-            try:
-                valid_public_id(namespace_public_id)
-                namespace = db_session.query(Namespace) \
-                    .filter(Namespace.public_id == namespace_public_id).one()
-                g.namespace_id = namespace.id
-                g.account_id = namespace.account.id
-            except NoResultFound:
-                return make_response((
-                    "Could not verify access credential.", 401,
-                    {'WWW-Authenticate': 'Basic realm="API '
-                     'Access Token Required"'}))
 
 
 @app.after_request
@@ -102,7 +88,6 @@ def finish(response):
     return response
 
 
-@app.route('/n/')
 @app.route('/accounts/')
 def ns_all():
     """ Return all namespaces """
@@ -127,7 +112,7 @@ def ns_all():
             query = query.offset(args['offset'])
 
         namespaces = query.all()
-        encoder = APIEncoder(legacy_nsid=request.path.startswith('/n'))
+        encoder = APIEncoder()
         return encoder.jsonify(namespaces)
 
 
@@ -264,7 +249,5 @@ def logout():
 
 
 app.register_blueprint(ns_api)
-# legacy_nsid
-app.register_blueprint(ns_api, url_prefix='/n/<namespace_public_id>')
 app.register_blueprint(webhooks_api)  # /w/...
 app.register_blueprint(metrics_api)

@@ -55,11 +55,11 @@ def _strip_non_numeric(phone_number):
     return ''.join(digits)
 
 
-# CloudSearch doesn't like these characters (reasonably so!)
-non_printable_chars_regex = re.compile(
-    '[\x01\x02\x03\x04\x05\x06\x07\x08'
-    '\x0b\x0e\x10\x11\x15\x17\x19'
-    '\x1a\x1b\x1c\x1d\x1e\x1f]')
+# Comprehensive list of all unicode control chars (chars for which
+# unicodedata.category() returns 'Cc'), which cloudsearch will reject
+# Regex taken from Amazon docs:
+# http://docs.aws.amazon.com/cloudsearch/latest/developerguide/preparing-data.html#creating-document-batches
+control_chars_re = re.compile(ur'[^\u0009\u000a\u000d\u0020-\uD7FF\uE000-\uFFFD]')
 
 
 def cloudsearch_contact_repr(contact):
@@ -67,15 +67,15 @@ def cloudsearch_contact_repr(contact):
     parsed = address.parse(contact.email_address)
     name = contact.name or ''
     email_address = parsed.address if parsed else ''
-    name_contains_bad_codepoints = re.match(
-        non_printable_chars_regex, contact.name or '')
-    email_contains_bad_codepoints = re.match(
-        non_printable_chars_regex, email_address)
+    name_contains_bad_codepoints = re.search(
+        control_chars_re, contact.name or '')
+    email_contains_bad_codepoints = re.search(
+        control_chars_re, email_address)
     if name_contains_bad_codepoints or email_contains_bad_codepoints:
         log.warning("bad codepoint in contact", contact_id=contact.id,
                     name=contact.name, email_address=email_address)
-        name = non_printable_chars_regex.sub('', name)
-        email_address = non_printable_chars_regex.sub('', email_address)
+        name = control_chars_re.sub('', name)
+        email_address = control_chars_re.sub('', email_address)
     return {
         'id': contact.id,
         'namespace_id': contact.namespace_id,
