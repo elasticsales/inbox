@@ -7,7 +7,7 @@ import click
 from sqlalchemy.orm.exc import NoResultFound
 
 from inbox.models.account import Account
-from inbox.models.session import session_scope as mailsync_session_scope
+from inbox.models.session import global_session_scope as mailsync_session_scope
 
 
 @click.command()
