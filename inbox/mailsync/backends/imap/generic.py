@@ -73,6 +73,7 @@ from sqlalchemy.orm.exc import NoResultFound
 from inbox.basicauth import ValidationError
 from inbox.util.concurrency import retry_with_logging
 from inbox.util.debug import bind_context
+from inbox.util.itert import chunk
 from inbox.util.misc import or_none
 from inbox.util.threading import fetch_corresponding_thread, MAX_THREAD_LENGTH
 from inbox.util.stats import statsd_client
@@ -102,6 +103,8 @@ FAST_FLAGS_REFRESH_LIMIT = 100
 SLOW_FLAGS_REFRESH_LIMIT = 2000
 SLOW_REFRESH_INTERVAL = timedelta(seconds=3600)
 FAST_REFRESH_INTERVAL = timedelta(seconds=30)
+
+CONDSTORE_FLAGS_REFRESH_BATCH_SIZE = 200
 
 
 class FolderSyncEngine(Greenlet):
@@ -306,10 +309,9 @@ class FolderSyncEngine(Greenlet):
                 with session_scope(self.namespace_id) as db_session:
                     local_uids = common.local_uids(self.account_id, db_session,
                                                    self.folder_id)
-                    common.remove_deleted_uids(
-                        self.account_id, self.folder_id,
-                        set(local_uids).difference(remote_uids),
-                        db_session)
+                common.remove_deleted_uids(
+                    self.account_id, self.folder_id,
+                    set(local_uids).difference(remote_uids))
 
             new_uids = set(remote_uids).difference(local_uids)
             with session_scope(self.namespace_id) as db_session:
@@ -404,8 +406,8 @@ class FolderSyncEngine(Greenlet):
                 filter_by(account_id=self.account_id,
                           folder_id=self.folder_id)
             }
-            common.remove_deleted_uids(self.account_id, self.folder_id,
-                                       invalid_uids, db_session)
+        common.remove_deleted_uids(self.account_id, self.folder_id,
+                                   invalid_uids)
         self.uidvalidity = remote_uidvalidity
         self.highestmodseq = None
         self.uidnext = remote_uidnext
@@ -614,14 +616,34 @@ class FolderSyncEngine(Greenlet):
                         saved_highestmodseq=self.highestmodseq)
             return
 
-        # Highestmodseq has changed, update accordingly.
+        log.info('HIGHESTMODSEQ has changed, getting changed UIDs',
+                 new_highestmodseq=new_highestmodseq,
+                 saved_highestmodseq=self.highestmodseq)
         crispin_client.select_folder(self.folder_name, self.uidvalidity_cb)
         changed_flags = crispin_client.condstore_changed_flags(
             self.highestmodseq)
         remote_uids = crispin_client.all_uids()
+
+        # In order to be able to sync changes to tens of thousands of flags at
+        # once, we commit updates in batches. We do this in ascending order by
+        # modseq and periodically "checkpoint" our saved highestmodseq. (It's
+        # save to checkpoint *because* we go in ascending order by modseq.)
+        # That way if the process gets restarted halfway through this refresh,
+        # we don't have to completely start over. It's also slow to load many
+        # objects into the SQLAlchemy session and then issue lots of commits;
+        # we avoid that by batching.
+        flag_batches = chunk(
+            sorted(changed_flags.items(), key=lambda (k, v): v.modseq),
+            CONDSTORE_FLAGS_REFRESH_BATCH_SIZE)
+        for flag_batch in flag_batches:
+            with session_scope(self.namespace_id) as db_session:
+                common.update_metadata(self.account_id, self.folder_id,
+                                       dict(flag_batch), db_session)
+            if len(flag_batch) == CONDSTORE_FLAGS_REFRESH_BATCH_SIZE:
+                interim_highestmodseq = max(v.modseq for k, v in flag_batch)
+                self.highestmodseq = interim_highestmodseq
+
         with session_scope(self.namespace_id) as db_session:
-            common.update_metadata(self.account_id, self.folder_id,
-                                   changed_flags, db_session)
             local_uids = common.local_uids(self.account_id, db_session,
                                            self.folder_id)
             expunged_uids = set(local_uids).difference(remote_uids)
@@ -637,10 +659,8 @@ class FolderSyncEngine(Greenlet):
             if remote_uids and lastseenuid < max(remote_uids):
                 log.info('Downloading new UIDs before expunging')
                 self.get_new_uids(crispin_client)
-            with session_scope(self.namespace_id) as db_session:
-                common.remove_deleted_uids(self.account_id, self.folder_id,
-                                           expunged_uids, db_session)
-                db_session.commit()
+            common.remove_deleted_uids(self.account_id, self.folder_id,
+                                       expunged_uids)
         self.highestmodseq = new_highestmodseq
 
     def generic_refresh_flags(self, crispin_client):
@@ -670,9 +690,9 @@ class FolderSyncEngine(Greenlet):
 
         flags = crispin_client.flags(local_uids)
         expunged_uids = set(local_uids).difference(flags.keys())
+        common.remove_deleted_uids(self.account_id, self.folder_id,
+                                   expunged_uids)
         with session_scope(self.namespace_id) as db_session:
-            common.remove_deleted_uids(self.account_id, self.folder_id,
-                                       expunged_uids, db_session)
             common.update_metadata(self.account_id, self.folder_id,
                                    flags, db_session)
 
