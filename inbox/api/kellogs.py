@@ -1,13 +1,11 @@
 import arrow
 import datetime
 import calendar
-from collections import defaultdict, OrderedDict
 from json import JSONEncoder, dumps
-from flask import Response, g
+from flask import Response
 
 from inbox.models import (Message, Contact, Calendar, Event, When,
                           Thread, Namespace, Block, Category, Account)
-from inbox.models.backends.imap import ImapUid
 from inbox.models.event import (RecurringEvent, RecurringEventOverride,
                                 InflatedEvent)
 from nylas.logging import get_logger
@@ -27,20 +25,6 @@ def format_categories(categories):
              'display_name': category.api_display_name} for category in
             categories]
 
-
-def encode_imapuid(imapuid):
-    return {
-        'uid': imapuid.msg_uid,
-        'folder_name': imapuid.folder.name,
-        'folder_canonical_name': imapuid.folder.canonical_name,
-        'is_draft': imapuid.is_draft,
-        'is_seen': imapuid.is_seen,
-        'is_flagged': imapuid.is_flagged,
-        'is_recent': imapuid.is_recent,
-        'is_answered': imapuid.is_answered,
-        'extra_flags': imapuid.extra_flags,
-        'g_labels': imapuid.g_labels,
-    }
 
 def format_phone_numbers(phone_numbers):
     formatted_phone_numbers = []
@@ -163,13 +147,6 @@ def _encode(obj, namespace_public_id=None, expand=False):
             else:
                 resp['reply_to_message_id'] = None
 
-        imapuids = g.db_session.query(ImapUid).filter( \
-                       ImapUid.message_id == obj.id)
-        imap_uid_info = []
-        for imapuid in imapuids:
-            imap_uid_info.append(encode_imapuid(imapuid))
-        resp['imap_uid_info'] = imap_uid_info
-
         if expand:
             resp['headers'] = {
                 'Message-Id': obj.message_id_header,
@@ -210,22 +187,10 @@ def _encode(obj, namespace_public_id=None, expand=False):
 
         messages = obj.messages
 
-        imap_uid_info_by_msg = defaultdict(list)
-        imapuids = g.db_session.query(ImapUid).filter( \
-                       ImapUid.message_id.in_([m.id for m in messages]))
-        for imapuid in imapuids:
-            imap_uid_info_by_msg[imapuid.message_id].append( \
-                encode_imapuid(imapuid))
-
         # Expand messages within threads
         all_expanded_messages = []
         all_expanded_drafts = []
         for msg in messages:
-
-            # Skip duplicates (e.g. when a message is moved)
-            if msg.id not in imap_uid_info_by_msg:
-                continue
-
             resp = {
                 'id': msg.public_id,
                 'object': 'message',
@@ -243,7 +208,6 @@ def _encode(obj, namespace_public_id=None, expand=False):
                 'unread': not msg.is_read,
                 'starred': msg.is_starred,
                 'files': msg.api_attachment_metadata,
-                'imap_uid_info': imap_uid_info_by_msg[msg.id],
             }
             categories = format_categories(msg.categories)
             if obj.namespace.account.category_type == 'folder':
