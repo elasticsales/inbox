@@ -158,8 +158,6 @@ class SyncbackWorker(gevent.Greenlet):
     def _log_to_statsd(self, action_log_status, latency=None):
         metric_names = [
             "syncback.overall.{}".format(action_log_status),
-            "syncback.accounts.{}.{}".format(self.account_id,
-                                             action_log_status),
             "syncback.providers.{}.{}".format(self.provider, action_log_status)
         ]
 
@@ -201,6 +199,8 @@ class SyncbackWorker(gevent.Greenlet):
                     log_uncaught_errors(log, account_id=self.account_id,
                                         provider=self.provider)
                     with session_scope(self.account_id) as db_session:
+                        action_log_entry = db_session.query(ActionLog).get(
+                            self.action_log_id)
                         action_log_entry.retries += 1
                         if (action_log_entry.retries ==
                                 ACTION_MAX_NR_OF_RETRIES):

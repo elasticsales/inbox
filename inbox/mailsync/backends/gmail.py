@@ -52,9 +52,6 @@ class GmailSyncMonitor(ImapSyncMonitor):
     def __init__(self, *args, **kwargs):
         ImapSyncMonitor.__init__(self, *args, **kwargs)
 
-    def get_sync_engine_class(self, crispin_client):
-        return GmailFolderSyncEngine
-
     def save_folder_names(self, db_session, raw_folders):
         """
         Save the folders, labels present on the remote backend for an account.
