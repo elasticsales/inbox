@@ -2,10 +2,11 @@ import arrow
 import datetime
 import calendar
 from json import JSONEncoder, dumps
-from flask import Response
+from flask import Response, g
 
 from inbox.models import (Message, Contact, Calendar, Event, When,
                           Thread, Namespace, Block, Category, Account)
+from inbox.models.backends.imap import ImapUid
 from inbox.models.event import (RecurringEvent, RecurringEventOverride,
                                 InflatedEvent)
 from nylas.logging import get_logger
@@ -187,10 +188,18 @@ def _encode(obj, namespace_public_id=None, expand=False):
 
         messages = obj.messages
 
+        message_ids = [m[0] for m in g.db_session.query(ImapUid.message_id).filter(
+                ImapUid.message_id.in_([m.id for m in messages]))]
+
         # Expand messages within threads
         all_expanded_messages = []
         all_expanded_drafts = []
         for msg in messages:
+
+            # Skip duplicates (e.g. when a message is moved)
+            if msg.id not in message_ids:
+                continue
+
             resp = {
                 'id': msg.public_id,
                 'object': 'message',
