@@ -50,6 +50,7 @@ def auth():
     """ Check for account ID on all non-root URLS """
     if request.path in ('/accounts', '/accounts/', '/') \
                        or request.path.startswith('/w/') \
+                       or request.path.startswith('/n/') \
                        or request.path.startswith('/metrics'):
         return
 
@@ -166,7 +167,7 @@ def create_namespace():
         db_session.add(account)
         db_session.commit()
 
-        encoder = APIEncoder(legacy_nsid=True)
+        encoder = APIEncoder()
         return encoder.jsonify(namespace)
 
 #
@@ -231,7 +232,7 @@ def modify_namespace(namespace_public_id):
         db_session.add(account)
         db_session.commit()
 
-        encoder = APIEncoder(legacy_nsid=True)
+        encoder = APIEncoder()
         return encoder.jsonify(namespace)
 
 @app.route('/')
