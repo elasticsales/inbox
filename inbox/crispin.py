@@ -745,17 +745,6 @@ class CrispinClient(object):
 class GmailCrispinClient(CrispinClient):
     PROVIDER = 'gmail'
 
-    def _fetch_folder_list(self):
-        folders = []
-
-        # HACK for https://github.com/nylas/sync-engine/issues/156
-        for flags, delimiter, name in self.conn.list_folders():
-            if name.lower() == 'important':
-                continue
-            folders.append((flags, delimiter, name))
-
-        return folders
-
     def sync_folders(self):
         """
         Gmail-specific list of folders to sync.
