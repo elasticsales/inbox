@@ -51,6 +51,7 @@ class GmailSyncMonitor(ImapSyncMonitor):
 
     def __init__(self, *args, **kwargs):
         ImapSyncMonitor.__init__(self, *args, **kwargs)
+        self.sync_engine_class = GmailFolderSyncEngine
 
     def save_folder_names(self, db_session, raw_folders):
         """
