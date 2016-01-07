@@ -69,9 +69,6 @@ class GenericAuthHandler(AuthHandler):
         host, port, is_secure = account.imap_endpoint
         try:
             conn = create_imap_connection(host, port, is_secure)
-            if port != 993:
-                # Raises an exception if TLS can't be established
-                conn._imap.starttls()
         except (IMAPClient.Error, socket.error) as exc:
             log.error('Error instantiating IMAP connection',
                       account_id=account.id,
@@ -217,8 +214,8 @@ def _auth_is_invalid(exc):
 def create_imap_connection(host, port, is_secure=True):
     use_ssl = port == 993
     conn = IMAPClient(host, port=port, use_uid=True,
-                      ssl=use_ssl, timeout=600)
+                      ssl=use_ssl, read_timeout=600)
     if is_secure and not use_ssl:
         # Raises an exception if TLS can't be established
-        conn.starttls(context)
+        conn._imap.starttls()
     return conn
