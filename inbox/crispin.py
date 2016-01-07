@@ -509,11 +509,6 @@ class CrispinClient(object):
         criteria.
 
         """
-        if isinstance(criteria, list):
-            # XXX: Upstream Nylas is using an older imapclient version. We need
-            # to "fix" some queries so they work with newer imapclient.
-            # See https://bitbucket.org/mjs0/imapclient/commits/3aaa4cf9af7c13424031bb6d6e5d272b6a897823
-            criteria = ' '.join(criteria)
         return sorted([long(uid) for uid in self.conn.search(criteria)])
 
     def all_uids(self):
