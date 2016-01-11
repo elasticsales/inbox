@@ -28,29 +28,28 @@ def index():
         else:
             namespace = None
 
-        # Get all account IDs that aren't deleted
-        account_ids = [result[0] for result in
-            db_session.query(ImapAccount.id, ImapAccount._sync_status)
-            if result[1].get('sync_disabled_reason') != 'account deleted']
-
         accounts = db_session.query(ImapAccount) \
                    .with_polymorphic([GenericAccount])
 
         if namespace:
             accounts = accounts.filter(Account.namespace == namespace)
         else:
+            # Get all account IDs that aren't deleted
+            account_ids = [result[0] for result in
+                db_session.query(ImapAccount.id, ImapAccount._sync_status)
+                if result[1].get('sync_disabled_reason') != 'account deleted']
+
             # This is faster than fetching all accounts.
             accounts = accounts.filter(ImapAccount.id.in_(account_ids))
 
         accounts = list(accounts)
 
+        heartbeat = get_ping_status(account_ids=[acc.id for acc in accounts])
         if len(accounts) == 1:
-            heartbeat = get_ping_status(account_id=accounts[0].id)
             folder_sync_statuses = db_session.query(ImapFolderSyncStatus). \
                     filter(ImapFolderSyncStatus.account_id==accounts[0].id). \
                     join(Folder)
         else:
-            heartbeat = get_ping_status()
             folder_sync_statuses = db_session.query(ImapFolderSyncStatus). \
                     join(Folder)
 
