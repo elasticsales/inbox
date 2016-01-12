@@ -40,7 +40,14 @@ socket.setdefaulttimeout(SOCKET_TIMEOUT)
 @click.option('--process_num', default=0,
               help="This process's number in the process group: a unique "
                    "number satisfying 0 <= process_num < total_processes.")
-def main(prod, enable_tracer, config, process_num):
+@click.option('--exit-after', default=None,
+              help='A colon-separated range in minutes within which the '
+                   'process will exit. For example, if 30:60 is given, a '
+                   'random time between 30 and 60 minutes is picked after '
+                   'which the process will exit. Combined with supervisor, '
+                   'which automatically restarts terminated processes, this '
+                   'can be used to avoid memory leaks.')
+def main(prod, enable_tracer, config, process_num, exit_after):
     """ Launch the Nylas sync service. """
     configure_logging(log_level=inbox_config.get('LOGLEVEL'))
     os.environ["SENTRY_DSN"] = inbox_config.get("SENTRY_DSN", "")
@@ -86,7 +93,14 @@ def main(prod, enable_tracer, config, process_num):
     metrics_runner = MetricsRunner(port, enable_tracer, enable_profiler)
     metrics_runner.start()
 
-    sync_service = SyncService(process_num, total_processes)
+    if exit_after:
+        exit_after = exit_after.split(':')
+        exit_after_min, exit_after_max = int(exit_after[0]), int(exit_after[1])
+    else:
+        exit_after_min, exit_after_max = None, None
+    sync_service = SyncService(process_num, total_processes,
+                               exit_after_min=exit_after_min,
+                               exit_after_max=exit_after_max)
     sync_service.run()
 
     print >>sys.stderr, "\033[94mInbox exiting...\033[0m"

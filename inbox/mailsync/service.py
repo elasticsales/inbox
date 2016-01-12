@@ -33,7 +33,8 @@ class SyncService(object):
         Seconds between polls for account changes.
     """
 
-    def __init__(self, cpu_id, total_cpus, poll_interval=10):
+    def __init__(self, cpu_id, total_cpus, poll_interval=10,
+                 exit_after_min=None, exit_after_max=None):
         self.keep_running = True
         self.host = platform.node()
         self.cpu_id = cpu_id
@@ -67,6 +68,12 @@ class SyncService(object):
                 # on it will still be started.
                 self.sync_hosts_for_shards[shard['ID']] = shard.get(
                     'SYNC_HOSTS') or [self.host]
+
+        if exit_after_min and exit_after_max:
+            import random
+            exit_after = random.randint(exit_after_min*60, exit_after_max*60)
+            self.log.info('exit after', seconds=exit_after)
+            gevent.spawn_later(exit_after, self.stop)
 
     def run(self):
         if config.get('DEBUG_CONSOLE_ON'):
