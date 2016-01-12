@@ -98,14 +98,15 @@ def index():
                 progress = None
 
             sync_status = account.sync_status
-            if not sync_status.get('sync_start_time') and not sync_status.get('sync_error'):
+            is_running = sync_status['state'] == 'running'
+            if is_running and not sync_status.get('sync_start_time') and not sync_status.get('sync_error'):
                 sync_status_str = 'starting'
-            elif alive:
+            elif is_running and alive:
                 if initial_sync:
                     sync_status_str = 'initial'
                 else:
                     sync_status_str = 'running'
-            elif sync_status['state'] == 'running':
+            elif is_running:
                 sync_status_str = 'delayed'
             else:
                 sync_status_str = 'dead'
