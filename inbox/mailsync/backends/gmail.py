@@ -51,9 +51,7 @@ class GmailSyncMonitor(ImapSyncMonitor):
 
     def __init__(self, *args, **kwargs):
         ImapSyncMonitor.__init__(self, *args, **kwargs)
-
-    def get_sync_engine_class(self, crispin_client):
-        return GmailFolderSyncEngine
+        self.sync_engine_class = GmailFolderSyncEngine
 
     def save_folder_names(self, db_session, raw_folders):
         """
@@ -179,11 +177,11 @@ class GmailFolderSyncEngine(FolderSyncEngine):
                 with session_scope(self.namespace_id) as db_session:
                     local_uids = common.local_uids(self.account_id, db_session,
                                                    self.folder_id)
-                    common.remove_deleted_uids(
-                        self.account_id, self.folder_id,
-                        set(local_uids) - set(remote_uids),
-                        db_session)
-                    unknown_uids = set(remote_uids) - local_uids
+                common.remove_deleted_uids(
+                    self.account_id, self.folder_id,
+                    set(local_uids) - set(remote_uids))
+                unknown_uids = set(remote_uids) - local_uids
+                with session_scope(self.namespace_id) as db_session:
                     self.update_uid_counts(
                         db_session, remote_uid_count=len(remote_uids),
                         download_uid_count=len(unknown_uids))
@@ -196,16 +194,15 @@ class GmailFolderSyncEngine(FolderSyncEngine):
                 # Prioritize UIDs for messages in the inbox folder.
                 if len(remote_uids) < 1e6:
                     inbox_uids = set(
-                        crispin_client.search_uids(['X-GM-LABELS', 'inbox']))
+                        crispin_client.search_uids(['X-GM-LABELS inbox']))
                 else:
                     # The search above is really slow (times out) on really
                     # large mailboxes, so bound the search to messages within
                     # the past month in order to get anywhere.
-                    since = datetime.utcnow() - timedelta(days=30)
-                    inbox_uids = set(crispin_client.search_uids([
-                        'X-GM-LABELS', 'inbox',
-                        'SINCE', since]))
-
+                    since = (datetime.utcnow() - timedelta(days=30)). \
+                        strftime('%d-%b-%Y')
+                    inbox_uids = set(crispin_client.search_uids(
+                        ['X-GM-LABELS inbox', 'SINCE {}'.format(since)]))
                 uids_to_download = (sorted(unknown_uids - inbox_uids) +
                                     sorted(unknown_uids & inbox_uids))
             else:

@@ -77,12 +77,9 @@ class BaseMailSyncMonitor(Greenlet):
         self.account_id = account.id
         self.namespace_id = account.namespace.id
         self.email_address = account.email_address
-        self.provider_name = account.provider
+        self.provider_name = account.verbose_provider
 
         Greenlet.__init__(self)
-
-    def get_sync_engine_class(self, crispin_client):
-        raise NotImplementedError()
 
     def _stacktrace_debug(self):
         while True:
@@ -99,11 +96,13 @@ class BaseMailSyncMonitor(Greenlet):
 
     def _run(self):
         return retry_with_logging(self._run_impl, account_id=self.account_id,
-                                  logger=self.log)
+                                  provider=self.provider_name, logger=self.log)
 
     def _run_impl(self):
         sync = Greenlet(retry_with_logging, self.sync,
-                        account_id=self.account_id, logger=self.log)
+                        account_id=self.account_id,
+                        provider=self.provider_name,
+                        logger=self.log)
         sync.start()
         self.stacktrace_debug = spawn(self._stacktrace_debug)
 

@@ -29,7 +29,6 @@ from email.parser import HeaderParser
 from collections import namedtuple, defaultdict
 
 import gevent
-from backports import ssl
 from gevent import socket
 from gevent.lock import BoundedSemaphore
 from gevent.queue import Queue
@@ -49,9 +48,9 @@ log = get_logger()
 __all__ = ['CrispinClient', 'GmailCrispinClient']
 
 # Unify flags API across IMAP and Gmail
-Flags = namedtuple('Flags', 'flags')
+Flags = namedtuple('Flags', 'flags modseq')
 # Flags includes labels on Gmail because Gmail doesn't use \Draft.
-GmailFlags = namedtuple('GmailFlags', 'flags labels')
+GmailFlags = namedtuple('GmailFlags', 'flags labels modseq')
 GMetadata = namedtuple('GMetadata', 'g_msgid g_thrid size')
 RawMessage = namedtuple(
     'RawImapMessage',
@@ -63,21 +62,8 @@ RawFolder = namedtuple('RawFolder', 'display_name role')
 # connection pools for a given account.
 _lock_map = defaultdict(threading.Lock)
 
-# Exception classes which indicate the network connection to the IMAP
-# server is broken.
-CONN_NETWORK_EXC_CLASSES = (socket.error, ssl.SSLError)
 
-# Exception classes on which operations should be retried.
-CONN_RETRY_EXC_CLASSES = CONN_NETWORK_EXC_CLASSES + (imaplib.IMAP4.error,)
-
-# Exception classes on which connections should be discarded.
-CONN_DISCARD_EXC_CLASSES = CONN_NETWORK_EXC_CLASSES +  \
-                           (ssl.CertificateError, imaplib.IMAP4.error)
-
-# Exception classes which indicate the IMAP connection has become
-# unusable.
-CONN_UNUSABLE_EXC_CLASSES = CONN_NETWORK_EXC_CLASSES + \
-                            (ssl.CertificateError, imaplib.IMAP4.abort)
+CONN_DISCARD_EXC_CLASSES = (socket.error, imaplib.IMAP4.error)
 
 
 class FolderMissingError(Exception):
@@ -172,8 +158,8 @@ class CrispinConnectionPool(object):
             # thing to do.
             log.info('IMAP connection error; discarding connection',
                      exc_info=True)
-            if client is not None and \
-               not isinstance(exc, CONN_UNUSABLE_EXC_CLASSES):
+            if (client is not None and not
+                    isinstance(exc, (imaplib.IMAP4.abort, socket.error))):
                 try:
                     client.logout()
                 except Exception:
@@ -242,7 +228,7 @@ def _exc_callback():
 
 
 retry_crispin = functools.partial(
-    retry, retry_classes=CONN_RETRY_EXC_CLASSES, exc_callback=_exc_callback)
+    retry, retry_classes=CONN_DISCARD_EXC_CLASSES, exc_callback=_exc_callback)
 
 
 class CrispinClient(object):
@@ -621,7 +607,7 @@ class CrispinClient(object):
             seqset = uids
         data = self.conn.fetch(seqset, ['FLAGS'])
         uid_set = set(uids)
-        return {uid: Flags(ret['FLAGS'])
+        return {uid: Flags(ret['FLAGS'], None)
                 for uid, ret in data.items() if uid in uid_set}
 
     def delete_uids(self, uids):
@@ -752,22 +738,12 @@ class CrispinClient(object):
     def condstore_changed_flags(self, modseq):
         data = self.conn.fetch('1:*', ['FLAGS'],
                                modifiers=['CHANGEDSINCE {}'.format(modseq)])
-        return {uid: Flags(ret['FLAGS']) for uid, ret in data.items()}
+        return {uid: Flags(ret['FLAGS'], ret['MODSEQ'][0])
+                for uid, ret in data.items()}
 
 
 class GmailCrispinClient(CrispinClient):
     PROVIDER = 'gmail'
-
-    def _fetch_folder_list(self):
-        folders = []
-
-        # HACK for https://github.com/nylas/sync-engine/issues/156
-        for flags, delimiter, name in self.conn.list_folders():
-            if name.lower() == 'important':
-                continue
-            folders.append((flags, delimiter, name))
-
-        return folders
 
     def sync_folders(self):
         """
@@ -813,7 +789,8 @@ class GmailCrispinClient(CrispinClient):
         data = self.conn.fetch(uids, ['FLAGS', 'X-GM-LABELS'])
         uid_set = set(uids)
         return {uid: GmailFlags(ret['FLAGS'],
-                                self._decode_labels(ret['X-GM-LABELS']))
+                                self._decode_labels(ret['X-GM-LABELS']),
+                                ret['MODSEQ'][0])
                 for uid, ret in data.items() if uid in uid_set}
 
     def condstore_changed_flags(self, modseq):
@@ -832,7 +809,8 @@ class GmailCrispinClient(CrispinClient):
                     continue
                 ret = data_for_uid[uid]
             results[uid] = GmailFlags(ret['FLAGS'],
-                                      self._decode_labels(ret['X-GM-LABELS']))
+                                      self._decode_labels(ret['X-GM-LABELS']),
+                                      ret['MODSEQ'][0])
         return results
 
     def g_msgids(self, uids):
@@ -991,12 +969,13 @@ class GmailCrispinClient(CrispinClient):
         list
         """
         uids = [long(uid) for uid in
-                self.conn.search(['X-GM-THRID', g_thrid])]
+                self.conn.search('X-GM-THRID {}'.format(g_thrid))]
         # UIDs ascend over time; return in order most-recent first
         return sorted(uids, reverse=True)
 
     def find_by_header(self, header_name, header_value):
-        return self.conn.search(['HEADER', header_name, header_value])
+        criteria = ['HEADER {} {}'.format(header_name, header_value)]
+        return self.conn.search(criteria)
 
     def _decode_labels(self, labels):
         return map(imapclient.imap_utf7.decode, labels)

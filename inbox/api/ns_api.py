@@ -5,7 +5,8 @@ import gevent
 import time
 from datetime import datetime
 
-from flask import request, g, Blueprint, make_response, Response
+from flask import (request, g, Blueprint, make_response, Response,
+                   stream_with_context)
 from flask import jsonify as flask_jsonify
 from flask.ext.restful import reqparse
 from sqlalchemy import asc, func
@@ -81,22 +82,12 @@ if config.get('DEBUG_PROFILING_ON'):
     attach_pyinstrument_profiler()
 
 
-@app.url_value_preprocessor
-def pull_lang_code(endpoint, values):
-    if 'namespace_public_id' in values:
-        values.pop('namespace_public_id')
-        g.legacy_nsid = True
-    else:
-        g.legacy_nsid = False
-
-
 @app.before_request
 def start():
     engine = engine_manager.get_for_id(g.namespace_id)
     g.db_session = new_session(engine)
     g.namespace = Namespace.get(g.namespace_id, g.db_session)
-    g.encoder = APIEncoder(g.namespace.public_id,
-                           legacy_nsid=g.legacy_nsid)
+    g.encoder = APIEncoder(g.namespace.public_id)
     g.log = log.new(endpoint=request.endpoint,
                     account_id=g.namespace.account_id)
     g.parser = reqparse.RequestParser(argument_class=ValidatableArgument)
@@ -128,22 +119,6 @@ def handle_input_error(error):
                              type='invalid_request_error')
     response.status_code = error.status_code
     return response
-
-
-# TODO remove legacy_nsid
-@app.route('/n/<namespace_id>')
-def single_namespace(namespace_id):
-    if not namespace_id == g.namespace.public_id:
-        return err(404, "Unknown namespace ID")
-    valid_public_id(namespace_id)
-
-    try:
-        f = g.db_session.query(Namespace).filter(
-            Namespace.public_id == namespace_id).one()
-        return APIEncoder(namespace_id, legacy_nsid=True).jsonify(f)
-    except NoResultFound:
-        raise NotFoundError("Couldn't find namespace {0} "
-                            .format(namespace_id))
 
 
 @app.route('/account')
@@ -195,18 +170,7 @@ def thread_query_api():
     g.parser.add_argument('starred', type=strict_bool, location='args')
     g.parser.add_argument('view', type=view, location='args')
 
-    # For backwards-compatibility -- remove after deprecating tags API.
-    g.parser.add_argument('tag', type=bounded_str, location='args')
-
     args = strict_parse_args(g.parser, request.args)
-
-    # For backwards-compatibility -- remove after deprecating tags API.
-    if args['tag'] == 'unread':
-        unread = True
-        in_ = None
-    else:
-        in_ = args['in'] or args['tag']
-        unread = args['unread']
 
     threads = filtering.threads(
         namespace_id=g.namespace.id,
@@ -223,9 +187,9 @@ def thread_query_api():
         last_message_before=args['last_message_before'],
         last_message_after=args['last_message_after'],
         filename=args['filename'],
-        unread=unread,
+        unread=args['unread'],
         starred=args['starred'],
-        in_=in_,
+        in_=args['in'],
         limit=args['limit'],
         offset=args['offset'],
         view=args['view'],
@@ -233,8 +197,7 @@ def thread_query_api():
 
     # Use a new encoder object with the expand parameter set.
     encoder = APIEncoder(g.namespace.public_id,
-                         args['view'] == 'expanded',
-                         legacy_nsid=g.legacy_nsid)
+                         args['view'] == 'expanded')
     return encoder.jsonify(threads)
 
 
@@ -266,8 +229,7 @@ def thread_api(public_id):
     g.parser.add_argument('view', type=view, location='args')
     args = strict_parse_args(g.parser, request.args)
     # Use a new encoder object with the expand parameter set.
-    encoder = APIEncoder(g.namespace.public_id, args['view'] == 'expanded',
-                         legacy_nsid=g.legacy_nsid)
+    encoder = APIEncoder(g.namespace.public_id, args['view'] == 'expanded')
     try:
         valid_public_id(public_id)
         thread = g.db_session.query(Thread).filter(
@@ -334,12 +296,7 @@ def message_query_api():
     g.parser.add_argument('starred', type=strict_bool, location='args')
     g.parser.add_argument('view', type=view, location='args')
 
-    # For backwards-compatibility -- remove after deprecating tags API.
-    g.parser.add_argument('tag', type=bounded_str, location='args')
     args = strict_parse_args(g.parser, request.args)
-
-    # For backwards-compatibility -- remove after deprecating tags API.
-    in_ = args['in'] or args['tag']
 
     messages = filtering.messages_or_drafts(
         namespace_id=g.namespace.id,
@@ -358,7 +315,7 @@ def message_query_api():
         received_before=args['received_before'],
         received_after=args['received_after'],
         filename=args['filename'],
-        in_=in_,
+        in_=args['in'],
         unread=args['unread'],
         starred=args['starred'],
         limit=args['limit'],
@@ -367,8 +324,7 @@ def message_query_api():
         db_session=g.db_session)
 
     # Use a new encoder object with the expand parameter set.
-    encoder = APIEncoder(g.namespace.public_id, args['view'] == 'expanded',
-                         legacy_nsid=g.legacy_nsid)
+    encoder = APIEncoder(g.namespace.public_id, args['view'] == 'expanded')
     return encoder.jsonify(messages)
 
 
@@ -399,8 +355,7 @@ def message_search_api():
 def message_read_api(public_id):
     g.parser.add_argument('view', type=view, location='args')
     args = strict_parse_args(g.parser, request.args)
-    encoder = APIEncoder(g.namespace.public_id, args['view'] == 'expanded',
-                         legacy_nsid=g.legacy_nsid)
+    encoder = APIEncoder(g.namespace.public_id, args['view'] == 'expanded')
 
     try:
         valid_public_id(public_id)
@@ -614,80 +569,6 @@ def folder_label_delete_api(public_id):
     g.db_session.commit()
 
     return g.encoder.jsonify(None)
-
-
-# -- Begin tags API shim
-
-
-@app.route('/tags')
-def tag_query_api():
-    categories = g.db_session.query(Category). \
-        filter(Category.namespace_id == g.namespace.id)
-    resp = [
-        {'object': 'tag',
-         'name': obj.display_name,
-         'id': obj.name or obj.public_id,
-         'readonly': False} for obj in categories
-    ]
-    for item in resp:
-        if g.legacy_nsid:
-            item['namespace_id'] = g.namespace.public_id
-        else:
-            item['account_id'] = g.namespace.public_id
-    return g.encoder.jsonify(resp)
-
-
-@app.route('/tags/<public_id>')
-def tag_detail_api(public_id):
-    # Interpret former special public ids for 'canonical' tags.
-    if public_id in ('inbox', 'sent', 'archive', 'important', 'trash', 'spam',
-                     'all'):
-        category = g.db_session.query(Category). \
-            filter(Category.namespace_id == g.namespace.id,
-                   Category.name == public_id).first()
-    else:
-        category = g.db_session.query(Category). \
-            filter(Category.namespace_id == g.namespace.id,
-                   Category.public_id == public_id).first()
-    if category is None:
-        raise NotFoundError('Category {} not found'.format(public_id))
-
-    message_subquery = g.db_session.query(Message.thread_id). \
-        join(MessageCategory). \
-        filter(
-            Message.namespace_id == g.namespace.id,
-            MessageCategory.category_id == category.id).subquery()
-    thread_count = g.db_session.query(func.count(1)). \
-        select_from(Thread).filter(
-            Thread.id.in_(message_subquery)).scalar()
-
-    unread_subquery = g.db_session.query(Message.thread_id). \
-        join(MessageCategory). \
-        filter(
-            Message.namespace_id == g.namespace.id,
-            MessageCategory.category_id == category.id,
-            Message.is_read == False).subquery()  # noqa
-    unread_count = g.db_session.query(func.count(1)). \
-        select_from(Thread).filter(
-            Thread.id.in_(unread_subquery)).scalar()
-
-    to_ret = {
-        'object': 'tag',
-        'name': category.display_name,
-        'id': category.name or category.public_id,
-        'readonly': False,
-        'unread_count': unread_count,
-        'thread_count': thread_count
-    }
-
-    if g.legacy_nsid:
-        to_ret['namespace_id'] = g.namespace.public_id
-    else:
-        to_ret['account_id'] = g.namespace.public_id
-    return g.encoder.jsonify(to_ret)
-
-
-# -- End tags API shim
 
 
 #
@@ -995,6 +876,16 @@ def event_rsvp_api():
 
     if email not in participants:
         raise InputError('Cannot find %s among the participants' % email)
+
+    p = participants[email]
+
+    # Make this API idempotent.
+    if p["status"] == status:
+        if 'comment' not in p and 'comment' not in data:
+            return g.encoder.jsonify(event)
+        elif ('comment' in p and 'comment' in data and
+              p['comment'] == data['comment']):
+            return g.encoder.jsonify(event)
 
     participant = {"email": email, "status": status, "comment": comment}
 
@@ -1427,8 +1318,7 @@ def sync_deltas():
         with session_scope(g.namespace.id) as db_session:
             deltas, end_pointer = delta_sync.format_transactions_after_pointer(
                 g.namespace, start_pointer, db_session, args['limit'],
-                exclude_types, include_types, exclude_folders,
-                legacy_nsid=g.legacy_nsid, expand=expand)
+                exclude_types, include_types, exclude_folders, expand=expand)
 
         response = {
             'cursor_start': cursor,
@@ -1541,8 +1431,9 @@ def stream_changes():
         g.namespace, transaction_pointer=transaction_pointer,
         poll_interval=1, timeout=timeout, exclude_types=exclude_types,
         include_types=include_types, exclude_folders=exclude_folders,
-        legacy_nsid=g.legacy_nsid, expand=expand)
-    return Response(generator, mimetype='text/event-stream')
+        expand=expand)
+    return Response(stream_with_context(generator),
+                    mimetype='text/event-stream')
 
 
 ##

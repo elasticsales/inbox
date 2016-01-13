@@ -17,6 +17,7 @@ import json
 from StringIO import StringIO
 from flanker.mime.message.headers import MimeHeaders
 from flanker.mime.message.headers.parsing import parse_header_value
+from imapclient import IMAPClient
 from inbox.auth.generic import create_imap_connection
 from inbox.util.addr import parse_email_address_list
 from inbox.util.misc import cleanup_subject

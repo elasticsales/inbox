@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 import pytest
-from sqlalchemy import desc, inspect
+from sqlalchemy import desc
 from sqlalchemy.orm.exc import ObjectDeletedError
 from inbox.crispin import GmailFlags
 from inbox.mailsync.backends.imap.common import (remove_deleted_uids,
@@ -22,10 +22,11 @@ def marked_deleted_message(db, message):
 def test_messages_deleted_asynchronously(db, default_account, thread, message,
                                          imapuid, folder):
     msg_uid = imapuid.msg_uid
-    update_metadata(default_account.id, folder.id,
-                    {msg_uid: GmailFlags((), ('label',))}, db.session)
+    update_metadata(default_account.id, folder.id, folder.canonical_name,
+                    {msg_uid: GmailFlags((), ('label',), None)}, db.session)
     assert 'label' in [cat.display_name for cat in message.categories]
-    remove_deleted_uids(default_account.id, folder.id, [msg_uid], db.session)
+    remove_deleted_uids(default_account.id, folder.id, [msg_uid])
+    db.session.expire_all()
     assert abs((message.deleted_at - datetime.utcnow()).total_seconds()) < 2
     # Check that message categories do get updated synchronously.
     assert 'label' not in [cat.display_name for cat in message.categories]
@@ -34,11 +35,14 @@ def test_messages_deleted_asynchronously(db, default_account, thread, message,
 def test_drafts_deleted_synchronously(db, default_account, thread, message,
                                       imapuid, folder):
     message.is_draft = True
+    db.session.commit()
     msg_uid = imapuid.msg_uid
-    remove_deleted_uids(default_account.id, folder.id, [msg_uid], db.session)
+    remove_deleted_uids(default_account.id, folder.id, [msg_uid])
     db.session.expire_all()
-    assert inspect(message).deleted
-    assert inspect(thread).deleted
+    with pytest.raises(ObjectDeletedError):
+        message.id
+    with pytest.raises(ObjectDeletedError):
+        thread.id
 
 
 def test_deleting_from_a_message_with_multiple_uids(db, default_account,
@@ -57,8 +61,8 @@ def test_deleting_from_a_message_with_multiple_uids(db, default_account,
 
     assert len(message.imapuids) == 2
 
-    remove_deleted_uids(default_account.id, inbox_folder.id, [2222],
-                        db.session)
+    remove_deleted_uids(default_account.id, inbox_folder.id, [2222])
+    db.session.expire_all()
 
     assert message.deleted_at is None, \
         "The associated message should not have been marked for deletion."
@@ -71,6 +75,7 @@ def test_deletion_with_short_ttl(db, default_account, default_namespace,
                                  marked_deleted_message, thread, folder):
     handler = DeleteHandler(account_id=default_account.id,
                             namespace_id=default_namespace.id,
+                            provider_name=default_account.provider,
                             uid_accessor=lambda m: m.imapuids,
                             message_ttl=0)
     handler.check(marked_deleted_message.deleted_at + timedelta(seconds=1))
@@ -88,6 +93,7 @@ def test_non_orphaned_messages_get_unmarked(db, default_account,
                                             folder, imapuid):
     handler = DeleteHandler(account_id=default_account.id,
                             namespace_id=default_namespace.id,
+                            provider_name=default_account.provider,
                             uid_accessor=lambda m: m.imapuids,
                             message_ttl=0)
     handler.check(marked_deleted_message.deleted_at + timedelta(seconds=1))
@@ -103,6 +109,7 @@ def test_threads_only_deleted_when_no_messages_left(db, default_account,
                                                     thread, folder):
     handler = DeleteHandler(account_id=default_account.id,
                             namespace_id=default_namespace.id,
+                            provider_name=default_account.provider,
                             uid_accessor=lambda m: m.imapuids,
                             message_ttl=0)
     # Add another message onto the thread
@@ -123,6 +130,7 @@ def test_deletion_deferred_with_longer_ttl(db, default_account,
                                            folder):
     handler = DeleteHandler(account_id=default_account.id,
                             namespace_id=default_namespace.id,
+                            provider_name=default_account.provider,
                             uid_accessor=lambda m: m.imapuids,
                             message_ttl=5)
     db.session.commit()
@@ -139,6 +147,7 @@ def test_deletion_creates_revision(db, default_account, default_namespace,
     thread_id = thread.id
     handler = DeleteHandler(account_id=default_account.id,
                             namespace_id=default_namespace.id,
+                            provider_name=default_account.provider,
                             uid_accessor=lambda m: m.imapuids,
                             message_ttl=0)
     handler.check(marked_deleted_message.deleted_at + timedelta(seconds=1))
@@ -174,8 +183,8 @@ def test_deleted_labels_get_gced(db, default_account, thread, message,
 
     # Create a label with attached messages.
     msg_uid = imapuid.msg_uid
-    update_metadata(default_account.id, folder.id,
-                    {msg_uid: GmailFlags((), ('label',))}, db.session)
+    update_metadata(default_account.id, folder.id, folder.canonical_name,
+                    {msg_uid: GmailFlags((), ('label',), None)}, db.session)
 
     label_ids = []
     for cat in message.categories:
@@ -184,6 +193,7 @@ def test_deleted_labels_get_gced(db, default_account, thread, message,
 
     handler = DeleteHandler(account_id=default_account.id,
                             namespace_id=default_namespace.id,
+                            provider_name=default_account.provider,
                             uid_accessor=lambda m: m.imapuids,
                             message_ttl=0)
     handler.gc_deleted_categories()

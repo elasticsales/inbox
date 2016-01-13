@@ -28,29 +28,28 @@ def index():
         else:
             namespace = None
 
-        # Get all account IDs that aren't deleted
-        account_ids = [result[0] for result in
-            db_session.query(ImapAccount.id, ImapAccount._sync_status)
-            if result[1].get('sync_disabled_reason') != 'account deleted']
-
         accounts = db_session.query(ImapAccount) \
                    .with_polymorphic([GenericAccount])
 
         if namespace:
             accounts = accounts.filter(Account.namespace == namespace)
         else:
+            # Get all account IDs that aren't deleted
+            account_ids = [result[0] for result in
+                db_session.query(ImapAccount.id, ImapAccount._sync_status)
+                if result[1].get('sync_disabled_reason') != 'account deleted']
+
             # This is faster than fetching all accounts.
             accounts = accounts.filter(ImapAccount.id.in_(account_ids))
 
         accounts = list(accounts)
 
+        heartbeat = get_ping_status(account_ids=[acc.id for acc in accounts])
         if len(accounts) == 1:
-            heartbeat = get_ping_status(account_id=accounts[0].id)
             folder_sync_statuses = db_session.query(ImapFolderSyncStatus). \
                     filter(ImapFolderSyncStatus.account_id==accounts[0].id). \
                     join(Folder)
         else:
-            heartbeat = get_ping_status()
             folder_sync_statuses = db_session.query(ImapFolderSyncStatus). \
                     join(Folder)
 
@@ -99,14 +98,15 @@ def index():
                 progress = None
 
             sync_status = account.sync_status
-            if not sync_status.get('sync_start_time') and not sync_status.get('sync_error'):
+            is_running = sync_status['state'] == 'running'
+            if is_running and not sync_status.get('sync_start_time') and not sync_status.get('sync_error'):
                 sync_status_str = 'starting'
-            elif alive:
+            elif is_running and alive:
                 if initial_sync:
                     sync_status_str = 'initial'
                 else:
                     sync_status_str = 'running'
-            elif sync_status['state'] == 'running':
+            elif is_running:
                 sync_status_str = 'delayed'
             else:
                 sync_status_str = 'dead'

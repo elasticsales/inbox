@@ -1,15 +1,15 @@
-import gevent
 import datetime
+
+import gevent
 from sqlalchemy import func
 from nylas.logging import get_logger
+log = get_logger()
 from inbox.models import Message
 from inbox.models.category import Category
 from inbox.models.message import MessageCategory
 from inbox.models.session import session_scope
 from inbox.util.concurrency import retry_with_logging
 from inbox.util.debug import bind_context
-
-log = get_logger()
 
 DEFAULT_MESSAGE_TTL = 120
 MAX_FETCH = 1000
@@ -38,22 +38,24 @@ class DeleteHandler(gevent.Greenlet):
         `uid_accessor=lambda m: m.imapuids`
     message_ttl: int
         Number of seconds to wait after a message is marked for deletion before
-
         deleting it for good.
+
     """
 
-    def __init__(self, account_id, namespace_id, uid_accessor,
+    def __init__(self, account_id, namespace_id, provider_name, uid_accessor,
                  message_ttl=DEFAULT_MESSAGE_TTL):
         bind_context(self, 'deletehandler', account_id)
         self.account_id = account_id
         self.namespace_id = namespace_id
+        self.provider_name = provider_name
         self.uids_for_message = uid_accessor
         self.log = log.new(account_id=account_id)
         self.message_ttl = datetime.timedelta(seconds=message_ttl)
         gevent.Greenlet.__init__(self)
 
     def _run(self):
-        return retry_with_logging(self._run_impl, account_id=self.account_id)
+        return retry_with_logging(self._run_impl, account_id=self.account_id,
+                                  provider=self.provider_name)
 
     def _run_impl(self):
         while True:
@@ -131,5 +133,4 @@ class DeleteHandler(gevent.Greenlet):
 
                 if count == 0:
                     db_session.delete(cat)
-
-                db_session.commit()
+                    db_session.commit()
