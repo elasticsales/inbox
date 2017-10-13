@@ -533,13 +533,14 @@ class FolderSyncEngine(Greenlet):
                 parent_thread.messages.append(message_obj)
 
     def download_and_commit_uids(self, crispin_client, uids):
+        log.info('Committing UIDs',
+                 uid_count=len(uids), uids=uids[:5])
+
         start = datetime.utcnow()
         raw_messages = crispin_client.uids(uids)
         if not raw_messages:
             return 0
 
-        log.info('Committing UIDs',
-                 uid_count=len(uids), uids=uids[:5])
         new_uids = set()
         with self.syncmanager_lock:
             with session_scope(self.namespace_id) as db_session:
