@@ -287,6 +287,7 @@ class FolderSyncEngine(Greenlet):
             self._report_initial_sync_end()
             self.is_initial_sync = False
 
+        log.info('finished initial sync')
         return 'poll'
 
     @retry_crispin
@@ -499,10 +500,16 @@ class FolderSyncEngine(Greenlet):
                 parent_thread.messages.append(message_obj)
 
     def download_and_commit_uids(self, crispin_client, uids):
+        log.info('Committing UIDs',
+                 uid_count=len(uids), uids=uids[:5])
+
         start = datetime.utcnow()
         raw_messages = crispin_client.uids(uids)
         if not raw_messages:
             return 0
+
+        log.info('pulled raw messages',
+                 msg_count=len(raw_messages))
 
         new_uids = set()
         with self.syncmanager_lock:
@@ -519,7 +526,8 @@ class FolderSyncEngine(Greenlet):
                 db_session.commit()
 
         log.info('Committed new UIDs',
-                 new_committed_message_count=len(new_uids))
+                 new_committed_message_count=len(new_uids),
+                 new_uids=new_uids[:5])
         # If we downloaded uids, record message velocity (#uid / latency)
         if self.state == 'initial' and len(new_uids):
             self._report_message_velocity(datetime.utcnow() - start,
