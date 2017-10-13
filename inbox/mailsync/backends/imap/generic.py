@@ -65,6 +65,7 @@ from __future__ import division
 from datetime import datetime, timedelta
 from gevent import Greenlet, kill, spawn, sleep
 import imaplib
+import itertools
 from sqlalchemy import func
 from sqlalchemy.orm import load_only
 from sqlalchemy.exc import IntegrityError
@@ -527,7 +528,7 @@ class FolderSyncEngine(Greenlet):
 
         log.info('Committed new UIDs',
                  new_committed_message_count=len(new_uids),
-                 new_uids=new_uids[:5])
+                 new_uids=list(itertools.islice(new_uids, 5)))
         # If we downloaded uids, record message velocity (#uid / latency)
         if self.state == 'initial' and len(new_uids):
             self._report_message_velocity(datetime.utcnow() - start,
