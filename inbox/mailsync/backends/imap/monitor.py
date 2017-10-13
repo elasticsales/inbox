@@ -136,6 +136,7 @@ class ImapSyncMonitor(BaseMailSyncMonitor):
                                                 self.syncmanager_lock)
                 self.folder_monitors.start(thread)
 
+            # Wait here until initial sync is finished
             while not thread.state == 'poll' and not thread.ready():
                 sleep(self.heartbeat)
 
