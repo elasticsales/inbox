@@ -540,7 +540,8 @@ class FolderSyncEngine(Greenlet):
         raw_messages = crispin_client.uids(uids)
         if not raw_messages:
             return 0
-
+        log.info('pulled raw messages',
+                 msg_count=len(raw_messages))
         new_uids = set()
         with self.syncmanager_lock:
             with session_scope(self.namespace_id) as db_session:
