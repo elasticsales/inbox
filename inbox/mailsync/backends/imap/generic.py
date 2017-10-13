@@ -317,6 +317,7 @@ class FolderSyncEngine(Greenlet):
             self._report_initial_sync_end()
             self.is_initial_sync = False
 
+        log.info('finished initial sync')
         return 'poll'
 
     @retry_crispin
@@ -537,6 +538,8 @@ class FolderSyncEngine(Greenlet):
         if not raw_messages:
             return 0
 
+        log.info('Committing UIDs',
+                 uid_count=len(uids), uids=uids[:5])
         new_uids = set()
         with self.syncmanager_lock:
             with session_scope(self.namespace_id) as db_session:
@@ -552,7 +555,8 @@ class FolderSyncEngine(Greenlet):
                 db_session.commit()
 
         log.info('Committed new UIDs',
-                 new_committed_message_count=len(new_uids))
+                 new_committed_message_count=len(new_uids),
+                 new_uids=new_uids[:5])
         # If we downloaded uids, record message velocity (#uid / latency)
         if self.state == 'initial' and len(new_uids):
             self._report_message_velocity(datetime.utcnow() - start,
