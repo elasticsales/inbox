@@ -84,6 +84,7 @@ class BaseMailSyncMonitor(Greenlet):
     def _stacktrace_debug(self):
         while True:
             sleep(STACKTRACE_DEBUG_WAIT)
+            self.log.debug('greenlet count', count=len(self.folder_monitors))
             for g in self.folder_monitors:
                 frame = g.gr_frame
                 if frame:
