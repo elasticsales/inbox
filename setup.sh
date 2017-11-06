@@ -176,13 +176,15 @@ if ! ${prod}; then
 fi
 
 color '35;1' 'Ensuring setuptools and pip versions...'
-# Precise installs pip 1.0 which is unable to upgrade to any new version of pip.
+# Precise installs pip 1.0 which is unable to upgrade to any newer version of pip.
 # Therefore we upgrade pip using the get-pip.py script.
 curl https://bootstrap.pypa.io/get-pip.py | sudo python -
 hash pip
 # Need up-to-date pyparsing or upgrading pip will break pip
 # https://github.com/pypa/packaging/issues/94
 pip install 'pyparsing==2.2.0'
+# Needed by pip to install using HTTPS from github repos
+pip install 'requests==2.11.1'
 # If python-setuptools is actually the old 'distribute' fork of setuptools,
 # then the first 'pip install setuptools' will be a no-op.
 pip install 'pip==9.0.1' 'setuptools==34.3.1'
