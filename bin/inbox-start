@@ -5,7 +5,6 @@ monkey.patch_all()
 import gevent_openssl
 gevent_openssl.monkey_patch()
 
-import logging
 import os
 import socket
 import platform
@@ -29,6 +28,8 @@ from inbox.util.startup import preflight
 from nylas.logging import get_logger, configure_logging
 from inbox.mailsync.service import SyncService
 from inbox.mailsync.frontend import SyncHTTPFrontend
+
+from inbox.util.logging_helper import reconfigure_logging
 
 # Set a default timeout for sockets.
 SOCKET_TIMEOUT = 2 * 60
@@ -59,9 +60,7 @@ def main(prod, enable_tracer, enable_profiler, config, process_num, exit_after):
     """ Launch the Nylas sync service. """
     level = os.environ.get('LOGLEVEL', inbox_config.get('LOGLEVEL'))
     configure_logging(log_level=level)
-    logging.getLogger('boto').setLevel(logging.ERROR)
-    logging.getLogger('boto3').setLevel(logging.ERROR)
-    logging.getLogger('botocore').setLevel(logging.ERROR)
+    reconfigure_logging()
 
     os.environ["SENTRY_DSN"] = inbox_config.get("SENTRY_DSN", "")
 
