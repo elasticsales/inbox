@@ -5,6 +5,7 @@ monkey.patch_all()
 import gevent_openssl
 gevent_openssl.monkey_patch()
 
+import logging
 import os
 import socket
 import platform
@@ -58,6 +59,10 @@ def main(prod, enable_tracer, enable_profiler, config, process_num, exit_after):
     """ Launch the Nylas sync service. """
     level = os.environ.get('LOGLEVEL', inbox_config.get('LOGLEVEL'))
     configure_logging(log_level=level)
+    logging.getLogger('boto').setLevel(logging.ERROR)
+    logging.getLogger('boto3').setLevel(logging.ERROR)
+    logging.getLogger('botocore').setLevel(logging.ERROR)
+
     os.environ["SENTRY_DSN"] = inbox_config.get("SENTRY_DSN", "")
 
     if config is not None:
