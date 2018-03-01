@@ -50,6 +50,10 @@ def main(prod, config, process_num, syncback_id, enable_tracer,
         load_overrides(config_path)
     level = os.environ.get('LOGLEVEL', inbox_config.get('LOGLEVEL'))
     configure_logging(log_level=level)
+    logging.getLogger('boto').setLevel(logging.ERROR)
+    logging.getLogger('boto3').setLevel(logging.ERROR)
+    logging.getLogger('botocore').setLevel(logging.ERROR)
+
     os.environ["SENTRY_DSN"] = inbox_config.get("SENTRY_DSN", "")
 
     total_processes = int(os.environ.get('SYNCBACK_PROCESSES', 1))
