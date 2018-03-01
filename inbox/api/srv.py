@@ -1,3 +1,5 @@
+import logging
+
 from flask import Flask, request, jsonify, make_response, g
 from flask.ext.restful import reqparse
 from werkzeug.exceptions import default_exceptions, HTTPException
@@ -26,6 +28,9 @@ app = Flask(__name__)
 # Note that we need to set this *before* registering the blueprint.
 app.url_map.strict_slashes = False
 
+logging.getLogger('boto').setLevel(logging.ERROR)
+logging.getLogger('boto3').setLevel(logging.ERROR)
+logging.getLogger('botocore').setLevel(logging.ERROR)
 
 def default_json_error(ex):
     """ Exception -> flask JSON responder """
