@@ -223,10 +223,10 @@ class FolderSyncEngine(Greenlet):
                                              'resync loop')
                         account.sync_state = 'stopped'
                         db_session.commit()
+                    raise MailsyncDone()
                 else:
                     self.state = 'finish'
-
-                raise MailsyncDone()
+                    self.heartbeat_status.publish(state=self.state)
 
         except FolderMissingError:
             # Folder was deleted by monitor while its sync was running.
