@@ -32,7 +32,7 @@ def gevent_waiter(fd, hub=gevent.hub.get_hub()):
 
 def build_uri(username, password, hostname, port, database_name):
     uri_template = 'mysql+mysqldb://{username}:{password}@{hostname}' \
-                   ':{port}/{database_name}?charset=utf8mb4'
+                   ':{port}/{database_name}?charset=utf8mb4&ssl_mode=DISABLED'
     return uri_template.format(username=urlquote(username),
                                password=urlquote(password),
                                hostname=urlquote(hostname),
