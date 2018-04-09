@@ -93,7 +93,7 @@ class SyncbackService(gevent.Greenlet):
 
     def __init__(self, syncback_id, process_number, total_processes, poll_interval=1,
                  retry_interval=120, num_workers=NUM_PARALLEL_ACCOUNTS,
-                 batch_size=20, fetch_batch_size=10000):
+                 batch_size=40, fetch_batch_size=100000):
         self.process_number = process_number
         self.total_processes = total_processes
         self.poll_interval = poll_interval
