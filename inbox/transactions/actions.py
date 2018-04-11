@@ -89,7 +89,7 @@ INVALID_ACCOUNT_GRACE_PERIOD = 60 * 60 * 2  # 2 hours
 
 # Max amount of actionlog entries to fetch for specific records to
 # deduplicate.
-MAX_DEDUPLICATION_BATCH_SIZE = 5000
+MAX_DEDUPLICATION_BATCH_SIZE = 500
 
 
 class SyncbackService(gevent.Greenlet):
@@ -205,6 +205,10 @@ class SyncbackService(gevent.Greenlet):
 
         if has_more and action in ('move', 'mark_unread', 'change_labels'):
             # There may be more records to deduplicate.
+            self.log.debug('fetching more entries',
+                           account_id=account_id,
+                           action=action,
+                           record_id=log_entries[0].record_id)
             log_entries = db_session.query(ActionLog).filter(
                 ActionLog.discriminator == 'actionlog',
                 ActionLog.status == 'pending',
