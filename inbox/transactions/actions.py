@@ -587,7 +587,9 @@ class SyncbackTask(object):
         Process a task and return whether it executed successfully.
         """
         self.log = logger.new(
-            record_ids=self.record_ids, action_log_ids=self.action_log_ids,
+            record_ids=list(set(self.record_ids)),
+            action_log_ids=self.action_log_ids[:100],
+            n_action_log_ids=len(self.action_log_ids),
             action=self.action_name, account_id=self.account_id,
             extra_args=self.extra_args)
 
@@ -608,8 +610,18 @@ class SyncbackTask(object):
                 action_log_entries = db_session.query(ActionLog). \
                     filter(ActionLog.id.in_(action_ids_to_process))
 
+                max_latency = max_func_latency = 0
                 for action_log_entry in action_log_entries:
-                    self._mark_action_as_successful(action_log_entry, before, after, db_session)
+                    latency, func_latency = self._mark_action_as_successful(
+                            action_log_entry, before, after, db_session)
+                    if latency > max_latency:
+                        max_latency = latency
+                    if func_latency > max_func_latency:
+                        max_func_latency = func_latency
+                self.log.info('syncback action completed',
+                              latency=max_latency,
+                              process=self.parent_service().process_number,
+                              func_latency=max_func_latency)
                 return True
         except:
             log_uncaught_errors(self.log, account_id=self.account_id,
@@ -672,11 +684,8 @@ class SyncbackTask(object):
         db_session.commit()
         latency = round((datetime.utcnow() - action_log_entry.created_at).total_seconds(), 2)
         func_latency = round((after - before).total_seconds(), 2)
-        self.log.info('syncback action completed',
-                      latency=latency,
-                      process=self.parent_service().process_number,
-                      func_latency=func_latency)
         self._log_to_statsd(action_log_entry.status, latency)
+        return (latency, func_latency)
 
     def _mark_action_as_failed(self, action_log_entry, db_session):
         self.log.critical('Max retries reached, giving up.', exc_info=True)
