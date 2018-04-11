@@ -84,7 +84,7 @@ def function_for_action(action):
 
 
 ACTION_MAX_NR_OF_RETRIES = 5
-NUM_PARALLEL_ACCOUNTS = 500
+NUM_PARALLEL_ACCOUNTS = 5000
 INVALID_ACCOUNT_GRACE_PERIOD = 60 * 60 * 2  # 2 hours
 
 # Max amount of actionlog entries to fetch for specific records to
