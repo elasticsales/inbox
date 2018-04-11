@@ -216,7 +216,7 @@ class SyncbackService(gevent.Greenlet):
                 ActionLog.action == action,
                 ActionLog.record_id == log_entries[0].record_id).\
                 order_by(ActionLog.id).\
-                limit(MAX_DEDUPLICATION_BATCH_SIZE)
+                limit(MAX_DEDUPLICATION_BATCH_SIZE).all()
 
         record_ids = [l.record_id for l in log_entries]
 
