@@ -66,5 +66,5 @@ class ActionLog(MailSyncBase, UpdatedAtMixin, DeletedAtMixin):
                        'polymorphic_on': discriminator}
 
 
-Index('ix_actionlog_status_retries', ActionLog.status, ActionLog.retries)
-Index('idx_actionlog_status_type', ActionLog.status, ActionLog.discriminator)
+Index('ix_actionlog_status_namespace_id_record_id', ActionLog.status,
+      ActionLog.namespace_id, ActionLog.record_id)
