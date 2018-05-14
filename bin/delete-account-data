@@ -64,7 +64,7 @@ def delete_account_data(account_id, dry_run, yes):
     # Delete data in database
     try:
         print 'Deleting database data'
-        delete_namespace(account_id, namespace_id, dry_run=dry_run)
+        delete_namespace(namespace_id, dry_run=dry_run)
     except Exception as e:
         print 'Database data deletion failed! Error: {}'.format(str(e))
         return -1
