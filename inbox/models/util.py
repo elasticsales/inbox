@@ -288,7 +288,7 @@ def _batch_delete(engine, table, column_id_filters, account_id, throttle=False,
 
                 query = db_session.query(Block).filter(Block.id.in_(block_ids))
                 if dry_run is False:
-                    query.delete()
+                    query.delete(synchronize_session=False)
 
         elif table == 'message':
             with session_scope(account_id) as db_session:
@@ -315,7 +315,7 @@ def _batch_delete(engine, table, column_id_filters, account_id, throttle=False,
 
                 query = db_session.query(Message).filter(Message.id.in_(message_ids))
                 if dry_run is False:
-                    query.delete()
+                    query.delete(synchronize_session=False)
 
         else:
             if dry_run is False:
