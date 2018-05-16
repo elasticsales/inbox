@@ -140,3 +140,11 @@ def _get_from_disk(data_sha256):
     except IOError:
         log.warning('No file with name: {}!'.format(data_sha256))
         return
+
+
+def delete_from_blockstore(data_sha256):
+    log.info('deleting from blockstore', sha256=data_sha256)
+    if STORE_MSG_ON_S3:
+        print('on s3')
+    else:
+        print('not on s3')

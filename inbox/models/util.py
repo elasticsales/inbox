@@ -4,10 +4,12 @@ import gevent
 import requests
 import datetime
 from collections import OrderedDict
+from sqlalchemy import desc
 from sqlalchemy.orm.exc import NoResultFound
 
 from inbox.config import config
-from inbox.models import Account, Namespace
+from inbox.models import Account, Block, Message, Namespace
+from inbox.util.blockstore import delete_from_blockstore
 from inbox.util.stats import statsd_client
 from inbox.models.session import session_scope
 from nylas.logging.sentry import log_uncaught_errors
@@ -185,7 +187,7 @@ def delete_namespace(namespace_id, throttle=False, dry_run=False):
     engine = engine_manager.get_for_id(namespace_id)
 
     for cls in filters:
-        _batch_delete(engine, cls, filters[cls], throttle=throttle,
+        _batch_delete(engine, cls, filters[cls], account_id, throttle=throttle,
                       dry_run=dry_run)
 
     # Use a single delete for the other tables. Rows from tables which contain
@@ -236,7 +238,7 @@ def delete_namespace(namespace_id, throttle=False, dry_run=False):
                          time.time() - start_time)
 
 
-def _batch_delete(engine, table, column_id_filters, throttle=False,
+def _batch_delete(engine, table, column_id_filters, account_id, throttle=False,
                   dry_run=False):
     (column, id_) = column_id_filters
     count = engine.execute(
@@ -253,27 +255,83 @@ def _batch_delete(engine, table, column_id_filters, throttle=False,
              batches=batches)
     start = time.time()
 
-    query = 'DELETE FROM {} WHERE {}={} LIMIT 2000;'.format(table, column, id_)
-    log.info('Deletion query', query=query)
+    if table == 'message':
+        query = ('DELETE FROM message WHERE {}={} '
+                 'ORDER BY received_date desc LIMIT {};'
+                 .format(column, id_, CHUNK_SIZE))
+    if table in ('message', 'block'):
+        query = ''
+    else:
+        query = 'DELETE FROM {} WHERE {}={} LIMIT {};'.format(table, column, id_, CHUNK_SIZE)
+
+    log.info('deleting', account_id=account_id, table=table)
 
     for i in range(0, batches):
         if throttle and check_throttle():
             log.info("Throttling deletion")
             gevent.sleep(60)
-        if dry_run is False:
-            if table == "message":
+
+        if table == 'block':
+            with session_scope(account_id) as db_session:
+                blocks = list(db_session.query(Block.id, Block.data_sha256)
+                                        .filter(Block.namespace_id == id_)
+                                        .limit(CHUNK_SIZE))
+                blocks = list(blocks)
+                block_ids = [b[0] for b in blocks]
+                block_hashes = [b[1] for b in blocks]
+
+                # XXX: We currently don't check for existing blocks.
+
+                if dry_run is False:
+                    for data_sha256 in block_hashes:
+                        delete_from_blockstore(data_sha256)
+
+                query = db_session.query(Block).filter(Block.id.in_(block_ids))
+                if dry_run is False:
+                    query.delete()
+
+        elif table == 'message':
+            with session_scope(account_id) as db_session:
                 # messages must be order by the foreign key `received_date`
                 # otherwise MySQL will raise an error when deleting
                 # from the message table
-                query = ('DELETE FROM message WHERE {}={} '
-                         'ORDER BY received_date desc LIMIT 2000;'
-                         .format(column, id_))
-            engine.execute(query)
+                messages = list(db_session.query(Message.id, Message.data_sha256)
+                                          .filter(Message.namespace_id == id_)
+                                          .order_by(desc(Message.received_date))
+                                          .limit(CHUNK_SIZE))
+                message_ids = [m[0] for m in messages]
+                message_hashes = [m[1] for m in messages]
+
+                existing_hashes = list(db_session.query(Message.data_sha256)
+                            .filter(Message.data_sha256.in_(message_hashes))
+                            .filter(Message.namespace_id != id_)
+                            .distinct())
+                existing_hashes = [h[0] for h in existing_hashes]
+
+                remove_hashes = set(message_hashes) - set(existing_hashes)
+                if dry_run is False:
+                    for data_sha256 in remove_hashes:
+                        delete_from_blockstore(data_sha256)
+
+                query = db_session.query(Message).filter(Message.id.in_(message_ids))
+                if dry_run is False:
+                    query.delete()
+
         else:
-            log.debug(query)
+            if dry_run is False:
+                engine.execute(query)
+            else:
+                log.debug(query)
 
     end = time.time()
     log.info('Completed batch deletion', time=end - start, table=table)
+
+    count = engine.execute(
+        'SELECT COUNT(*) FROM {} WHERE {}={};'.format(table, column, id_)).\
+        scalar()
+
+    if dry_run is False:
+        assert count == 0
 
 
 def check_throttle():
