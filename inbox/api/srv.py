@@ -263,6 +263,7 @@ def delete_account(namespace_public_id):
                 .filter(Namespace.public_id == namespace_public_id).one()
             account = namespace.account
             account.mark_for_deletion()
+            db_session.commit()
     except NoResultFound:
         raise NotFoundError("Couldn't find account `{0}` ".format(namespace_public_id))
 

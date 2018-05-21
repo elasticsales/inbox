@@ -255,10 +255,6 @@ def _batch_delete(engine, table, column_id_filters, account_id, throttle=False,
              batches=batches)
     start = time.time()
 
-    if table == 'message':
-        query = ('DELETE FROM message WHERE {}={} '
-                 'ORDER BY received_date desc LIMIT {};'
-                 .format(column, id_, CHUNK_SIZE))
     if table in ('message', 'block'):
         query = ''
     else:
@@ -283,8 +279,7 @@ def _batch_delete(engine, table, column_id_filters, account_id, throttle=False,
                 # XXX: We currently don't check for existing blocks.
 
                 if dry_run is False:
-                    for data_sha256 in block_hashes:
-                        delete_from_blockstore(data_sha256)
+                    delete_from_blockstore(*block_hashes)
 
                 query = db_session.query(Block).filter(Block.id.in_(block_ids))
                 if dry_run is False:
@@ -299,20 +294,21 @@ def _batch_delete(engine, table, column_id_filters, account_id, throttle=False,
                                           .filter(Message.namespace_id == id_)
                                           .order_by(desc(Message.received_date))
                                           .limit(CHUNK_SIZE))
-                message_ids = [m[0] for m in messages]
-                message_hashes = [m[1] for m in messages]
 
-                existing_hashes = list(db_session.query(Message.data_sha256)
-                            .filter(Message.data_sha256.in_(message_hashes))
-                            .filter(Message.namespace_id != id_)
-                            .distinct())
-                existing_hashes = [h[0] for h in existing_hashes]
+            message_ids = [m[0] for m in messages]
+            message_hashes = [m[1] for m in messages]
 
-                remove_hashes = set(message_hashes) - set(existing_hashes)
-                if dry_run is False:
-                    for data_sha256 in remove_hashes:
-                        delete_from_blockstore(data_sha256)
+            existing_hashes = list(db_session.query(Message.data_sha256)
+                        .filter(Message.data_sha256.in_(message_hashes))
+                        .filter(Message.namespace_id != id_)
+                        .distinct())
+            existing_hashes = [h[0] for h in existing_hashes]
 
+            remove_hashes = set(message_hashes) - set(existing_hashes)
+            if dry_run is False:
+                delete_from_blockstore(*list(remove_hashes))
+
+            with session_scope(account_id) as db_session:
                 query = db_session.query(Message).filter(Message.id.in_(message_ids))
                 if dry_run is False:
                     query.delete(synchronize_session=False)
