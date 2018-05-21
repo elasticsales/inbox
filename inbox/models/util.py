@@ -272,15 +272,15 @@ def _batch_delete(engine, table, column_id_filters, account_id, throttle=False,
                 blocks = list(db_session.query(Block.id, Block.data_sha256)
                                         .filter(Block.namespace_id == id_)
                                         .limit(CHUNK_SIZE))
-                blocks = list(blocks)
-                block_ids = [b[0] for b in blocks]
-                block_hashes = [b[1] for b in blocks]
+            blocks = list(blocks)
+            block_ids = [b[0] for b in blocks]
+            block_hashes = [b[1] for b in blocks]
 
-                # XXX: We currently don't check for existing blocks.
+            # XXX: We currently don't check for existing blocks.
+            if dry_run is False:
+                delete_from_blockstore(*block_hashes)
 
-                if dry_run is False:
-                    delete_from_blockstore(*block_hashes)
-
+            with session_scope(account_id) as db_session:
                 query = db_session.query(Block).filter(Block.id.in_(block_ids))
                 if dry_run is False:
                     query.delete(synchronize_session=False)
@@ -298,10 +298,11 @@ def _batch_delete(engine, table, column_id_filters, account_id, throttle=False,
             message_ids = [m[0] for m in messages]
             message_hashes = [m[1] for m in messages]
 
-            existing_hashes = list(db_session.query(Message.data_sha256)
-                        .filter(Message.data_sha256.in_(message_hashes))
-                        .filter(Message.namespace_id != id_)
-                        .distinct())
+            with session_scope(account_id) as db_session:
+                existing_hashes = list(db_session.query(Message.data_sha256)
+                            .filter(Message.data_sha256.in_(message_hashes))
+                            .filter(Message.namespace_id != id_)
+                            .distinct())
             existing_hashes = [h[0] for h in existing_hashes]
 
             remove_hashes = set(message_hashes) - set(existing_hashes)
