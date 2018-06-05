@@ -7,6 +7,10 @@ from collections import OrderedDict
 from sqlalchemy import desc
 from sqlalchemy.orm.exc import NoResultFound
 
+import redis
+
+import limitlion
+
 from inbox.config import config
 from inbox.models import Account, Block, Message, Namespace
 from inbox.util.blockstore import delete_from_blockstore
@@ -21,6 +25,14 @@ from nylas.logging import get_logger
 CHUNK_SIZE = 1000
 
 log = get_logger()
+
+# Use a single Redis instance for rate limiting.  Limits will be applied across
+# all db shards (same approach as the original check_throttle()).
+redis_limitlion = redis.Redis(config.get('THROTTLE_REDIS_HOSTNAME'),
+                              int(config.get('REDIS_PORT')),
+                              db=config.get('THROTTLE_REDIS_DB'))
+limitlion.throttle_configure(redis_limitlion)
+bulk_throttle = limitlion.throttle_wait('bulk', rps=10)
 
 
 def reconcile_message(new_message, session):
@@ -210,9 +222,8 @@ def delete_namespace(namespace_id, throttle=False, dry_run=False):
         log.info('Performing bulk deletion', table=table)
         start = time.time()
 
-        if throttle and check_throttle():
-            log.info("Throttling deletion")
-            gevent.sleep(60)
+        if throttle:
+            bulk_throttle()
 
         if not dry_run:
             engine.execute(query.format(table, column, id_))
@@ -263,9 +274,8 @@ def _batch_delete(engine, table, column_id_filters, account_id, throttle=False,
     log.info('deleting', account_id=account_id, table=table)
 
     for i in range(0, batches):
-        if throttle and check_throttle():
-            log.info("Throttling deletion")
-            gevent.sleep(60)
+        if throttle:
+            bulk_throttle()
 
         if table == 'block':
             with session_scope(account_id) as db_session:
@@ -362,9 +372,9 @@ def purge_transactions(shard_id, days_ago=60, limit=1000, throttle=False,
         # delete from rows until there are no more rows affected
         rowcount = 1
         while rowcount > 0:
-            while throttle and check_throttle():
-                log.info("Throttling deletion")
-                gevent.sleep(60)
+            if throttle:
+                bulk_throttle()
+
             with session_scope_by_shard_id(shard_id, versioned=False) as \
                     db_session:
                 if dry_run:
