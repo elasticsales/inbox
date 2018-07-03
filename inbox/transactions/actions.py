@@ -415,8 +415,7 @@ class SyncbackService(gevent.Greenlet):
                         ActionLog.discriminator == 'actionlog',
                         ActionLog.status == 'pending',
                         ActionLog.namespace_id == ns_id).order_by(ActionLog.id).\
-                        limit(self.fetch_batch_size).\
-                        with_hint(ActionLog, 'use index (ix_actionlog_namespace_id_status_type)')
+                        limit(self.fetch_batch_size)
                     task = self._batch_log_entries(db_session, query.all())
                     if task is not None:
                         self.task_queue.put(task)
