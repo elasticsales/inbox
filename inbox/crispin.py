@@ -593,7 +593,7 @@ class CrispinClient(object):
             'inbox': 'inbox',
             'drafts': 'drafts',
             'draft': 'drafts',
-            u'Entw\xfcrfe': 'drafts',
+            u'entw\xfcrfe': 'drafts',
             'junk': 'spam',
             'spam': 'spam',
             'archive': 'archive',
