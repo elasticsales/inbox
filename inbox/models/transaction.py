@@ -79,11 +79,19 @@ def create_revision(obj, session, revision_type):
     # Always create a Transaction record -- this maintains a total ordering over
     # all events for an account.
 
-    # Use object updated date for the transaction date if available,
+    # If available use object dates for the transaction timestamp
     # otherwise use DB time. This is needed because CURRENT_TIMESTAMP
-    # changes during a transaction.
-    created_at = getattr(obj, 'updated_at', None)
-    if created_at is None:
+    # changes during a transaction which can lead to inconsistencies
+    # between object timestamps and the transaction timestamps.
+    if revision_type == 'insert':
+        # Use the create date for new objects in case they get
+        # updated during the same transaction. This should be the
+        # earliest of the two dates.
+        created_at = getattr(obj, 'created_at', func.now())
+    elif revision_type == 'update':
+        created_at = getattr(obj, 'updated_at', func.now())
+    else:
+        # Deleted objects get current timestamp
         created_at = func.now()
 
     revision = Transaction(command=revision_type, record_id=obj.id,
