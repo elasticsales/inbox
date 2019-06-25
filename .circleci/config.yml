@@ -8,6 +8,7 @@ jobs:
           MYSQL_ROOT_PASSWORD: nylas_it
           MYSQL_USER: inboxtest
           MYSQL_PASSWORD: inboxtest
+          MYSQL_DATABASE: synctest
     working_directory: ~/inbox
 
     steps:
@@ -17,7 +18,7 @@ jobs:
           name: install dependencies
           command: |
             DEBIAN_FRONTEND=noninteractive apt-get update
-            apt-get install -y liblua5.2-dev
+            apt-get install -y liblua5.2-dev mysql-client
             virtualenv venv
             . venv/bin/activate
             pip install sphinx
@@ -27,4 +28,4 @@ jobs:
           name: run tests
           command: |
             . venv/bin/activate
-            tox
+            NYLAS_ENV=test py.test tests
