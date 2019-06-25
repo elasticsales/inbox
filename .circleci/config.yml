@@ -22,7 +22,7 @@ jobs:
             virtualenv venv
             . venv/bin/activate
             pip install sphinx
-            pip install -r requirements_frozen.txt
+            pip install -r requirements_frozen.txt -e .
 
       - run:
           name: MySQL perms
