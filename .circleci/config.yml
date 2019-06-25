@@ -18,6 +18,7 @@ jobs:
           command: |
             virtualenv venv
             . venv/bin/activate
+            pip install sphinx
             pip install -r requirements_frozen.txt
 
       - run:
