@@ -1,0 +1,24 @@
+version: 2.1
+jobs:
+  build:
+    docker:
+      - image: python:2.7
+      - image: mysql:5.7.19
+
+    working_directory: ~/inbox
+
+    steps:
+      - checkout
+
+      - run:
+          name: install dependencies
+          command: |
+            python -m venv venv
+            . venv/bin/activate
+            pip install -r requirements_frozen.txt
+
+      - run:
+          name: run tests
+          command: |
+            . venv/bin/activate
+            tox
