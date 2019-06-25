@@ -25,6 +25,11 @@ jobs:
             pip install -r requirements_frozen.txt
 
       - run:
+          name: MySQL perms
+          command: |
+            mysql -h 127.0.0.1 -uroot -pnylas_it -e "GRANT ALL PRIVILEGES ON synctest_1.* TO 'inboxtest'@'%';"
+
+      - run:
           name: run tests
           command: |
             . venv/bin/activate
