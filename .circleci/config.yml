@@ -4,7 +4,10 @@ jobs:
     docker:
       - image: python:2.7
       - image: mysql:5.7.19
-
+        environment:
+          MYSQL_ROOT_PASSWORD: nylas_it
+          MYSQL_USER: inboxtest
+          MYSQL_PASSWORD: inboxtest
     working_directory: ~/inbox
 
     steps:
@@ -13,7 +16,7 @@ jobs:
       - run:
           name: install dependencies
           command: |
-            python -m venv venv
+            virtualenv venv
             . venv/bin/activate
             pip install -r requirements_frozen.txt
 
