@@ -33,4 +33,4 @@ jobs:
           name: run tests
           command: |
             . venv/bin/activate
-            NYLAS_ENV=test py.test tests
+            NYLAS_ENV=test py.test inbox/test/
