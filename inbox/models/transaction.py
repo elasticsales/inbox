@@ -3,6 +3,7 @@ from sqlalchemy import (Column, BigInteger, String, Index, Enum,
 from sqlalchemy.orm import relationship
 
 from inbox.models.base import MailSyncBase
+from inbox.models.category import EPOCH
 from inbox.models.mixins import HasPublicID, HasRevisions
 from inbox.models.namespace import Namespace
 
@@ -82,6 +83,11 @@ def create_revision(obj, session, revision_type):
     # between object timestamps and the transaction timestamps.
     if revision_type == 'delete':
         created_at = getattr(obj, 'deleted_at', None)
+        # Sometimes categories are deleted explicitly which leaves
+        # their deleted_at default value, EPOCH, when the
+        # transaction is created.
+        if created_at == EPOCH:
+            created_at = func.now()
     else:
         created_at = getattr(obj, 'updated_at', None)
 
