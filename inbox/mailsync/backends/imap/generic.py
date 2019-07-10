@@ -182,7 +182,11 @@ class FolderSyncEngine(Greenlet):
         self.heartbeat_status.publish()
 
         def start_sync(saved_folder_status):
-            sync_end_time = saved_folder_status.metrics.get('sync_end_time')
+            # Ensure we don't cause an error if the folder was deleted.
+            sync_end_time = (
+                saved_folder_status.folder and
+                saved_folder_status.metrics.get('sync_end_time')
+            )
             if sync_end_time:
                 sync_delay = datetime.utcnow() - sync_end_time
                 if sync_delay > timedelta(days=1):
