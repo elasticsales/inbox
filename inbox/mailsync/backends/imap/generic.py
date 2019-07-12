@@ -279,7 +279,6 @@ class FolderSyncEngine(Greenlet):
         # they are never out of sync.
         with session_scope(self.namespace_id) as db_session:
             try:
-                state = ImapFolderSyncStatus.state
                 saved_folder_status = db_session.query(ImapFolderSyncStatus)\
                     .filter_by(account_id=self.account_id, folder_id=self.folder_id)\
                     .one()
