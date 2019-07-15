@@ -2,7 +2,7 @@ version: 2.1
 jobs:
   build:
     docker:
-      - image: python:2.7
+      - image: circleci/python:2.7-jessie
       - image: mysql:5.7.19
         environment:
           MYSQL_ROOT_PASSWORD: nylas_it
