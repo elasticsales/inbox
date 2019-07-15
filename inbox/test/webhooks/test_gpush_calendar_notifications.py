@@ -60,35 +60,35 @@ def test_should_update_logic(db, watched_account, watched_calendar):
 
     ten_minutes = timedelta(minutes=10)
     # Never synced - should update
-    assert watched_account.should_update_calendars(ten_minutes)
-    assert watched_calendar.should_update_events(ten_minutes)
+    assert watched_account.should_update_calendars(ten_minutes, 0)
+    assert watched_calendar.should_update_events(ten_minutes, 0)
 
     five_minutes_ago = datetime.utcnow() - timedelta(minutes=5)
     watched_account.last_calendar_list_sync = five_minutes_ago
     watched_calendar.last_synced = five_minutes_ago
-    assert not watched_account.should_update_calendars(ten_minutes)
-    assert not watched_calendar.should_update_events(ten_minutes)
+    assert not watched_account.should_update_calendars(ten_minutes, 0)
+    assert not watched_calendar.should_update_events(ten_minutes, 0)
 
     four_minutes = timedelta(minutes=4)
-    assert watched_account.should_update_calendars(four_minutes)
-    assert watched_calendar.should_update_events(four_minutes)
+    assert watched_account.should_update_calendars(four_minutes, 0)
+    assert watched_calendar.should_update_events(four_minutes, 0)
 
     watched_account.handle_gpush_notification()
     watched_calendar.handle_gpush_notification()
-    assert watched_account.should_update_calendars(ten_minutes)
-    assert watched_calendar.should_update_events(ten_minutes)
+    assert watched_account.should_update_calendars(ten_minutes, 0)
+    assert watched_calendar.should_update_events(ten_minutes, 0)
 
     watched_account.last_calendar_list_sync = datetime.utcnow()
     watched_calendar.last_synced = datetime.utcnow()
 
-    assert not watched_account.should_update_calendars(ten_minutes)
-    assert not watched_calendar.should_update_events(ten_minutes)
+    assert not watched_account.should_update_calendars(ten_minutes, 0)
+    assert not watched_calendar.should_update_events(ten_minutes, 0)
 
     # If watch is expired, should always update
     watched_account.new_calendar_list_watch(WATCH_EXPIRATION)
     watched_calendar.new_event_watch(WATCH_EXPIRATION)
-    assert watched_account.should_update_calendars(ten_minutes)
-    assert watched_calendar.should_update_events(ten_minutes)
+    assert watched_account.should_update_calendars(ten_minutes, 0)
+    assert watched_calendar.should_update_events(ten_minutes, 0)
 
 
 def test_needs_new_watch_logic(db, watched_account, watched_calendar):
