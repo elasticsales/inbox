@@ -306,8 +306,8 @@ class GmailAccount(OAuthAccount, ImapAccount):
             (now > self.last_calendar_list_sync + max_time_between_syncs) or
             # Push notifications channel is stale (and we didn't just sync it)
             (
-                self.needs_new_calendar_list_watch()
-                now > self.last_synced + poll_frequency
+                self.needs_new_calendar_list_watch() and
+                now > self.last_calendar_list_sync + poll_frequency
             ) or
             # Our info is stale, according to google's push notifications
             (
