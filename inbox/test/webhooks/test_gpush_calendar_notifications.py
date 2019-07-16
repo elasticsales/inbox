@@ -53,7 +53,11 @@ def watched_calendar(db, default_namespace):
     return calendar
 
 
-def test_should_update_logic(db, watched_account, watched_calendar):
+def test_should_update_logic_push(db, watched_account, watched_calendar):
+    """
+    Ensure we update calendars when a push notification is received, or when
+    the watch is expired.
+    """
     # Watch should be not-expired
     expiration = WATCH_EXPIRATION + 20 * 365 * 24 * 60 * 60 * 1000
     watched_account.new_calendar_list_watch(expiration)
@@ -92,6 +96,32 @@ def test_should_update_logic(db, watched_account, watched_calendar):
     watched_calendar.new_event_watch(WATCH_EXPIRATION)
     assert watched_account.should_update_calendars(ten_minutes, zero)
     assert watched_calendar.should_update_events(ten_minutes, zero)
+
+
+def test_should_update_logic_no_push(db, watched_account, watched_calendar):
+    """
+    Ensure we update calendars with no push at the poll frequency.
+    """
+    assert watched_account.needs_new_calendar_list_watch()
+    assert watched_calendar.needs_new_watch()
+
+    now = datetime.utcnow()
+    ten_seconds_ago = now - timedelta(seconds=10)
+    one_minute_ago = now - timedelta(minutes=1)
+    poll_frequency = timedelta(seconds=30)
+    ten_minutes = timedelta(minutes=10)
+
+    watched_account.last_calendar_list_sync = one_minute_ago
+    watched_calendar.last_synced = one_minute_ago
+    assert watched_account.should_update_calendars(ten_minutes, poll_frequency)
+    assert watched_calendar.should_update_events(ten_minutes, poll_frequency)
+
+    watched_account.last_calendar_list_sync = ten_seconds_ago
+    watched_calendar.last_synced = ten_seconds_ago
+    assert not watched_account.should_update_calendars(ten_minutes,
+                                                       poll_frequency)
+    assert not watched_calendar.should_update_events(ten_minutes,
+                                                     poll_frequency)
 
 
 def test_needs_new_watch_logic(db, watched_account, watched_calendar):
