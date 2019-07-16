@@ -172,7 +172,7 @@ def test_calendar_update(db, webhooks_client, watched_account):
     calendar_path = CALENDAR_LIST_PATH.format(watched_account.public_id)
 
     before = datetime.utcnow() - timedelta(seconds=1)
-    assert watched_account.gpush_calendar_list_last_ping is None
+    watched_account.gpush_calendar_list_last_ping = datetime(2010, 1, 1)
 
     headers = UPDATE_HEADERS.copy()
     headers['X-Goog-Channel-Id'] = ACCOUNT_WATCH_UUID
@@ -199,7 +199,7 @@ def test_event_update(db, webhooks_client, watched_calendar):
     event_path = CALENDAR_PATH.format(watched_calendar.public_id)
 
     before = datetime.utcnow() - timedelta(seconds=1)
-    assert watched_calendar.gpush_last_ping is None
+    watched_calendar.gpush_last_ping = datetime(2010, 1, 1)
 
     headers = UPDATE_HEADERS.copy()
     headers['X-Goog-Channel-Id'] = CALENDAR_WATCH_UUID
