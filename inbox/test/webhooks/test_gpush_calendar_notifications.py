@@ -66,28 +66,39 @@ def test_should_update_logic_push(db, watched_account, watched_calendar):
     zero = timedelta()
 
     ten_minutes = timedelta(minutes=10)
+    five_minutes_ago = datetime.utcnow() - timedelta(minutes=5)
+    fifteen_minutes_ago = datetime.utcnow() - timedelta(minutes=15)
+
     # Never synced - should update
     assert watched_account.should_update_calendars(ten_minutes, zero)
     assert watched_calendar.should_update_events(ten_minutes, zero)
 
-    five_minutes_ago = datetime.utcnow() - timedelta(minutes=5)
+    # Watch renewed - should update
     watched_account.last_calendar_list_sync = five_minutes_ago
     watched_calendar.last_synced = five_minutes_ago
+    assert watched_account.should_update_calendars(ten_minutes, zero)
+    assert watched_calendar.should_update_events(ten_minutes, zero)
+
+    # Updated recently and no webhook received - should not update
+    watched_account.gpush_calendar_list_last_ping = fifteen_minutes_ago
+    watched_calendar.gpush_last_ping = fifteen_minutes_ago
     assert not watched_account.should_update_calendars(ten_minutes, zero)
     assert not watched_calendar.should_update_events(ten_minutes, zero)
 
+    # Max time between syncs exceeded - should update
     four_minutes = timedelta(minutes=4)
     assert watched_account.should_update_calendars(four_minutes, zero)
     assert watched_calendar.should_update_events(four_minutes, zero)
 
+    # Received push notification - should update
     watched_account.handle_gpush_notification()
     watched_calendar.handle_gpush_notification()
     assert watched_account.should_update_calendars(ten_minutes, zero)
     assert watched_calendar.should_update_events(ten_minutes, zero)
 
+    # Just synced - should not update
     watched_account.last_calendar_list_sync = datetime.utcnow()
     watched_calendar.last_synced = datetime.utcnow()
-
     assert not watched_account.should_update_calendars(ten_minutes, zero)
     assert not watched_calendar.should_update_events(ten_minutes, zero)
 
@@ -98,12 +109,12 @@ def test_should_update_logic_push(db, watched_account, watched_calendar):
     assert watched_calendar.should_update_events(ten_minutes, zero)
 
 
-def test_should_update_logic_no_push(db, watched_account, watched_calendar):
+def test_should_update_logic_no_push(db, default_account, calendar):
     """
     Ensure we update calendars with no push at the poll frequency.
     """
-    assert watched_account.needs_new_calendar_list_watch()
-    assert watched_calendar.needs_new_watch()
+    assert default_account.needs_new_calendar_list_watch()
+    assert calendar.needs_new_watch()
 
     now = datetime.utcnow()
     ten_seconds_ago = now - timedelta(seconds=10)
@@ -111,17 +122,22 @@ def test_should_update_logic_no_push(db, watched_account, watched_calendar):
     poll_frequency = timedelta(seconds=30)
     ten_minutes = timedelta(minutes=10)
 
-    watched_account.last_calendar_list_sync = one_minute_ago
-    watched_calendar.last_synced = one_minute_ago
-    assert watched_account.should_update_calendars(ten_minutes, poll_frequency)
-    assert watched_calendar.should_update_events(ten_minutes, poll_frequency)
+    # Never synced - should update
+    assert default_account.should_update_calendars(ten_minutes, poll_frequency)
+    assert calendar.should_update_events(ten_minutes, poll_frequency)
 
-    watched_account.last_calendar_list_sync = ten_seconds_ago
-    watched_calendar.last_synced = ten_seconds_ago
-    assert not watched_account.should_update_calendars(ten_minutes,
+    # Poll frequency exceeded - should update
+    default_account.last_calendar_list_sync = one_minute_ago
+    calendar.last_synced = one_minute_ago
+    assert default_account.should_update_calendars(ten_minutes, poll_frequency)
+    assert calendar.should_update_events(ten_minutes, poll_frequency)
+
+    # Updated recently - should not update
+    default_account.last_calendar_list_sync = ten_seconds_ago
+    calendar.last_synced = ten_seconds_ago
+    assert not default_account.should_update_calendars(ten_minutes,
                                                        poll_frequency)
-    assert not watched_calendar.should_update_events(ten_minutes,
-                                                     poll_frequency)
+    assert not calendar.should_update_events(ten_minutes, poll_frequency)
 
 
 def test_needs_new_watch_logic(db, watched_account, watched_calendar):

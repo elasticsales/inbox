@@ -285,6 +285,7 @@ class GmailAccount(OAuthAccount, ImapAccount):
         # Google gives us back expiration timestamps in milliseconds
         expiration = datetime.fromtimestamp(int(expiration) / 1000.)
         self.gpush_calendar_list_expiration = expiration
+        self.gpush_calendar_list_last_ping = datetime.utcnow()
 
     def handle_gpush_notification(self):
         self.gpush_calendar_list_last_ping = datetime.utcnow()

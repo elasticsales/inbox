@@ -62,6 +62,7 @@ class Calendar(MailSyncBase, HasPublicID, HasRevisions, UpdatedAtMixin,
         """
         expiration = datetime.fromtimestamp(int(expiration) / 1000.)
         self.gpush_expiration = expiration
+        self.gpush_last_ping = datetime.utcnow()
 
     def handle_gpush_notification(self):
         self.gpush_last_ping = datetime.utcnow()
