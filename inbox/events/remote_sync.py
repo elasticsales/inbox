@@ -209,7 +209,10 @@ class GoogleEventSync(EventSync):
                 self.provider.push_notifications_enabled(account) and
                 kwargs.get('poll_frequency') is None
             ):
-                # Poll more frequently if push notifications are enabled.
+                # Run the sync loop more frequently if push notifications are
+                # enabled. Note that we'll only update the calendar if a
+                # Webhook was receicved recently, or if we haven't synced for
+                # too long.
                 self.poll_frequency = PUSH_NOTIFICATION_POLL_FREQUENCY
 
     def sync(self):
