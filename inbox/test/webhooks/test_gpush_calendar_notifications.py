@@ -1,3 +1,4 @@
+from gevent import sleep
 import pytest
 from datetime import datetime, timedelta
 
@@ -58,37 +59,39 @@ def test_should_update_logic(db, watched_account, watched_calendar):
     watched_account.new_calendar_list_watch(expiration)
     watched_calendar.new_event_watch(expiration)
 
+    zero = timedelta()
+
     ten_minutes = timedelta(minutes=10)
     # Never synced - should update
-    assert watched_account.should_update_calendars(ten_minutes, 0)
-    assert watched_calendar.should_update_events(ten_minutes, 0)
+    assert watched_account.should_update_calendars(ten_minutes, zero)
+    assert watched_calendar.should_update_events(ten_minutes, zero)
 
     five_minutes_ago = datetime.utcnow() - timedelta(minutes=5)
     watched_account.last_calendar_list_sync = five_minutes_ago
     watched_calendar.last_synced = five_minutes_ago
-    assert not watched_account.should_update_calendars(ten_minutes, 0)
-    assert not watched_calendar.should_update_events(ten_minutes, 0)
+    assert not watched_account.should_update_calendars(ten_minutes, zero)
+    assert not watched_calendar.should_update_events(ten_minutes, zero)
 
     four_minutes = timedelta(minutes=4)
-    assert watched_account.should_update_calendars(four_minutes, 0)
-    assert watched_calendar.should_update_events(four_minutes, 0)
+    assert watched_account.should_update_calendars(four_minutes, zero)
+    assert watched_calendar.should_update_events(four_minutes, zero)
 
     watched_account.handle_gpush_notification()
     watched_calendar.handle_gpush_notification()
-    assert watched_account.should_update_calendars(ten_minutes, 0)
-    assert watched_calendar.should_update_events(ten_minutes, 0)
+    assert watched_account.should_update_calendars(ten_minutes, zero)
+    assert watched_calendar.should_update_events(ten_minutes, zero)
 
     watched_account.last_calendar_list_sync = datetime.utcnow()
     watched_calendar.last_synced = datetime.utcnow()
 
-    assert not watched_account.should_update_calendars(ten_minutes, 0)
-    assert not watched_calendar.should_update_events(ten_minutes, 0)
+    assert not watched_account.should_update_calendars(ten_minutes, zero)
+    assert not watched_calendar.should_update_events(ten_minutes, zero)
 
     # If watch is expired, should always update
     watched_account.new_calendar_list_watch(WATCH_EXPIRATION)
     watched_calendar.new_event_watch(WATCH_EXPIRATION)
-    assert watched_account.should_update_calendars(ten_minutes, 0)
-    assert watched_calendar.should_update_events(ten_minutes, 0)
+    assert watched_account.should_update_calendars(ten_minutes, zero)
+    assert watched_calendar.should_update_events(ten_minutes, zero)
 
 
 def test_needs_new_watch_logic(db, watched_account, watched_calendar):
@@ -160,13 +163,7 @@ def test_event_update(db, webhooks_client, watched_calendar):
     gpush_last_ping = watched_calendar.gpush_last_ping
     assert gpush_last_ping > before
 
-    # Test that gpush_last_ping is not updated if already recently updated
-    watched_calendar.gpush_last_ping = gpush_last_ping - timedelta(seconds=2)
-    gpush_last_ping = watched_calendar.gpush_last_ping
-    db.session.commit()
-    r = webhooks_client.post_data(event_path, {}, headers)
-    db.session.refresh(watched_calendar)
-    assert gpush_last_ping == watched_calendar.gpush_last_ping
+    sleep(1)
 
     # Test that gpush_last_ping *is* updated if last updated too long ago
     watched_calendar.gpush_last_ping = gpush_last_ping - timedelta(seconds=22)
