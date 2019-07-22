@@ -149,11 +149,6 @@ class LittleJSON(JSON):
     impl = String(255)
 
 
-class BigJSON(JSON):
-    # if all characters were 4-byte, this would fit in mysql's MEDIUMTEXT
-    impl = Text(4194304)
-
-
 class Base36UID(TypeDecorator):
     impl = BINARY(16)  # 128 bit unsigned integer
 

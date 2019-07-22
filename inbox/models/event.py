@@ -6,10 +6,10 @@ import ast
 from sqlalchemy import (Column, String, ForeignKey, Text, Boolean, Integer,
                         DateTime, Enum, Index, event)
 from sqlalchemy.orm import relationship, backref, validates, reconstructor
-from sqlalchemy.types import TypeDecorator
+from sqlalchemy.types import TypeDecorator, JSON
 from sqlalchemy.dialects.mysql import LONGTEXT
 
-from inbox.sqlalchemy_ext.util import MAX_TEXT_CHARS, BigJSON, MutableList
+from inbox.sqlalchemy_ext.util import MAX_TEXT_CHARS, MutableList
 from inbox.models.base import MailSyncBase
 from inbox.models.mixins import (HasPublicID, HasRevisions, UpdatedAtMixin,
                                  DeletedAtMixin)
@@ -133,7 +133,7 @@ class Event(MailSyncBase, HasRevisions, HasPublicID, UpdatedAtMixin,
     __table_args__ = (Index('ix_event_ns_uid_calendar_id',
                             'namespace_id', 'uid', 'calendar_id'),)
 
-    participants = Column(MutableList.as_mutable(BigJSON), default=[],
+    participants = Column(MutableList.as_mutable(JSON), default=[],
                           nullable=True)
 
     # This is only used by the iCalendar invite code. The sequence number
