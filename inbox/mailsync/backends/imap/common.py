@@ -185,9 +185,9 @@ def remove_deleted_uids(account_id, folder_id, uids):
                 if not message.imapuids and message.is_draft:
                     # Synchronously delete drafts.
                     thread = message.thread
-                    if thread is not None:
-                        thread.messages.remove(message)
                     db_session.delete(message)
+                    #if thread is not None:
+                        #thread.messages.remove(message)
                     if thread is not None and not thread.messages:
                         db_session.delete(thread)
                 else:
