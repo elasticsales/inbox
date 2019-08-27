@@ -7,6 +7,7 @@ from inbox.contacts.crud import INBOX_PROVIDER_NAME
 
 
 def update_contacts_from_message(db_session, message, namespace):
+    # NOTE: If you make changes here, also check update_contacts_from_event.
     with db_session.no_autoflush:
         # First create Contact objects for any email addresses that we haven't
         # seen yet. We want to dedupe by canonicalized address, so this part is
