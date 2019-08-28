@@ -1,4 +1,3 @@
-import uuid
 from datetime import datetime, timedelta
 from requests.exceptions import HTTPError
 
@@ -7,13 +6,10 @@ logger = get_logger()
 
 from inbox.basicauth import AccessNotEnabledError, OAuthError
 from inbox.config import config
-from inbox.contacts.crud import INBOX_PROVIDER_NAME
+from inbox.contacts.processing import update_contacts_from_event
 from inbox.sync.base_sync import BaseSyncMonitor
-from inbox.models import Contact, Event, Calendar
-from inbox.models.contact import EventContactAssociation
+from inbox.models import Event, Calendar
 from inbox.models.event import RecurringEvent, RecurringEventOverride
-from inbox.util.addr import valid_email
-from inbox.util.addr import canonicalize_address as canonicalize
 from inbox.util.debug import bind_context
 from inbox.models.session import session_scope
 
@@ -144,50 +140,6 @@ def handle_calendar_updates(namespace_id, calendars, log, db_session):
     log.info('synced added and updated calendars', added=added_count,
              updated=updated_count)
     return ids_
-
-
-def update_contacts_from_event(db_session, event, namespace_id):
-    # NOTE: If you make changes here, also check update_contacts_from_message.
-    with db_session.no_autoflush:
-        # First create Contact objects for any email addresses that we haven't
-        # seen yet. We want to dedupe by canonicalized address, so this part is
-        # a bit finicky.
-        all_addresses = [(participant['name'], participant['email'])
-                         for participant in event.participants]
-        canonicalized_addresses = [canonicalize(addr) for _, addr in
-                                   all_addresses]
-
-        existing_contacts = db_session.query(Contact).filter(
-            Contact._canonicalized_address.in_(canonicalized_addresses),
-            Contact.namespace_id == namespace_id).all()
-
-        contact_map = {c._canonicalized_address: c for c in existing_contacts}
-        for name, email_address in all_addresses:
-            canonicalized_address = canonicalize(email_address)
-            if canonicalized_address not in contact_map:
-                new_contact = Contact(name=name, email_address=email_address,
-                                      namespace_id=namespace_id,
-                                      provider_name=INBOX_PROVIDER_NAME,
-                                      uid=uuid.uuid4().hex)
-                contact_map[canonicalized_address] = new_contact
-
-        # Now associate each contact to the event.
-        event.contacts = []
-        for name, email_address in all_addresses:
-            if not valid_email(email_address):
-                continue
-            canonicalized_address = canonicalize(email_address)
-            contact = contact_map.get(canonicalized_address)
-            # Hackily address the condition that you get mail from e.g.
-            # "Ben Gotow (via Google Drive) <drive-shares-noreply@google.com"        # noqa
-            # "Christine Spang (via Google Drive) <drive-shares-noreply@google.com"  # noqa
-            # and so on: rather than creating many contacts with
-            # varying name, null out the name for the existing contact.
-            if contact.name != name and 'noreply' in canonicalized_address:
-                contact.name = None
-
-            event.contacts.append(EventContactAssociation(
-                contact=contact))
 
 
 def handle_event_updates(namespace_id, calendar_id, events, log, db_session):

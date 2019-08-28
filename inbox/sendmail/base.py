@@ -5,7 +5,7 @@ import re
 from inbox.api.validation import (
     get_recipients, get_attachments, get_thread, get_message)
 from inbox.api.err import InputError
-from inbox.contacts.process_mail import update_contacts_from_message
+from inbox.contacts.processing import update_contacts_from_message
 from inbox.models import Message, Part
 from inbox.models.action_log import schedule_action
 from inbox.sqlalchemy_ext.util import generate_public_id

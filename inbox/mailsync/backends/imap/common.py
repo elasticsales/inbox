@@ -17,7 +17,7 @@ from sqlalchemy import bindparam, desc
 from sqlalchemy.orm.exc import NoResultFound
 from sqlalchemy.sql.expression import func
 
-from inbox.contacts.process_mail import update_contacts_from_message
+from inbox.contacts.processing import update_contacts_from_message
 from inbox.models import Account, Message, MessageCategory, Folder, ActionLog
 from inbox.models.backends.imap import ImapUid, ImapFolderInfo
 from inbox.models.session import session_scope

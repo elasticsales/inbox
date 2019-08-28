@@ -311,7 +311,7 @@ def add_fake_message(db_session, namespace_id, thread=None, from_addr=None,
                      body='', snippet='', g_msgid=None,
                      add_sent_category=False):
     from inbox.models import Message, Category
-    from inbox.contacts.process_mail import update_contacts_from_message
+    from inbox.contacts.processing import update_contacts_from_message
     m = Message()
     m.namespace_id = namespace_id
     m.from_addr = from_addr or []
