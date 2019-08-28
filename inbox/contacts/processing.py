@@ -53,7 +53,7 @@ def _get_contact_from_map(contact_map, name, email_address):
     return contact
 
 
-def update_contacts_from_message(db_session, message, namespace):
+def update_contacts_from_message(db_session, message, namespace_id):
     with db_session.no_autoflush:
         # First create Contact objects for any email addresses that we haven't
         # seen yet. We want to dedupe by canonicalized address, so this part is
@@ -67,7 +67,7 @@ def update_contacts_from_message(db_session, message, namespace):
             if field is not None:
                 all_addresses.extend(field)
 
-        contact_map = _get_contact_map(db_session, namespace.id, all_addresses)
+        contact_map = _get_contact_map(db_session, namespace_id, all_addresses)
 
         # Now associate each contact to the message.
         for field_name in ('from_addr', 'to_addr', 'cc_addr', 'bcc_addr',
@@ -95,7 +95,6 @@ def update_contacts_from_event(db_session, event, namespace_id):
         contact_map = _get_contact_map(db_session, namespace_id, all_addresses)
 
         # Now associate each contact to the event.
-        event.contacts = []
         for name, email_address in all_addresses:
             contact = _get_contact_from_map(contact_map, name, email_address)
             if not contact:

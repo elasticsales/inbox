@@ -333,7 +333,7 @@ def add_fake_message(db_session, namespace_id, thread=None, from_addr=None,
 
     if thread:
         thread.messages.append(m)
-        update_contacts_from_message(db_session, m, thread.namespace)
+        update_contacts_from_message(db_session, m, thread.namespace.id)
 
         db_session.add(m)
         db_session.commit()

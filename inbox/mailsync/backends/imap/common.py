@@ -250,7 +250,7 @@ def create_imap_message(db_session, account, folder, msg):
                                          folder.canonical_name == 'all')
         update_message_metadata(db_session, account, new_message, is_draft)
 
-    update_contacts_from_message(db_session, new_message, account.namespace)
+    update_contacts_from_message(db_session, new_message, account.namespace.id)
 
     return imapuid
 
