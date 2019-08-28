@@ -117,7 +117,6 @@ class EventContactAssociation(MailSyncBase):
     contact_id = Column(BigInteger, primary_key=True, index=True)
     event_id = Column(ForeignKey(Event.id, ondelete='CASCADE'),
                       primary_key=True)
-    # TODO: verify copy-paste
     # Note: The `cascade` properties need to be a parameter of the backref
     # here, and not of the relationship. Otherwise a sqlalchemy error is thrown
     # when you try to delete an event or a contact.
