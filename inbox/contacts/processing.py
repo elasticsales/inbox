@@ -11,7 +11,7 @@ from inbox.models import (
 from inbox.contacts.crud import INBOX_PROVIDER_NAME
 
 
-def get_contact_map(db_session, namespace_id, all_addresses):
+def _get_contact_map(db_session, namespace_id, all_addresses):
     """
     Retrieves or creates contacts for the given address pairs, returning a dict
     with the canonicalized emails mapped to Contact objects.
@@ -35,7 +35,7 @@ def get_contact_map(db_session, namespace_id, all_addresses):
     return contact_map
 
 
-def get_contact_from_map(contact_map, name, email_address):
+def _get_contact_from_map(contact_map, name, email_address):
     if not valid_email(email_address):
         return
 
@@ -67,7 +67,7 @@ def update_contacts_from_message(db_session, message, namespace):
             if field is not None:
                 all_addresses.extend(field)
 
-        contact_map = get_contact_map(db_session, namespace.id, all_addresses)
+        contact_map = _get_contact_map(db_session, namespace.id, all_addresses)
 
         # Now associate each contact to the message.
         for field_name in ('from_addr', 'to_addr', 'cc_addr', 'bcc_addr',
@@ -76,7 +76,7 @@ def update_contacts_from_message(db_session, message, namespace):
             if field is None:
                 continue
             for name, email_address in field:
-                contact = get_contact_from_map(contact_map, name, email_address)
+                contact = _get_contact_from_map(contact_map, name, email_address)
                 if not contact:
                     continue
 
@@ -92,12 +92,12 @@ def update_contacts_from_event(db_session, event, namespace_id):
         all_addresses = [(participant['name'], participant['email'])
                          for participant in event.participants]
 
-        contact_map = get_contact_map(db_session, namespace_id, all_addresses)
+        contact_map = _get_contact_map(db_session, namespace_id, all_addresses)
 
         # Now associate each contact to the event.
         event.contacts = []
         for name, email_address in all_addresses:
-            contact = get_contact_from_map(contact_map, name, email_address)
+            contact = _get_contact_from_map(contact_map, name, email_address)
             if not contact:
                 continue
 
