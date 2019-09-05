@@ -89,16 +89,31 @@ def update_contacts_from_event(db_session, event, namespace_id):
         # First create Contact objects for any email addresses that we haven't
         # seen yet. We want to dedupe by canonicalized address, so this part is
         # a bit finicky.
+        title_emails = set(event.emails_from_title)
+        description_emails = set(event.emails_from_description)
         all_addresses = [(participant['name'], participant['email'])
                          for participant in event.participants]
+        all_addresses += [('', email) for email in title_emails]
+        all_addresses += [('', email) for email in description_emails]
 
         contact_map = _get_contact_map(db_session, namespace_id, all_addresses)
 
         # Now associate each contact to the event.
-        for name, email_address in all_addresses:
-            contact = _get_contact_from_map(contact_map, name, email_address)
+        for participant in event.participants:
+            contact = _get_contact_from_map(contact_map, participant['name'],
+                participant['email'])
             if not contact:
                 continue
 
             event.contacts.append(EventContactAssociation(contact=contact,
                 field='participant'))
+
+        for field_name, emails in (('title', title_emails),
+                                   ('description', description_emails)):
+            for email in emails:
+                contact = _get_contact_from_map(contact_map, '', email)
+                if not contact:
+                    continue
+
+                event.contacts.append(EventContactAssociation(contact=contact,
+                    field=field_name))
