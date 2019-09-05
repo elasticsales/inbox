@@ -22,9 +22,12 @@ def upgrade():
         sa.Column('id', sa.BigInteger(), nullable=False, autoincrement=True),
         sa.Column('contact_id', sa.BigInteger(), nullable=False),
         sa.Column('event_id', sa.BigInteger(), nullable=False),
+        sa.Column('field',
+                  sa.Enum('participant', 'title', 'description'),
+                  nullable=True),
         sa.ForeignKeyConstraint(['contact_id'], ['contact.id'], ),
         sa.ForeignKeyConstraint(['event_id'], ['event.id'], ),
-        sa.PrimaryKeyConstraint('id', 'contact_id', 'event_id')
+        sa.PrimaryKeyConstraint('id', 'contact_id', 'event_id'),
     )
     op.create_index('ix_eventcontactassociation_created_at', 'eventcontactassociation', ['created_at'], unique=False)
     op.create_index('ix_eventcontactassociation_contact_id', 'eventcontactassociation', ['contact_id'], unique=False)

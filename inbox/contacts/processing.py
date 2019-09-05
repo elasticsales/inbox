@@ -100,4 +100,5 @@ def update_contacts_from_event(db_session, event, namespace_id):
             if not contact:
                 continue
 
-            event.contacts.append(EventContactAssociation(contact=contact))
+            event.contacts.append(EventContactAssociation(contact=contact,
+                field='participant'))
