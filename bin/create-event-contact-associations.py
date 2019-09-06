@@ -40,7 +40,7 @@ def process_shard(shard_id, dry_run):
                 log.info('progress', shard_id=shard_id, n=n,
                          n_skipped=n_skipped, n_updated=n_updated)
 
-            if not event.participants or event.contacts:
+            if event.contacts:
                 continue
 
             if not dry_run:
