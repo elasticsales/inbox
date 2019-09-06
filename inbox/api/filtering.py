@@ -483,9 +483,10 @@ def recurring_events(filters, starts_before, starts_after, ends_before,
 
 
 def events(namespace_id, event_public_id, calendar_public_id, title,
-           description, location, busy, participant_email, starts_before,
-           starts_after, ends_before, ends_after, limit, offset, view,
-           expand_recurring, show_cancelled, db_session):
+           description, location, busy, title_email, description_email,
+           participant_email, any_email, starts_before, starts_after,
+           ends_before, ends_after, limit, offset, view, expand_recurring,
+           show_cancelled, db_session):
 
     query = db_session.query(Event)
 
@@ -527,13 +528,40 @@ def events(namespace_id, event_public_id, calendar_public_id, title,
                 ((Event.status != 'cancelled') & (Event.discriminator !=
                                                   'recurringeventoverride')))
 
+    if title_email is not None:
+        title_email_query = db_session.query(EventContactAssociation.event_id) \
+            .join(Contact, EventContactAssociation.contact_id == Contact.id)\
+            .filter(Contact.email_address == title_email,
+                    Contact.namespace_id == namespace_id,
+                    EventContactAssociation.field == 'title')\
+            .subquery()
+        event_criteria.append(Event.id.in_(title_email_query))
+
+    if description_email is not None:
+        description_email_query = db_session.query(EventContactAssociation.event_id) \
+            .join(Contact, EventContactAssociation.contact_id == Contact.id)\
+            .filter(Contact.email_address == description_email,
+                    Contact.namespace_id == namespace_id,
+                    EventContactAssociation.field == 'description')\
+            .subquery()
+        event_criteria.append(Event.id.in_(description_email_query))
+
     if participant_email is not None:
         participant_email_query = db_session.query(EventContactAssociation.event_id) \
             .join(Contact, EventContactAssociation.contact_id == Contact.id)\
             .filter(Contact.email_address == participant_email,
-                    Contact.namespace_id == namespace_id)\
+                    Contact.namespace_id == namespace_id,
+                    EventContactAssociation.field == 'participant')\
             .subquery()
         event_criteria.append(Event.id.in_(participant_email_query))
+
+    if any_email is not None:
+        description_email_query = db_session.query(EventContactAssociation.event_id) \
+            .join(Contact, EventContactAssociation.contact_id == Contact.id)\
+            .filter(Contact.email_address == any_email,
+                    Contact.namespace_id == namespace_id)\
+            .subquery()
+        event_criteria.append(Event.id.in_(description_email_query))
 
     event_predicate = and_(*event_criteria)
     query = query.filter(event_predicate)

@@ -933,7 +933,10 @@ def event_api():
     g.parser.add_argument('expand_recurring', type=strict_bool,
                           location='args')
     g.parser.add_argument('show_cancelled', type=strict_bool, location='args')
+    g.parser.add_argument('title_email', type=bounded_str, location='args')
+    g.parser.add_argument('description_email', type=bounded_str, location='args')
     g.parser.add_argument('participant_email', type=bounded_str, location='args')
+    g.parser.add_argument('any_email', type=bounded_str, location='args')
 
     args = strict_parse_args(g.parser, request.args)
 
@@ -945,7 +948,10 @@ def event_api():
         description=args['description'],
         location=args['location'],
         busy=args['busy'],
+        title_email=args['title_email'],
+        description_email=args['description_email'],
         participant_email=args['participant_email'],
+        any_email=args['any_email'],
         starts_before=args['starts_before'],
         starts_after=args['starts_after'],
         ends_before=args['ends_before'],
