@@ -98,27 +98,26 @@ def update_contacts_from_event(db_session, event, namespace_id):
         owner = (event.organizer_name or '', event.organizer_email)
         owner_addrs = [owner] if owner[1] else []
 
-        all_addresses = [(participant['name'], participant['email'])
-                         for participant in event.participants]
-        all_addresses += owner_addrs
-        all_addresses += title_addrs
-        all_addresses += description_addrs
+        participant_addrs = [(participant['name'], participant['email'])
+                             for participant in event.participants]
+
+        # Note that title & description emails are purposefully at the end here
+        # since they have no name, and we want _get_contact_map to create a
+        # contact with a name if possible.
+        all_addresses = (
+            participant_addrs
+            + owner_addrs
+            + title_addrs
+            + description_addrs
+        )
 
         contact_map = _get_contact_map(db_session, namespace_id, all_addresses)
 
         # Now associate each contact to the event.
-        for participant in event.participants:
-            contact = _get_contact_from_map(contact_map, participant['name'],
-                participant['email'])
-            if not contact:
-                continue
-
-            event.contacts.append(EventContactAssociation(contact=contact,
-                field='participant'))
-
         for field_name, addrs in (('title', title_addrs),
                                   ('description', description_addrs),
-                                  ('owner', owner_addrs)):
+                                  ('owner', owner_addrs),
+                                  ('participant', participant_addrs)):
             for name, email in addrs:
                 contact = _get_contact_from_map(contact_map, name, email)
                 if not contact:
