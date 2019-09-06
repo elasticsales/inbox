@@ -484,9 +484,9 @@ def recurring_events(filters, starts_before, starts_after, ends_before,
 
 def events(namespace_id, event_public_id, calendar_public_id, title,
            description, location, busy, title_email, description_email,
-           participant_email, any_email, starts_before, starts_after,
-           ends_before, ends_after, limit, offset, view, expand_recurring,
-           show_cancelled, db_session):
+           owner_email, participant_email, any_email, starts_before,
+           starts_after, ends_before, ends_after, limit, offset, view,
+           expand_recurring, show_cancelled, db_session):
 
     query = db_session.query(Event)
 
@@ -546,6 +546,15 @@ def events(namespace_id, event_public_id, calendar_public_id, title,
             .subquery()
         event_criteria.append(Event.id.in_(description_email_query))
 
+    if owner_email is not None:
+        owner_email_query = db_session.query(EventContactAssociation.event_id) \
+            .join(Contact, EventContactAssociation.contact_id == Contact.id)\
+            .filter(Contact.email_address == owner_email,
+                    Contact.namespace_id == namespace_id,
+                    EventContactAssociation.field == 'owner')\
+            .subquery()
+        event_criteria.append(Event.id.in_(owner_email_query))
+
     if participant_email is not None:
         participant_email_query = db_session.query(EventContactAssociation.event_id) \
             .join(Contact, EventContactAssociation.contact_id == Contact.id)\
@@ -556,12 +565,12 @@ def events(namespace_id, event_public_id, calendar_public_id, title,
         event_criteria.append(Event.id.in_(participant_email_query))
 
     if any_email is not None:
-        description_email_query = db_session.query(EventContactAssociation.event_id) \
+        any_email_query = db_session.query(EventContactAssociation.event_id) \
             .join(Contact, EventContactAssociation.contact_id == Contact.id)\
             .filter(Contact.email_address == any_email,
                     Contact.namespace_id == namespace_id)\
             .subquery()
-        event_criteria.append(Event.id.in_(description_email_query))
+        event_criteria.append(Event.id.in_(any_email_query))
 
     event_predicate = and_(*event_criteria)
     query = query.filter(event_predicate)

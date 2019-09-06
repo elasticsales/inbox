@@ -23,7 +23,7 @@ def upgrade():
         sa.Column('contact_id', sa.BigInteger(), nullable=False),
         sa.Column('event_id', sa.BigInteger(), nullable=False),
         sa.Column('field',
-                  sa.Enum('participant', 'title', 'description'),
+                  sa.Enum('participant', 'title', 'description', 'owner'),
                   nullable=True),
         sa.ForeignKeyConstraint(['contact_id'], ['contact.id'], ),
         sa.ForeignKeyConstraint(['event_id'], ['event.id'], ),
