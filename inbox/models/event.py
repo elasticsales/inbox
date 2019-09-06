@@ -355,11 +355,17 @@ class Event(MailSyncBase, HasRevisions, HasPublicID, UpdatedAtMixin,
 
     @property
     def emails_from_description(self):
-        return extract_emails_from_text(self.description)
+        if self.description:
+            return extract_emails_from_text(self.description)
+        else:
+            return []
 
     @property
     def emails_from_title(self):
-        return extract_emails_from_text(self.title)
+        if self.title:
+            return extract_emails_from_text(self.title)
+        else:
+            return []
 
     @classmethod
     def __new__(cls, *args, **kwargs):
