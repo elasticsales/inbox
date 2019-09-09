@@ -31,7 +31,6 @@ def process_shard(shard_id, dry_run, id_start=0):
     with session_scope_by_shard_id(shard_id) as db_session:
         # NOTE: The session is implicitly autoflushed, which ensures no
         # duplicate contacts are created.
-        #event_query = db_session.query(Event)
 
         n = 0
         n_skipped = 0
