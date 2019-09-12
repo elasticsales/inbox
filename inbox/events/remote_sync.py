@@ -300,7 +300,8 @@ class GoogleEventSync(EventSync):
                                             timedelta(seconds=POLL_FREQUENCY))
             )
 
-            # Sync user's primary calendar first
+            # Sync user's primary calendar first. Note that the UID of the
+            # primary calendar corresponds to the user's account email address.
             account_email = account.email_address
             stale_calendars_sorted = sorted(
                 stale_calendars, key=lambda cal: cal.uid != account_email
