@@ -6,7 +6,7 @@ from sqlalchemy.orm.exc import NoResultFound
 from inbox.api.err import NotFoundError
 from inbox.api.kellogs import APIEncoder
 from inbox.heartbeat.status import get_ping_status
-from inbox.models import Folder, Account, Namespace
+from inbox.models import Calendar, Folder, Account, Namespace
 from inbox.models.backends.generic import GenericAccount
 from inbox.models.backends.imap import ImapAccount, ImapFolderSyncStatus
 from inbox.models.session import global_session_scope
@@ -15,6 +15,54 @@ app = Blueprint(
     'metrics_api',
     __name__,
     url_prefix='/metrics')
+
+
+def _get_calendar_data(db_session, namespace):
+    calendars = db_session.query(Calendar)
+    if namespace:
+        calendars = calendars.filter_by(namespace_id=namespace.id)
+
+    calendar_data = defaultdict(list)
+    for calendar in calendars:
+        account_id = calendar.namespace.account.id
+        calendar_data[account_id].append({
+            'uid': calendar.uid,
+            'name': calendar.name,
+            'last_synced': calendar.last_synced,
+        })
+
+    return calendar_data
+
+
+def _get_folder_data(db_session, accounts):
+    folder_sync_statuses = db_session.query(ImapFolderSyncStatus)
+    if len(accounts) == 1:
+        folder_sync_statuses = folder_sync_statuses.filter(
+            ImapFolderSyncStatus.account_id==accounts[0].id)
+    folder_sync_statuses = folder_sync_statuses.join(Folder).with_entities(
+        ImapFolderSyncStatus.account_id,
+        ImapFolderSyncStatus.folder_id,
+        Folder.name,
+        ImapFolderSyncStatus.state,
+        ImapFolderSyncStatus._metrics
+    )
+
+    folder_data = defaultdict(dict)
+
+    for folder_sync_status in folder_sync_statuses:
+        account_id, folder_id, folder_name, state, metrics = folder_sync_status
+        folder_data[account_id][folder_id] = {
+            'remote_uid_count': metrics.get('remote_uid_count'),
+            'download_uid_count': metrics.get('download_uid_count'),
+            'state': state,
+            'name': folder_name,
+            'alive': False,
+            'heartbeat_at': None,
+            'run_state': metrics.get('run_state'),
+            'sync_error': metrics.get('sync_error'),
+        }
+    return folder_data
+
 
 @app.route('/')
 def index():
@@ -44,35 +92,11 @@ def index():
 
         accounts = list(accounts)
 
+        folder_data = _get_folder_data(db_session, accounts)
+        calendar_data = _get_calendar_data(db_session, namespace)
         heartbeat = get_ping_status(account_ids=[acc.id for acc in accounts])
-        folder_sync_statuses = db_session.query(ImapFolderSyncStatus)
-        if len(accounts) == 1:
-            folder_sync_statuses = folder_sync_statuses.filter(
-                ImapFolderSyncStatus.account_id==accounts[0].id)
-        folder_sync_statuses = folder_sync_statuses.join(Folder).with_entities(
-            ImapFolderSyncStatus.account_id,
-            ImapFolderSyncStatus.folder_id,
-            Folder.name,
-            ImapFolderSyncStatus.state,
-            ImapFolderSyncStatus._metrics
-        )
 
         data = []
-
-        folder_data = defaultdict(dict)
-
-        for folder_sync_status in folder_sync_statuses:
-            account_id, folder_id, folder_name, state, metrics = folder_sync_status
-            folder_data[account_id][folder_id] = {
-                'remote_uid_count': metrics.get('remote_uid_count'),
-                'download_uid_count': metrics.get('download_uid_count'),
-                'state': state,
-                'name': folder_name,
-                'alive': False,
-                'heartbeat_at': None,
-                'run_state': metrics.get('run_state'),
-                'sync_error': metrics.get('sync_error'),
-            }
 
         for account in accounts:
             if account.id in heartbeat:
@@ -125,6 +149,7 @@ def index():
                 'provider_name': account.provider,
                 'email_address': account.email_address,
                 'folders': sorted(folder_data[account.id].values(), key=itemgetter('name')),
+                'calendars': sorted(calendar_data[account.id], key=itemgetter('name')),
                 'sync_status': sync_status_str,
                 'sync_error': sync_status.get('sync_error'),
                 'sync_end_time': sync_status.get('sync_end_time'),
