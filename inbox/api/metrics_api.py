@@ -5,6 +5,7 @@ from sqlalchemy.orm.exc import NoResultFound
 
 from inbox.api.err import NotFoundError
 from inbox.api.kellogs import APIEncoder
+from inbox.events.remote_sync import EVENT_SYNC_FOLDER_ID
 from inbox.heartbeat.status import get_ping_status
 from inbox.models import Calendar, Folder, Account, Namespace
 from inbox.models.backends.generic import GenericAccount
@@ -25,10 +26,19 @@ def _get_calendar_data(db_session, namespace):
     calendar_data = defaultdict(list)
     for calendar in calendars:
         account_id = calendar.namespace.account.id
+
+        state = None
+        if calendar.can_sync():
+            if calendar.last_synced:
+                state = 'running'
+            else:
+                state = 'initial'
+
         calendar_data[account_id].append({
             'uid': calendar.uid,
             'name': calendar.name,
             'last_synced': calendar.last_synced,
+            'state': state,
         })
 
     return calendar_data
@@ -102,17 +112,33 @@ def index():
             if account.id in heartbeat:
                 account_heartbeat = heartbeat[account.id]
                 account_folder_data = folder_data[account.id]
-                alive = bool(account_heartbeat.folders)
+                account_calendar_data = calendar_data[account.id]
+
+                events_alive = False
+
                 for folder_status in account_heartbeat.folders:
                     folder_status_id = int(folder_status.id)
                     if folder_status_id in account_folder_data:
-                        alive = alive and folder_status.alive
                         account_folder_data[folder_status_id].update({
                             'alive': folder_status.alive,
                             'heartbeat_at': folder_status.timestamp
                         })
+                    elif folder_status_id == EVENT_SYNC_FOLDER_ID:
+                        events_alive = folder_status.alive
 
-                initial_sync = any(f['state'] == 'initial' for f in account_folder_data.values())
+                email_alive = all(f['alive'] for f in account_folder_data.values())
+
+                alive = True
+                if account.sync_email and not email_alive:
+                    alive = False
+                if account.sync_events and not events_alive:
+                    alive = False
+
+                email_initial_sync = any(f['state'] == 'initial'
+                        for f in account_folder_data.values())
+                events_initial_sync = any(c['state'] == 'initial'
+                        for c in account_calendar_data)
+                initial_sync = email_initial_sync or events_initial_sync
 
                 total_uids = sum(f['remote_uid_count'] or 0 for f in account_folder_data.values())
                 remaining_uids = sum(f['download_uid_count'] or 0 for f in account_folder_data.values())
@@ -122,6 +148,8 @@ def index():
                     progress = None
             else:
                 alive = False
+                email_initial_sync = None
+                events_initial_sync = None
                 initial_sync = None
                 progress = None
 
@@ -135,8 +163,10 @@ def index():
                 else:
                     sync_status_str = 'running'
             elif is_running:
+                # Nylas is syncing, but not all heartbeats are reporting.
                 sync_status_str = 'delayed'
             else:
+                # Nylas is no longer syncing this account.
                 sync_status_str = 'dead'
 
             data.append({
@@ -144,7 +174,11 @@ def index():
                 'namespace_private_id': account.namespace.id,
                 'account_id': account.public_id,
                 'namespace_id': account.namespace.public_id,
+                'events_alive': events_alive,
+                'email_alive': email_alive,
                 'alive': alive,
+                'email_initial_sync': email_initial_sync,
+                'events_initial_sync': events_initial_sync,
                 'initial_sync': initial_sync,
                 'provider_name': account.provider,
                 'email_address': account.email_address,
