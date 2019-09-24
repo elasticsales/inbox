@@ -1,7 +1,7 @@
 from collections import defaultdict
 from flask import Blueprint, jsonify, request
 from operator import itemgetter
-from sqlalchemy.orm import joinedload, load_only
+from sqlalchemy.orm import joinedload, load_only, noload
 from sqlalchemy.orm.exc import NoResultFound
 
 from inbox.api.err import NotFoundError
@@ -25,7 +25,9 @@ def _get_calendar_data(db_session, namespace):
         calendars = calendars.filter_by(namespace_id=namespace.id)
 
     calendars = calendars.options(
-        joinedload(Calendar.namespace).load_only(Namespace.account_id))
+        joinedload(Calendar.namespace)
+        .load_only(Namespace.account_id)
+        .noload(Namespace.account))
 
     calendar_data = defaultdict(list)
     for calendar in calendars:
