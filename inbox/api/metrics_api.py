@@ -52,6 +52,8 @@ def _get_calendar_data(db_session, namespace):
 
 def _get_folder_data(db_session, accounts):
     folder_sync_statuses = db_session.query(ImapFolderSyncStatus)
+    # This assumes that the only cases for metrics we have is 1) fetching
+    # metrics for a specific account, and 2) fetching metrics for all accounts.
     if len(accounts) == 1:
         folder_sync_statuses = folder_sync_statuses.filter(
             ImapFolderSyncStatus.account_id==accounts[0].id)
