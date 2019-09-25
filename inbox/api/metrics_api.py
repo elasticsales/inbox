@@ -193,6 +193,7 @@ def index():
                 'sync_status': sync_status_str,
                 'sync_error': sync_status.get('sync_error'),
                 'sync_end_time': sync_status.get('sync_end_time'),
+                'sync_disabled_reason': sync_status.get('sync_disabled_reason'),
                 'sync_host': account.sync_host,
                 'progress': progress,
                 'throttled': account.throttled,
