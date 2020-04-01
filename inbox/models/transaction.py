@@ -1,7 +1,10 @@
+import requests
+
 from sqlalchemy import (Column, BigInteger, String, Index, Enum,
                         inspect, func)
 from sqlalchemy.orm import relationship
 
+from inbox.config import config
 from inbox.models.base import MailSyncBase
 from inbox.models.category import EPOCH
 from inbox.models.mixins import HasPublicID, HasRevisions
@@ -102,7 +105,8 @@ def create_revision(obj, session, revision_type):
                            namespace_id=obj.namespace.id,
                            created_at=created_at)
     session.add(revision)
-
+    send_revision_webhook(
+        revision_type, obj.API_OBJECT_NAME, obj.public_id, obj.namespace.id, created_at)
     # Additionally, record account-level events in the AccountTransaction --
     # this is an optimization needed so these sparse events can be still be
     # retrieved efficiently for webhooks etc.
@@ -112,6 +116,24 @@ def create_revision(obj, session, revision_type):
                                       object_public_id=obj.public_id,
                                       namespace_id=obj.namespace.id)
         session.add(revision)
+
+
+def send_revision_webhook(revision_type, object_name, public_id, namespace_id, created_at):
+    """
+    Send revision webhooks.
+
+    If enabled the webhook will be called with revision details. Errors are not
+    raised if delivery fails.
+    """
+
+    try:
+        if not config.get('REVISION_WEBHOOK_URL'):
+            return
+        payload = {'revision_type': revision_type, 'object_name': object_name,
+                   'public_id': public_id, 'namespace_id': namespace_id, 'created_at': created_at}
+        request.post(config.get('REVISION_WEBHOOK_URL'), data=payload)
+    except Exception:
+        pass
 
 
 def propagate_changes(session):
