@@ -1,17 +1,19 @@
 from collections import defaultdict
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, request, g
 from operator import itemgetter
-from sqlalchemy.orm import joinedload, load_only, noload
+from sqlalchemy.orm import joinedload
 from sqlalchemy.orm.exc import NoResultFound
 
-from inbox.api.err import NotFoundError
+from inbox.api.err import InputError
 from inbox.api.kellogs import APIEncoder
+from inbox.api.validation import valid_public_id, strict_parse_args
 from inbox.events.remote_sync import EVENT_SYNC_FOLDER_ID
 from inbox.heartbeat.status import get_ping_status
-from inbox.models import Calendar, Folder, Account, Namespace
+from inbox.models import Calendar, Folder, Account, Namespace, Transaction
 from inbox.models.backends.generic import GenericAccount
 from inbox.models.backends.imap import ImapAccount, ImapFolderSyncStatus
 from inbox.models.session import global_session_scope
+
 
 app = Blueprint(
     'metrics_api',
@@ -206,3 +208,37 @@ def index():
             })
 
         return APIEncoder().jsonify(data)
+
+
+@app.route('/global-deltas')
+def global_deltas():
+    from inbox.models.transaction import TXN_REDIS_KEY, get_redis_txn_client
+    redis_txn = get_redis_txn_client()
+    cursor = request.args.get('cursor', '0')
+
+    try:
+        start_pointer = int(cursor)
+    except ValueError:
+        try:
+            start_pointer, = (
+                g.db_session
+                .query(Transaction.id)
+                .filter(Transaction.public_id == cursor)
+                .one()
+            )
+        except NoResultFound:
+            raise InputError('Invalid cursor parameter')
+
+    txns = redis_txn.zrangebyscore(
+        TXN_REDIS_KEY,
+        start_pointer,
+        "+inf",
+        withscores=True,
+        score_cast_func=int,
+    )
+    response = {
+        'cursor_start': start_pointer,
+        'cursor_end': max([t[1] for t in txns] or [0]),
+        'deltas': [t[0] for t in txns],
+    }
+    return APIEncoder().jsonify(response)

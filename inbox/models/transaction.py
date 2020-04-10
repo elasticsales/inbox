@@ -1,11 +1,15 @@
+import redis
 from sqlalchemy import (Column, BigInteger, String, Index, Enum,
                         inspect, func)
 from sqlalchemy.orm import relationship
 
+from inbox.config import config
 from inbox.models.base import MailSyncBase
 from inbox.models.category import EPOCH
 from inbox.models.mixins import HasPublicID, HasRevisions
 from inbox.models.namespace import Namespace
+
+TXN_REDIS_KEY = 'latest-txn-by-namespace'
 
 
 class Transaction(MailSyncBase, HasPublicID):
@@ -142,3 +146,28 @@ def increment_versions(session):
         if isinstance(obj, Metadata) and is_dirty(session, obj):
             # This issues SQL for an atomic increment.
             obj.version = Metadata.version + 1  # TODO what's going on here?
+
+
+def get_redis_txn_client():
+    return redis.Redis(
+        config.get("THROTTLE_REDIS_HOSTNAME"),
+        int(config.get("REDIS_PORT")),
+        db=config.get("THROTTLE_REDIS_DB"),
+    )
+
+
+def bump_redis_txn_id(session):
+    """
+    Called from post-flush hook to bump the latest id stored in redis
+    """
+    print('bump redis txn id')
+    redis_txn = get_redis_txn_client()
+
+    mappings = {
+        str(obj.namespace_id): obj.id
+        for obj in session
+        if obj in session.new and isinstance(obj, Transaction) and obj.id
+    }
+    if mappings:
+        print('mappings {}'.format(mappings))
+        redis_txn.zadd(TXN_REDIS_KEY, **mappings)

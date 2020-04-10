@@ -83,8 +83,10 @@ def new_session(engine, versioned=True):
 
 
 def configure_versioning(session):
-    from inbox.models.transaction import (create_revisions, propagate_changes,
-                                          increment_versions)
+    from inbox.models.transaction import (
+        create_revisions, propagate_changes, increment_versions,
+        bump_redis_txn_id
+    )
 
     @event.listens_for(session, 'before_flush')
     def before_flush(session, flush_context, instances):
@@ -98,6 +100,8 @@ def configure_versioning(session):
         grab object IDs on new objects.
 
         """
+        # Note: `bump_redis_txn_id` __must__ come first
+        bump_redis_txn_id(session)
         create_revisions(session)
 
     return session
