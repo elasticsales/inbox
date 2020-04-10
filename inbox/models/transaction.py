@@ -160,7 +160,6 @@ def bump_redis_txn_id(session):
     """
     Called from post-flush hook to bump the latest id stored in redis
     """
-    print('bump redis txn id')
     redis_txn = get_redis_txn_client()
 
     mappings = {
@@ -169,5 +168,4 @@ def bump_redis_txn_id(session):
         if obj in session.new and isinstance(obj, Transaction) and obj.id
     }
     if mappings:
-        print('mappings {}'.format(mappings))
         redis_txn.zadd(TXN_REDIS_KEY, **mappings)
