@@ -45,7 +45,6 @@
 "REDIS_SHARDS": ["127.0.0.1"],
 "REDIS_PORT": 6379,
 "TXN_REDIS_HOSTNAME": "127.0.0.1",
-// defaults to localhost, which breaks tests. TODO fix those tests
 "THROTTLE_REDIS_HOSTNAME": "doesntexist",
 
 "BASE_ALIVE_THRESHOLD": 480,
