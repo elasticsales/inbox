@@ -9,6 +9,7 @@ jobs:
           MYSQL_USER: inboxtest
           MYSQL_PASSWORD: inboxtest
           MYSQL_DATABASE: synctest
+      - image: redis:4.0.6
     working_directory: ~/inbox
 
     steps:

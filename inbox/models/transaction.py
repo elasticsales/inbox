@@ -150,7 +150,7 @@ def increment_versions(session):
 
 def get_redis_txn_client():
     return redis.Redis(
-        config.get("THROTTLE_REDIS_HOSTNAME"),
+        config.get("TXN_REDIS_HOSTNAME"),
         int(config.get("REDIS_PORT")),
         db=config.get("THROTTLE_REDIS_DB"),
     )
