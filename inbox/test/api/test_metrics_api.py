@@ -2,14 +2,13 @@ import json
 
 import pytest
 from inbox.test.util.base import add_fake_message
-from inbox.models.transaction import get_redis_txn_client
+from inbox.ignition import redis_txn
 
 
 class TestGlobalDeltas:
     @pytest.fixture(autouse=True)
     def clear_redis(self):
-        redis = get_redis_txn_client()
-        redis.flushdb()
+        redis_txn.flushdb()
 
     @pytest.yield_fixture
     def unauthed_api_client(self, db, default_namespace):

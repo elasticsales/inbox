@@ -4,6 +4,7 @@ from sqlalchemy import (Column, BigInteger, String, Index, Enum,
 from sqlalchemy.orm import relationship
 
 from inbox.config import config
+from inbox.ignition import redis_txn
 from inbox.models.base import MailSyncBase
 from inbox.models.category import EPOCH
 from inbox.models.mixins import HasPublicID, HasRevisions
@@ -148,20 +149,10 @@ def increment_versions(session):
             obj.version = Metadata.version + 1  # TODO what's going on here?
 
 
-def get_redis_txn_client():
-    return redis.Redis(
-        config.get("TXN_REDIS_HOSTNAME"),
-        int(config.get("REDIS_PORT")),
-        db=config.get("THROTTLE_REDIS_DB"),
-    )
-
-
 def bump_redis_txn_id(session):
     """
     Called from post-flush hook to bump the latest id stored in redis
     """
-    redis_txn = get_redis_txn_client()
-
     mappings = {
         str(obj.namespace_id): obj.id
         for obj in session

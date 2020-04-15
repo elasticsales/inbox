@@ -9,10 +9,9 @@ from sqlalchemy.orm.exc import NoResultFound
 
 import limitlion
 
+from inbox.ignition import redis_txn
 from inbox.models import Account, Block, Message, Namespace
-from inbox.models.transaction import (
-    Transaction, get_redis_txn_client, TXN_REDIS_KEY,
-)
+from inbox.models.transaction import Transaction, TXN_REDIS_KEY
 from inbox.util.blockstore import delete_from_blockstore
 from inbox.util.stats import statsd_client
 from inbox.models.session import session_scope
@@ -391,11 +390,10 @@ def purge_transactions(shard_id, days_ago=60, limit=1000, throttle=False,
 
     # remove old entries from the redis transaction zset
     try:
-        redis = get_redis_txn_client()
         min_txn_id, = (
             db_session.query(Transaction.id).order_by(Transaction.id).first()
         )
-        redis.zremrangebyscore(TXN_REDIS_KEY, "-inf", min_txn_id)
+        redis_txn.zremrangebyscore(TXN_REDIS_KEY, "-inf", min_txn_id)
         log.info(
             "Finished purging transaction entries from redis",
             min_id=min_txn_id, date_delta=days_ago

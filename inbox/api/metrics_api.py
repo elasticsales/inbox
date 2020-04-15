@@ -212,8 +212,8 @@ def index():
 
 @app.route('/global-deltas')
 def global_deltas():
-    from inbox.models.transaction import TXN_REDIS_KEY, get_redis_txn_client
-    redis_txn = get_redis_txn_client()
+    from inbox.ignition import redis_txn
+    from inbox.models.transaction import TXN_REDIS_KEY
     cursor = request.args.get('cursor', '0')
 
     try:
