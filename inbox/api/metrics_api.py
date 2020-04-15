@@ -231,14 +231,14 @@ def global_deltas():
 
     txns = redis_txn.zrangebyscore(
         TXN_REDIS_KEY,
-        start_pointer,
+        '({}'.format(start_pointer),  # don't include start pointer
         "+inf",
         withscores=True,
         score_cast_func=int,
     )
     response = {
         'cursor_start': start_pointer,
-        'cursor_end': max([t[1] for t in txns] or [0]),
+        'cursor_end': max([t[1] for t in txns] or [start_pointer]),
         'deltas': [t[0] for t in txns],
     }
     return APIEncoder().jsonify(response)
