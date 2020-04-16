@@ -100,7 +100,11 @@ def configure_versioning(session):
         grab object IDs on new objects.
 
         """
-        # Note: `bump_redis_txn_id` __must__ come first
+        # Note: `bump_redis_txn_id` __must__ come first. `create_revisions`
+        # creates new objects which haven't been flushed to the db yet.
+        # `bump_redis_txn_id` looks at objects on the session and expects them
+        # to have already have an id (since they've already been flushed to the
+        # db)
         bump_redis_txn_id(session)
         create_revisions(session)
 
