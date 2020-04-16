@@ -33,15 +33,15 @@ class TestGlobalDeltas:
         response = unauthed_api_client.get(deltas_base_url)
         deltas = json.loads(response.data)
         assert str(default_namespace.account_id) in deltas["deltas"]
-        cursor = deltas["cursor_end"]
+        txnid = deltas["txnid_end"]
 
         # pull again, but with a cursor this time. nothing should be returned
         response = unauthed_api_client.get(
-            "/metrics/global-deltas?cursor={}".format(cursor)
+            "/metrics/global-deltas?txnid={}".format(txnid)
         )
         deltas = json.loads(response.data)
         assert not deltas["deltas"]
-        assert cursor == deltas["cursor_end"]
+        assert txnid == deltas["txnid_end"]
 
         # add another fake message
         add_fake_message(
@@ -51,12 +51,12 @@ class TestGlobalDeltas:
             from_addr=[("Bob", "bob@foocorp.com")],
         )
 
-        # pull for global deltas again with a cursor
+        # pull for global deltas again with a txnid
         response = unauthed_api_client.get(
-            "/metrics/global-deltas?cursor={}".format(cursor)
+            "/metrics/global-deltas?txnid={}".format(txnid)
         )
         deltas = json.loads(response.data)
 
         # the default namespace should be returned again
         assert str(default_namespace.account_id) in deltas["deltas"]
-        assert deltas["cursor_end"] > cursor
+        assert deltas["txnid_end"] > txnid

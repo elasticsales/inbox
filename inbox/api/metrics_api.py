@@ -214,10 +214,10 @@ def index():
 def global_deltas():
     from inbox.ignition import redis_txn
     from inbox.models.transaction import TXN_REDIS_KEY
-    cursor = request.args.get('cursor', '0')
+    txnid = request.args.get('txnid', '0')
 
     try:
-        start_pointer = int(cursor)
+        start_pointer = int(txnid)
     except ValueError:
         raise InputError('Invalid cursor parameter')
 
@@ -229,8 +229,8 @@ def global_deltas():
         score_cast_func=int,
     )
     response = {
-        'cursor_start': start_pointer,
-        'cursor_end': max([t[1] for t in txns] or [start_pointer]),
+        'txnid_start': start_pointer,
+        'txnid_end': max([t[1] for t in txns] or [start_pointer]),
         'deltas': [t[0] for t in txns],
     }
     return APIEncoder().jsonify(response)
