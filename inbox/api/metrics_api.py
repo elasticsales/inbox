@@ -219,15 +219,7 @@ def global_deltas():
     try:
         start_pointer = int(cursor)
     except ValueError:
-        try:
-            start_pointer, = (
-                g.db_session
-                .query(Transaction.id)
-                .filter(Transaction.public_id == cursor)
-                .one()
-            )
-        except NoResultFound:
-            raise InputError('Invalid cursor parameter')
+        raise InputError('Invalid cursor parameter')
 
     txns = redis_txn.zrangebyscore(
         TXN_REDIS_KEY,
