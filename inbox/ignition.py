@@ -247,5 +247,5 @@ limitlion.throttle_configure(redis_limitlion)
 redis_txn = redis.Redis(
     config.get("TXN_REDIS_HOSTNAME"),
     int(config.get("REDIS_PORT")),
-    db=config.get("THROTTLE_REDIS_DB"),
+    db=config.get("TXN_REDIS_DB"),
 )
