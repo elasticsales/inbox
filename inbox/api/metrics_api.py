@@ -1,15 +1,14 @@
 from collections import defaultdict
-from flask import Blueprint, request, g
+from flask import Blueprint, request
 from operator import itemgetter
 from sqlalchemy.orm import joinedload
 from sqlalchemy.orm.exc import NoResultFound
 
 from inbox.api.err import InputError
 from inbox.api.kellogs import APIEncoder
-from inbox.api.validation import valid_public_id, strict_parse_args
 from inbox.events.remote_sync import EVENT_SYNC_FOLDER_ID
 from inbox.heartbeat.status import get_ping_status
-from inbox.models import Calendar, Folder, Account, Namespace, Transaction
+from inbox.models import Calendar, Folder, Account, Namespace
 from inbox.models.backends.generic import GenericAccount
 from inbox.models.backends.imap import ImapAccount, ImapFolderSyncStatus
 from inbox.models.session import global_session_scope
