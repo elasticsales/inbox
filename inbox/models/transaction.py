@@ -153,10 +153,21 @@ def bump_redis_txn_id(session):
     """
     Called from post-flush hook to bump the latest id stored in redis
     """
+    def get_namespace_public_id(namespace_id):
+        # the namespace was just used to create the transaction, so it should
+        # still be in the session
+        namespace = session.query(Namespace).get(namespace_id)
+        return namespace and str(namespace.public_id)
+
     mappings = {
-        str(obj.namespace_id): obj.id
+        get_namespace_public_id(obj.namespace_id): obj.id
         for obj in session
-        if obj in session.new and isinstance(obj, Transaction) and obj.id
+        if (
+            obj in session.new
+            and isinstance(obj, Transaction)
+            and obj.id
+            and get_namespace_public_id(obj.namespace_id)
+        )
     }
     if mappings:
         redis_txn.zadd(TXN_REDIS_KEY, **mappings)

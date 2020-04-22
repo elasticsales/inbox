@@ -32,7 +32,7 @@ class TestGlobalDeltas:
         # pull for global deltas. the default namespace should be returned
         response = unauthed_api_client.get(deltas_base_url)
         deltas = json.loads(response.data)
-        assert str(default_namespace.account_id) in deltas["deltas"]
+        assert str(default_namespace.public_id) in deltas["deltas"]
         txnid = deltas["txnid_end"]
 
         # pull again, but with a cursor this time. nothing should be returned
@@ -58,5 +58,5 @@ class TestGlobalDeltas:
         deltas = json.loads(response.data)
 
         # the default namespace should be returned again
-        assert str(default_namespace.account_id) in deltas["deltas"]
+        assert str(default_namespace.public_id) in deltas["deltas"]
         assert deltas["txnid_end"] > txnid
