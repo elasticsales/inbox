@@ -157,7 +157,15 @@ def bump_redis_txn_id(session):
         # the namespace was just used to create the transaction, so it should
         # still be in the session
         namespace = session.query(Namespace).get(namespace_id)
-        return namespace and str(namespace.public_id)
+        if not namespace:
+            # if not, fall back to querying mysql
+            namespace = (
+                session.query(Namespace)
+                .filter(Namespace.id == namespace_id)
+                .one()
+            )
+
+        return str(namespace.public_id)
 
     mappings = {
         get_namespace_public_id(obj.namespace_id): obj.id
@@ -166,7 +174,6 @@ def bump_redis_txn_id(session):
             obj in session.new
             and isinstance(obj, Transaction)
             and obj.id
-            and get_namespace_public_id(obj.namespace_id)
         )
     }
     if mappings:
