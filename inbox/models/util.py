@@ -4,7 +4,7 @@ import gevent
 import requests
 import datetime
 from collections import OrderedDict
-from sqlalchemy import desc
+from sqlalchemy import desc, func
 from sqlalchemy.orm.exc import NoResultFound
 
 import limitlion
@@ -390,10 +390,11 @@ def purge_transactions(shard_id, days_ago=60, limit=1000, throttle=False,
 
     # remove old entries from the redis transaction zset
     try:
-        min_txn_id, = (
-            db_session.query(Transaction.id).order_by(Transaction.id).first()
+        with session_scope_by_shard_id(shard_id, versioned=False) as db_session:
+            min_txn_id, = db_session.query(func.min(Transaction.id)).one()
+        redis_txn.zremrangebyscore(
+            TXN_REDIS_KEY, "-inf", "({}".format(min_txn_id)
         )
-        redis_txn.zremrangebyscore(TXN_REDIS_KEY, "-inf", min_txn_id)
         log.info(
             "Finished purging transaction entries from redis",
             min_id=min_txn_id, date_delta=days_ago
