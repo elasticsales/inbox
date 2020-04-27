@@ -389,11 +389,16 @@ def purge_transactions(shard_id, days_ago=60, limit=1000, throttle=False,
         log.critical("Exception encountered during deletion", exception=e)
 
     # remove old entries from the redis transaction zset
+    if dry_run:
+        # no dry run for removing things from a redis zset
+        return
     try:
         with session_scope_by_shard_id(shard_id, versioned=False) as db_session:
             min_txn_id, = db_session.query(func.min(Transaction.id)).one()
         redis_txn.zremrangebyscore(
-            TXN_REDIS_KEY, "-inf", "({}".format(min_txn_id)
+            TXN_REDIS_KEY,
+            "-inf",
+            "({}".format(min_txn_id) if min_txn_id is not None else "+inf",
         )
         log.info(
             "Finished purging transaction entries from redis",
