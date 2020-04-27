@@ -19,7 +19,7 @@ jobs:
           name: install dependencies
           command: |
             DEBIAN_FRONTEND=noninteractive sudo apt-get update
-            DEBIAN_FRONTEND=noninteractive sudo apt-get install -y liblua5.2-dev mysql-client
+            DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --force-yes liblua5.2-dev mysql-client
             virtualenv venv
             . venv/bin/activate
             pip install -r requirements_frozen.txt -e .
