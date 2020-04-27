@@ -155,16 +155,9 @@ def bump_redis_txn_id(session):
     """
     def get_namespace_public_id(namespace_id):
         # the namespace was just used to create the transaction, so it should
-        # still be in the session
+        # still be in the session. If not, a sql statement will be emitted.
         namespace = session.query(Namespace).get(namespace_id)
-        if not namespace:
-            # if not, fall back to querying mysql
-            namespace = (
-                session.query(Namespace)
-                .filter(Namespace.id == namespace_id)
-                .one()
-            )
-
+        assert namespace, "namespace for transaction doesn't exist"
         return str(namespace.public_id)
 
     mappings = {
