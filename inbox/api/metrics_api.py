@@ -211,6 +211,13 @@ def index():
 
 @app.route('/global-deltas')
 def global_deltas():
+    """
+    Return the namespaces with recent transactions.
+
+    Also returns `txnid_start` and `txnid_end`, which can be fed back in as the
+    optional `txnid` parameter. `txnid` acts as a cursor, only returning
+    namespaces with transactions newer than the given `txnid`.
+    """
     from inbox.ignition import redis_txn
     from inbox.models.transaction import TXN_REDIS_KEY
     txnid = request.args.get('txnid', '0')
