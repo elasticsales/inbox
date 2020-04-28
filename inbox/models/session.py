@@ -105,7 +105,11 @@ def configure_versioning(session):
         # `bump_redis_txn_id` looks at objects on the session and expects them
         # to have already have an id (since they've already been flushed to the
         # db)
-        bump_redis_txn_id(session)
+        try:
+            bump_redis_txn_id(session)
+        except Exception:
+            log.exception('bump_redis_txn_id exception')
+            pass
         create_revisions(session)
 
     return session
