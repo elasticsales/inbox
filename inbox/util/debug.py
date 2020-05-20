@@ -3,6 +3,8 @@ from functools import wraps
 from pyinstrument import Profiler
 import signal
 
+PYINST_PROFILER = None
+
 
 def profile(func):
     @wraps(func)
@@ -30,6 +32,9 @@ def attach_pyinstrument_profiler():
         delattr(profiler, '_root_frame')
 
     signal.signal(signal.SIGTRAP, handle_signal)
+
+    global PYINST_PROFILER
+    PYINST_PROFILER = profiler
 
 
 def bind_context(gr, role, account_id, *args):

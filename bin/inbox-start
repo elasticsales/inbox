@@ -101,6 +101,9 @@ def main(prod, enable_tracer, enable_profiler, config, process_num, exit_after):
     if enable_profiler:
         inbox_config['DEBUG_PROFILING_ON'] = True
 
+        from inbox.util.debug import attach_pyinstrument_profiler
+        attach_pyinstrument_profiler()
+
     port = 16384 + process_num
     enable_profiler_api = inbox_config.get('DEBUG_PROFILING_ON')
 

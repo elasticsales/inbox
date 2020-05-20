@@ -57,6 +57,28 @@ class ProfilingHTTPFrontend(HTTPFrontend):
                 self.profiler.reset()
             return resp
 
+        @app.route('/pyinst-profile')
+        def profile_text():
+            from inbox.util.debug import PYINST_PROFILER
+            if PYINST_PROFILER is None:
+                return 'Profiling disabled\n', 404
+            ret = PYINST_PROFILER.output_text(color=True)
+            # Work around an arguable bug in pyinstrument in which output gets
+            # frozen after the first call to profiler.output_text()
+            delattr(PYINST_PROFILER, '_root_frame')
+            return ret
+
+        @app.route('/pyinst-profile-html')
+        def profile_html():
+            from inbox.util.debug import PYINST_PROFILER
+            if PYINST_PROFILER is None:
+                return 'Profiling disabled\n', 404
+            ret = PYINST_PROFILER.output_html()
+            # Work around an arguable bug in pyinstrument in which output gets
+            # frozen after the first call to profiler.output_text()
+            delattr(PYINST_PROFILER, '_root_frame')
+            return ret
+
         @app.route('/load')
         def load():
             if self.tracer is None:
