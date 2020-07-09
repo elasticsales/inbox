@@ -7,7 +7,7 @@ The Nylas Sync Engine provides a RESTful API on top of a powerful email sync pla
 
 Need help? [Join our Slack channel ![Slack Invite Button](http://slack-invite.nylas.com/badge.svg)](http://slack-invite.nylas.com)
 
-
+   
 ### Installation and Setup
 
 1. Install the latest versions of [VirtualBox](https://www.virtualbox.org/wiki/Downloads) and [Install Vagrant](http://www.vagrantup.com/downloads.html).
